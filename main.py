@@ -5,19 +5,26 @@ import random
 from message_handling import MessageHandler
 from ai_backend import TextAI, ImageAI
 
-def load_prompt_data(file_path,categories_names):
+def load_prompt_data(file_path):
     # load the prompt data from the csv file
     
     data = pd.read_csv(file_path)
     
     return data
 
-def generate_first_prompt(prompt_data):
+def generate_first_prompt(prompt_data,user_profile):
+
+    likes = user_profile['Likes'].dropna().tolist()
+    dislikes = user_profile['Dislikes'].tolist()
+    # Convert lists to comma-separated strings
+    likes_text = ", ".join(likes)
+    dislikes_text = ", ".join(dislikes)
     
-    preamble = "The enclave's job is to describe an art piece (some form of image, painting, photography, still-frame, etc. dispalyed in 1792x1024 resolution) for a specific human, 'Lana'. We know that Lana Likes: \
+    preamble = f"The enclave's job is to describe an art piece (some form of image, painting, photography, still-frame, etc. dispalyed in 1792x1024 resolution) for a specific human, 'Lana'. We know that Lana Likes: \
 Vibrant colors, symmetry, nature themes, artistic styles, storytelling and interesting world building. \
-Lana Dislikes: Monochromatic colors, apocalyptic themes, single character focus, abstract without clear story, and horror elements.\
-Lana's Preferences lean towards colorful, imaginative, and visually engaging images with a clear narrative or theme. Dislikes include dark, monochromatic, or overly abstract imagery. Create an art piece for Lana that incorporates and thoughtfully blends the below elements."
+Lana Dislikes:{dislikes_text}.\
+Lana Likes: {likes_text}.\
+Create an art piece for Lana that incorporates and thoughtfully blends the below elements."
 
     final_lines =  "What are four possible central themes or stories of the art piece and what important messages are each trying to tell the viewer? \
 Ensure that your choices are highly sophisticated and nuanced, well integrated with the elements and deeply meaningful to the viewer. \
@@ -217,10 +224,13 @@ def main():
     
     categories_path = config['prompt']['categories_path']
     categories_names = config['prompt']['categories_names']
-    prompt_data = load_prompt_data(categories_path,categories_names)
     
+    prompt_data = load_prompt_data(categories_path)
     
-    prompt_1,gen_keywords = generate_first_prompt(prompt_data)
+    profile_path = config['prompt']['profile_path']
+    user_profile = pd.read_csv(profile_path)
+    
+    prompt_1,gen_keywords = generate_first_prompt(prompt_data,user_profile)
     print("First Prompt:\n", prompt_1)  # Print image description prompt
     
     ai_text = TextAI()
