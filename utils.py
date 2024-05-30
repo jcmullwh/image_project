@@ -68,10 +68,8 @@ def load_config(**kwargs):
         print(f"Failed to load config file: {e}")
         raise
     
-def download_and_convert_image(image_url, id, save_path):
+def download_and_convert_image(image_url, image_full_path_and_name):
     try:
-        # Combine save_path and id to create the complete file path
-        file_path = os.path.join(save_path, id + '.jpg')
 
         # Download the image
         response = requests.get(image_url)
@@ -82,11 +80,19 @@ def download_and_convert_image(image_url, id, save_path):
         rgb_image = image.convert('RGB')  # Convert to RGB in case the PNG is in RGBA format
 
         # Save the image as JPG
-        rgb_image.save(file_path, format='JPEG')
-        print(f"Image saved to {file_path}")
+        rgb_image.save(image_full_path_and_name, format='JPEG')
+        print(f"Image saved to {image_full_path_and_name}")
     except requests.exceptions.HTTPError as http_err:
         print(f"HTTP error occurred: {http_err}")
     except requests.exceptions.RequestException as e:
         print(f"Network error occurred: {e}")
+    except Exception as e:
+        print(f"An error occurred while saving the image: {e}")
+        
+def generate_file_location(file_path, id,file_type):
+    try:
+        # Combine save_path and id to create the complete file path
+        file_path = os.path.join(file_path, id + file_type)
+        return file_path
     except Exception as e:
         print(f"An error occurred while saving the image: {e}")
