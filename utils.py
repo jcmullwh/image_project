@@ -1,11 +1,13 @@
-import yaml
-import os
-import requests
-from PIL import Image
+import base64
+import csv
 import io
+import os
 import uuid
 from datetime import datetime
-import csv
+
+import requests
+import yaml
+from PIL import Image
 
 def save_to_csv(data, csv_file, include_headers=True):
     # Check if the CSV file already exists
@@ -70,13 +72,30 @@ def load_config(**kwargs):
     
 def download_and_convert_image(image_url, image_full_path_and_name):
     try:
+        if isinstance(image_url, str) and image_url.startswith("http"):
+            response = requests.get(image_url)
+            response.raise_for_status()
+            image_bytes = response.content
+        else:
+            image_bytes = base64.b64decode(image_url)
 
-        # Download the image
-        response = requests.get(image_url)
-        response.raise_for_status()
+        image = Image.open(io.BytesIO(image_bytes))
+        rgb_image = image.convert('RGB')  # Convert to RGB in case the PNG is in RGBA format
 
-        # Open the image using Pillow and convert to JPG
-        image = Image.open(io.BytesIO(response.content))
+        # Save the image as JPG
+        rgb_image.save(image_full_path_and_name, format='JPEG')
+        print(f"Image saved to {image_full_path_and_name}")
+    except requests.exceptions.HTTPError as http_err:
+        print(f"HTTP error occurred: {http_err}")
+    except requests.exceptions.RequestException as e:
+        print(f"Network error occurred: {e}")
+    except Exception as e:
+        print(f"An error occurred while saving the image: {e}")
+
+def save_image(image_bytes, image_full_path_and_name):
+    try:
+
+        image = Image.open(io.BytesIO(image_bytes))
         rgb_image = image.convert('RGB')  # Convert to RGB in case the PNG is in RGBA format
 
         # Save the image as JPG

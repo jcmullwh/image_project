@@ -1,6 +1,7 @@
+import base64
 import pandas as pd
 import random
-from utils import load_config, download_and_convert_image, generate_unique_id, save_to_csv,generate_file_location
+from utils import load_config, download_and_convert_image, generate_unique_id, save_image, save_to_csv,generate_file_location
 import random
 from message_handling import MessageHandler
 from ai_backend import TextAI, ImageAI
@@ -129,7 +130,7 @@ Use Action and Emotion Words: When describing scenes or elements, use verbs and 
 
 def generate_dalle_prompt():
     
-    dalle_prompt = "Considering the entire conversation, create a prompt that is optimized for submission to DALL-E3"
+    dalle_prompt = "Considering the entire conversation, create a prompt that is optimized for submission to DALL-E3. It MUST be fewer than 3500 characters."
     return dalle_prompt
 
 
@@ -185,6 +186,11 @@ def enclave_consensus():
     return enclave_consensus_prompt
 
 
+def write_messages_log(log_path: str, messages_text: str):
+    with open(log_path, "w", encoding="utf-8") as file:
+        file.write(messages_text)
+
+
 def message_with_log(ai_text: TextAI,
                     messages_send: MessageHandler,
                     messages_log: MessageHandler,
@@ -231,11 +237,9 @@ def main():
     user_profile = pd.read_csv(profile_path)
     
     prompt_1,gen_keywords = generate_first_prompt(prompt_data,user_profile)
-    print("First Prompt:\n", prompt_1)  # Print image description prompt
+    print("First Prompt:\n", prompt_1)
     
-    ai_text = TextAI()
-    
-    ai_text.backend.set_default("chat",model="gpt-4o")
+    ai_text = TextAI(model="gpt-5.1", reasoning={ "effort": "medium" })
     
     user_role = "user"
     agent_role = "assistant"
@@ -327,14 +331,20 @@ def main():
                                                     temperature=.8
                                                     )
 
-    #image_url = call_dalle(ai_text,image_prompt.content)
     ai_image = ImageAI()
     
-    image_url = ai_image.generate_image(dalle_prompt,size="1792x1024",quality="hd")
+    image_result = ai_image.generate_image(
+        dalle_prompt,
+        model="gpt-image-1",
+        size="1536x1024",
+        quality="high"
+    )
     
-    print("Generated Image URL:\n", image_url)  # Print image URL
-    
-    data = [generation_id, gen_keywords, dalle_prompt, image_url]
+    image_data = image_result['image']
+
+    image_bytes = base64.b64decode(image_data)
+
+    data = [generation_id, gen_keywords, dalle_prompt]
 
     csv_file = config['prompt']['generations_path']
     save_to_csv(data, csv_file)
@@ -342,12 +352,11 @@ def main():
     image_full_path_and_name = generate_file_location(config['image']['save_path'], generation_id+'_image', '.jpg')
     log_full_path_and_name = generate_file_location(config['image']['save_path'], generation_id+'_log', '.txt')
     
-    download_and_convert_image(image_url, image_full_path_and_name)    
+    save_image(image_bytes, image_full_path_and_name)    
     
     messages_text = str(messages_log.messages)
     
-    with open(log_full_path_and_name,'w') as file:
-        file.write(messages_text)
+    write_messages_log(log_full_path_and_name, messages_text)
     
 
 if __name__ == "__main__":
