@@ -1,8 +1,10 @@
 import base64
+import logging
+import os
+import sys
 import pandas as pd
 import random
 from utils import load_config, download_and_convert_image, generate_unique_id, save_image, save_to_csv,generate_file_location
-import random
 from message_handling import MessageHandler
 from ai_backend import TextAI, ImageAI
 
@@ -186,6 +188,48 @@ def enclave_consensus():
     return enclave_consensus_prompt
 
 
+def configure_stdio_utf8():
+    """Force stdout/stderr to UTF-8 so Unicode responses never crash on Windows consoles."""
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        # If reconfigure is unavailable, continue with defaults.
+        pass
+
+def setup_operational_logger(log_dir: str, generation_id: str):
+    """
+    Configure a logger that writes an operational log for traceability.
+    Logs go to both stdout and a UTF-8 file under the provided directory.
+    """
+    os.makedirs(log_dir, exist_ok=True)
+    log_file = generate_file_location(log_dir, f"{generation_id}_oplog", ".log")
+
+    logger_name = f"image_project.{generation_id}"
+    logger = logging.getLogger(logger_name)
+    logger.setLevel(logging.DEBUG)
+    logger.handlers.clear()
+
+    formatter = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
+
+    file_handler = logging.FileHandler(log_file, encoding="utf-8")
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(formatter)
+
+    stream_handler = logging.StreamHandler()
+    stream_handler.setLevel(logging.INFO)
+    stream_handler.setFormatter(formatter)
+
+    logger.addHandler(file_handler)
+    logger.addHandler(stream_handler)
+    logger.propagate = False
+
+    logger.info("Operational logging initialized for generation %s", generation_id)
+    logger.debug("Operational log file: %s", log_file)
+
+    return logger, log_file
+
+
 def write_messages_log(log_path: str, messages_text: str):
     with open(log_path, "w", encoding="utf-8") as file:
         file.write(messages_text)
@@ -197,12 +241,24 @@ def message_with_log(ai_text: TextAI,
                     prompt:str,
                     agent_role:str,
                     user_role:str,
+                    logger: logging.Logger | None = None,
+                    step_name: str | None = None,
                     **kwargs
                     ):
+    label = step_name or prompt[:60]
+    if logger:
+        logger.info("Dispatching prompt: %s", label)
     messages_send.continue_messages(user_role,prompt)
     messages_log.continue_messages(user_role,prompt)
-    response = ai_text.text_chat(messages_send.messages,**kwargs)
+    try:
+        response = ai_text.text_chat(messages_send.messages,**kwargs)
+    except Exception:
+        if logger:
+            logger.exception("AI text chat failed for step %s", label)
+        raise
     print("Response:\n", response)
+    if logger:
+        logger.info("Received response for %s (chars=%d)", label, len(str(response)))
     messages_send.continue_messages(agent_role,response)
     messages_log.continue_messages(agent_role,response)
     return messages_send,messages_log,response
@@ -213,150 +269,206 @@ def tot_enclave(ai_text: TextAI,
                 prompt: str,
                 agent_role: str,
                 user_role:str ,
+                logger: logging.Logger | None = None,
                 **kwargs
                 ):
     messages = messages_main.copy()
-    messages, messages_log,_ = message_with_log(ai_text, messages, messages_log, prompt,agent_role, user_role, **kwargs)
-    messages, messages_log,_ = message_with_log(ai_text, messages, messages_log, enclave_opinion(),agent_role, user_role, **kwargs)
-    messages, messages_log, response = message_with_log(ai_text, messages, messages_log, enclave_consensus(),agent_role, user_role, **kwargs)
+    messages, messages_log,_ = message_with_log(ai_text, messages, messages_log, prompt,agent_role, user_role, logger=logger, **kwargs)
+    messages, messages_log,_ = message_with_log(ai_text, messages, messages_log, enclave_opinion(),agent_role, user_role, logger=logger, **kwargs)
+    messages, messages_log, response = message_with_log(ai_text, messages, messages_log, enclave_consensus(),agent_role, user_role, logger=logger, **kwargs)
     messages_main.continue_messages(agent_role, response)
     return messages_main, messages_log
 
 def main(): 
     
-    config = load_config()
-    
+    configure_stdio_utf8()
     generation_id = generate_unique_id()
-    
-    categories_path = config['prompt']['categories_path']
-    categories_names = config['prompt']['categories_names']
-    
-    prompt_data = load_prompt_data(categories_path)
-    
-    profile_path = config['prompt']['profile_path']
-    user_profile = pd.read_csv(profile_path)
-    
-    prompt_1,gen_keywords = generate_first_prompt(prompt_data,user_profile)
-    print("First Prompt:\n", prompt_1)
-    
-    ai_text = TextAI(model="gpt-5.1", reasoning={ "effort": "medium" })
-    
-    user_role = "user"
-    agent_role = "assistant"
-    system_prompt = "You are a highly skilled enclave of Artists trained to generate meaningful, edgy, artistic images on par with the greatest artists of any time, anywhere, past or future, Earth or any other planet. The enclave invents unique images that weave together seemingly disparate elements into cohesive wholes that push boundaries and elicit deep emotions in a human viewer."
-    
-    messages_main = MessageHandler(system_prompt)
-    messages_main.continue_messages(user_role,prompt_1)
-    response_1 = ai_text.text_chat(messages_main.messages,temperature=.8)
-    print("First Response:\n", response_1)
-    messages_main.continue_messages(agent_role,response_1)
-    # initialize messages_log
-    messages_main, messages_log,_ = message_with_log(ai_text, messages_main, messages_main.copy(), enclave_opinion(), agent_role, user_role, temperature=.8)
-    
-    print("SECTION 2-----------------------------------------")
-    second_prompt = generate_second_prompt()
-    messages_main, messages_log,_ = message_with_log(ai_text, 
-                                                    messages_main, 
-                                                    messages_log, 
-                                                    second_prompt,
-                                                    agent_role, 
-                                                    user_role, 
-                                                    temperature=.8
-                                                    )    
+    try:
+        config = load_config()
+    except Exception:
+        fallback_logger, fallback_log_path = setup_operational_logger(os.getcwd(), generation_id)
+        fallback_logger.exception("Failed to load configuration. Logging to fallback file at %s", fallback_log_path)
+        raise
 
-    print("SECTION 2B-----------------------------------------")
-    secondB_prompt = generate_secondB_prompt()
-    messages_main, messages_log,_ = message_with_log(ai_text,
-                                                    messages_main,
-                                                    messages_log,
-                                                    secondB_prompt,
-                                                    agent_role,
-                                                    user_role,
-                                                    temperature=.8
-                                                    )
+    log_dir = config.get('image', {}).get('save_path', os.getcwd())
+    logger, operational_log_path = setup_operational_logger(log_dir, generation_id)
+    logger.info("Run started for generation %s", generation_id)
 
-    print("SECTION 3-----------------------------------------")
-    third_prompt = generate_third_prompt()
-    messages_main, messages_log,_ = message_with_log(ai_text, 
-                                                    messages_main, 
-                                                    messages_log, 
-                                                    third_prompt,
-                                                    agent_role,
-                                                    user_role,
-                                                    temperature=.8
-                                                    )
+    try:
+        categories_path = config['prompt']['categories_path']
+        categories_names = config['prompt']['categories_names']
+        
+        logger.info("Loading prompt data from %s", categories_path)
+        prompt_data = load_prompt_data(categories_path)
+        logger.info("Loaded %d category rows with columns: %s", len(prompt_data), prompt_data.columns.tolist())
+        
+        profile_path = config['prompt']['profile_path']
+        logger.info("Loading user profile from %s", profile_path)
+        user_profile = pd.read_csv(profile_path)
+        logger.info("Loaded %d user profile rows", len(user_profile))
+        
+        prompt_1,gen_keywords = generate_first_prompt(prompt_data,user_profile)
+        print("First Prompt:\n", prompt_1)
+        logger.info("Generated first prompt with %d keyword selections", len(gen_keywords))
+        
+        ai_text = TextAI(model="gpt-5.1", reasoning={ "effort": "medium" })
+        logger.info("Initialized TextAI with model gpt-5.1")
+        
+        user_role = "user"
+        agent_role = "assistant"
+        system_prompt = "You are a highly skilled enclave of Artists trained to generate meaningful, edgy, artistic images on par with the greatest artists of any time, anywhere, past or future, Earth or any other planet. The enclave invents unique images that weave together seemingly disparate elements into cohesive wholes that push boundaries and elicit deep emotions in a human viewer."
+        
+        messages_main = MessageHandler(system_prompt)
+        messages_main.continue_messages(user_role,prompt_1)
+        logger.info("Sending initial prompt to AI")
+        try:
+            response_1 = ai_text.text_chat(messages_main.messages,temperature=.8)
+        except Exception:
+            logger.exception("Initial prompt failed")
+            raise
+        print("First Response:\n", response_1)
+        logger.info("Received initial response (chars=%d)", len(str(response_1)))
+        messages_main.continue_messages(agent_role,response_1)
+        # initialize messages_log
+        messages_main, messages_log,_ = message_with_log(ai_text, messages_main, messages_main.copy(), enclave_opinion(), agent_role, user_role, logger=logger, step_name="enclave_opinion_initial", temperature=.8)
+        
+        print("SECTION 2-----------------------------------------")
+        second_prompt = generate_second_prompt()
+        messages_main, messages_log,_ = message_with_log(ai_text, 
+                                                        messages_main, 
+                                                        messages_log, 
+                                                        second_prompt,
+                                                        agent_role, 
+                                                        user_role, 
+                                                        logger=logger,
+                                                        step_name="section_2_choice",
+                                                        temperature=.8
+                                                        )    
 
-    print("SECTION 3B-----------------------------------------")
-    thirdB_prompt = generate_thirdB_prompt()
-    messages_main, messages_log,_ = message_with_log(ai_text,
-                                                    messages_main,
-                                                    messages_log,
-                                                    thirdB_prompt,
-                                                    agent_role,
-                                                    user_role,
-                                                    temperature=.8
-                                                    )
+        print("SECTION 2B-----------------------------------------")
+        secondB_prompt = generate_secondB_prompt()
+        messages_main, messages_log,_ = message_with_log(ai_text,
+                                                        messages_main,
+                                                        messages_log,
+                                                        secondB_prompt,
+                                                        agent_role,
+                                                        user_role,
+                                                        logger=logger,
+                                                        step_name="section_2b_title_and_story",
+                                                        temperature=.8
+                                                        )
 
-    print("SECTION 4-----------------------------------------")
-    fourth_prompt = generate_fourth_prompt()
-    messages_main, messages_log,_ = message_with_log(ai_text,
-                                                    messages_main,
-                                                    messages_log,
-                                                    fourth_prompt,
-                                                    agent_role,
-                                                    user_role,
-                                                    temperature=.8
-                                                    )
+        print("SECTION 3-----------------------------------------")
+        third_prompt = generate_third_prompt()
+        messages_main, messages_log,_ = message_with_log(ai_text, 
+                                                        messages_main, 
+                                                        messages_log, 
+                                                        third_prompt,
+                                                        agent_role,
+                                                        user_role,
+                                                        logger=logger,
+                                                        step_name="section_3_message_focus",
+                                                        temperature=.8
+                                                        )
 
-    print("DALLE-----------------------------------------")
-    dalle_context = generate_dalle_prompt()
-    messages, messages_log,dalle_prompt = message_with_log(ai_text,
-                                                            messages_main, 
-                                                            messages_log, 
-                                                            dalle_context,
-                                                            agent_role, 
-                                                            user_role, 
-                                                            temperature=.8
-                                                            )
-    
-    
-    print("SECTION 5-----------------------------------------")
-    fifth_prompt = generate_fifth_prompt()
-    messages_main, messages_log,_ = message_with_log(ai_text,
-                                                    messages_main,
-                                                    messages_log,
-                                                    fifth_prompt,
-                                                    agent_role,
-                                                    user_role,
-                                                    temperature=.8
-                                                    )
+        print("SECTION 3B-----------------------------------------")
+        thirdB_prompt = generate_thirdB_prompt()
+        messages_main, messages_log,_ = message_with_log(ai_text,
+                                                        messages_main,
+                                                        messages_log,
+                                                        thirdB_prompt,
+                                                        agent_role,
+                                                        user_role,
+                                                        logger=logger,
+                                                        step_name="section_3b_message_clarity",
+                                                        temperature=.8
+                                                        )
 
-    ai_image = ImageAI()
-    
-    image_result = ai_image.generate_image(
-        dalle_prompt,
-        model="gpt-image-1",
-        size="1536x1024",
-        quality="high"
-    )
-    
-    image_data = image_result['image']
+        print("SECTION 4-----------------------------------------")
+        fourth_prompt = generate_fourth_prompt()
+        messages_main, messages_log,_ = message_with_log(ai_text,
+                                                        messages_main,
+                                                        messages_log,
+                                                        fourth_prompt,
+                                                        agent_role,
+                                                        user_role,
+                                                        logger=logger,
+                                                        step_name="section_4_concise_description",
+                                                        temperature=.8
+                                                        )
 
-    image_bytes = base64.b64decode(image_data)
+        print("DALLE-----------------------------------------")
+        dalle_context = generate_dalle_prompt()
+        messages, messages_log,dalle_prompt = message_with_log(ai_text,
+                                                                messages_main, 
+                                                                messages_log, 
+                                                                dalle_context,
+                                                                agent_role, 
+                                                                user_role, 
+                                                                logger=logger,
+                                                                step_name="dalle_prompt_creation",
+                                                                temperature=.8
+                                                                )
+        
+        
+        print("SECTION 5-----------------------------------------")
+        fifth_prompt = generate_fifth_prompt()
+        messages_main, messages_log,_ = message_with_log(ai_text,
+                                                        messages_main,
+                                                        messages_log,
+                                                        fifth_prompt,
+                                                        agent_role,
+                                                        user_role,
+                                                        logger=logger,
+                                                        step_name="section_5_midjourney_refine",
+                                                        temperature=.8
+                                                        )
 
-    data = [generation_id, gen_keywords, dalle_prompt]
+        ai_image = ImageAI()
+        logger.info("Initialized ImageAI")
+        
+        try:
+            image_result = ai_image.generate_image(
+                dalle_prompt,
+                model="gpt-image-1",
+                size="1536x1024",
+                quality="high"
+            )
+            logger.info("Image generation request sent (model=gpt-image-1, size=1536x1024)")
+        except Exception:
+            logger.exception("Image generation failed")
+            raise
+        
+        image_data = image_result['image']
+        logger.debug("Received image payload length: %d", len(image_data))
 
-    csv_file = config['prompt']['generations_path']
-    save_to_csv(data, csv_file)
-    
-    image_full_path_and_name = generate_file_location(config['image']['save_path'], generation_id+'_image', '.jpg')
-    log_full_path_and_name = generate_file_location(config['image']['save_path'], generation_id+'_log', '.txt')
-    
-    save_image(image_bytes, image_full_path_and_name)    
-    
-    messages_text = str(messages_log.messages)
-    
-    write_messages_log(log_full_path_and_name, messages_text)
+        try:
+            image_bytes = base64.b64decode(image_data)
+        except Exception:
+            logger.exception("Failed to decode image payload")
+            raise
+
+        data = [generation_id, gen_keywords, dalle_prompt]
+
+        csv_file = config['prompt']['generations_path']
+        save_to_csv(data, csv_file)
+        logger.info("Saved generation metadata to %s", csv_file)
+        
+        image_full_path_and_name = generate_file_location(config['image']['save_path'], generation_id+'_image', '.jpg')
+        log_full_path_and_name = generate_file_location(config['image']['save_path'], generation_id+'_log', '.txt')
+        
+        save_image(image_bytes, image_full_path_and_name)    
+        logger.info("Saved image to %s", image_full_path_and_name)
+        
+        messages_text = str(messages_log.messages)
+        
+        write_messages_log(log_full_path_and_name, messages_text)
+        logger.info("Wrote message transcript to %s", log_full_path_and_name)
+        logger.info("Operational log stored at %s", operational_log_path)
+        logger.info("Run completed successfully for generation %s", generation_id)
+    except Exception:
+        logger.exception("Run failed for generation %s", generation_id)
+        raise
     
 
 if __name__ == "__main__":
