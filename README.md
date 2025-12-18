@@ -6,6 +6,31 @@ Personal project exploring prompting and "art" generation. Takes randomly-select
 
 Uses tree-of-thought prompting, experiments with iterative improvement and identities to help guide prompt development.
 
+## Per-Image Identifiers (Seq + Title)
+
+Each generated image is post-processed to add a subtle caption overlay so a viewer can reference images during feedback:
+
+`#042 - Turquoise Citadel` (bottom caption strip)
+
+### Manifest
+
+Each image also appends a row to a CSV manifest so `#NNN` and the title can be resolved back to the underlying generation record.
+
+- Default path: `<image.generation_path>/titles_manifest.csv`
+- Override: set `prompt.titles_manifest_path` in `config/config.yaml`
+
+Columns (v1): `seq`, `title`, `generation_id`, `image_prompt`, `image_path`, `created_at`, plus optional metadata like `model`, `size`, `quality`, `title_source`, `title_raw`.
+
+### Sequencing
+
+Sequence numbers are allocated as `max(seq)+1` from the manifest (starts at `1` if missing/empty).
+
+### Failure behavior
+
+Title generation is fail-fast: if the title cannot be produced in a valid format, the run errors rather than silently omitting the identifier.
+
+Optional: set `image.caption_font_path` to a `.ttf` file to control the caption font (otherwise common defaults are tried).
+
 ## Examples:
 
 ### Random Concepts:
@@ -114,3 +139,63 @@ Fast-paced action movies
 
 - Integrate with midjourney API when available
     - Automate assessment and selection of upscaling/variation images
+
+## 4K Upscaling (Optional)
+
+This project can optionally run a post-processing step to upscale the generated
+image to a "4K" long-edge target (default: 3840px) using the open-source
+Real-ESRGAN NCNN Vulkan portable executable.
+
+### Install Real-ESRGAN (NCNN Vulkan)
+
+1. Download the portable executable for your OS from the Real-ESRGAN project:
+   https://github.com/xinntao/Real-ESRGAN
+
+2. Download the model files (param/bin) and place them in a `models` directory
+   next to the executable, or provide an explicit `model_path` in config/CLI.
+
+3. Ensure the binary can be found by the project by doing one of:
+   - Put it on your PATH (so `realesrgan-ncnn-vulkan` is executable), OR
+   - Set environment variable `REALESRGAN_NCNN_VULKAN_PATH` to the full path,
+     OR
+   - Set `upscale.realesrgan_binary` in config.
+
+Note: The Vulkan backend generally requires a Vulkan-compatible GPU.
+
+### Configure
+
+Add an `upscale` section to your config (example YAML):
+
+```yaml
+upscale:
+  enabled: true
+  target_long_edge_px: 3840
+  engine: realesrgan-ncnn-vulkan
+  # Optional. If omitted, PATH + REALESRGAN_NCNN_VULKAN_PATH are checked.
+  realesrgan_binary: null
+  # Optional. Directory containing the *.param/*.bin model files.
+  model_path: null
+  model_name: realesrgan-x4plus
+  tile_size: 0
+  tta: false
+  # If true and Real-ESRGAN isn't available, fall back to a Lanczos resize.
+  # Default is false (fail loudly).
+  allow_fallback_resize: false
+```
+
+When enabled, the script saves an additional file named:
+
+`<generation_id>_image_4k.jpg`
+
+### Manual Upscaling CLI
+
+To manually test upscaling on any image, use the helper script:
+
+```
+python scripts/manual_upscale.py path/to/image.jpg
+```
+
+- Writes the result next to the input as `image_4k.jpg` (same extension preserved).
+- Defaults to a 3840px long edge; override with `--target-long-edge 4096`, etc.
+- Provide a custom Real-ESRGAN binary with `--realesrgan-binary /path/to/realesrgan-ncnn-vulkan`.
+- Provide a custom models directory with `--model-path /path/to/models` (folder containing *.param/*.bin).

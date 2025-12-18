@@ -1,0 +1,320 @@
+from __future__ import annotations
+
+import csv
+import os
+import re
+import time
+from contextlib import contextmanager
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from typing import Any, Iterable, Mapping, Sequence
+
+TITLE_SOURCE_LLM = "llm"
+TITLE_SOURCE_FALLBACK = "fallback"
+
+MANIFEST_FIELDNAMES: list[str] = [
+    "seq",
+    "title",
+    "generation_id",
+    "image_prompt",
+    "image_path",
+    "created_at",
+    "model",
+    "size",
+    "quality",
+    "seed",
+    "title_source",
+    "title_raw",
+]
+
+REQUIRED_MANIFEST_FIELDS: frozenset[str] = frozenset(
+    {"seq", "title", "generation_id", "image_prompt", "image_path"}
+)
+
+_QUOTE_CHARS = "\"'“”‘’"
+_ROMAN_NUMERALS: tuple[str, ...] = (
+    "I",
+    "II",
+    "III",
+    "IV",
+    "V",
+    "VI",
+    "VII",
+    "VIII",
+    "IX",
+    "X",
+    "XI",
+    "XII",
+    "XIII",
+    "XIV",
+    "XV",
+    "XVI",
+    "XVII",
+    "XVIII",
+    "XIX",
+    "XX",
+)
+
+_TITLE_ALLOWED_RE = re.compile(r"^[A-Za-z -]+$")
+_TITLE_WORD_RE = re.compile(r"^[A-Za-z]+(?:-[A-Za-z]+)*$")
+_TITLE_CASE_SEGMENT_RE = re.compile(r"^[A-Z][a-z]+$")
+
+
+def utc_now_iso8601() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def read_manifest(manifest_path: str) -> list[dict[str, str]]:
+    if not os.path.exists(manifest_path) or os.path.getsize(manifest_path) == 0:
+        return []
+
+    with open(manifest_path, newline="", encoding="utf-8-sig") as file:
+        reader = csv.DictReader(file)
+        rows: list[dict[str, str]] = []
+        for row in reader:
+            if not row:
+                continue
+            if None in row:
+                row.pop(None, None)
+            cleaned = {str(k): ("" if v is None else str(v)) for k, v in row.items()}
+            rows.append(cleaned)
+        return rows
+
+
+def get_next_seq(manifest_path: str) -> int:
+    rows = read_manifest(manifest_path)
+    max_seq = 0
+    for row in rows:
+        raw = (row.get("seq") or "").strip()
+        try:
+            value = int(raw)
+        except Exception:
+            continue
+        if value > max_seq:
+            max_seq = value
+    return max_seq + 1 if max_seq > 0 else 1
+
+
+def append_manifest_row(
+    manifest_path: str,
+    row: Mapping[str, Any],
+    *,
+    fieldnames: Sequence[str] = MANIFEST_FIELDNAMES,
+) -> None:
+    missing = sorted(REQUIRED_MANIFEST_FIELDS - set(row.keys()))
+    if missing:
+        raise KeyError(f"Manifest row missing required fields: {missing}")
+
+    os.makedirs(os.path.dirname(os.path.abspath(manifest_path)), exist_ok=True)
+    file_exists = os.path.exists(manifest_path) and os.path.getsize(manifest_path) > 0
+
+    output_row: dict[str, Any] = {name: row.get(name, "") for name in fieldnames}
+    if not output_row.get("created_at"):
+        output_row["created_at"] = utc_now_iso8601()
+
+    with open(manifest_path, "a", newline="", encoding="utf-8") as file:
+        writer = csv.DictWriter(file, fieldnames=list(fieldnames), extrasaction="ignore")
+        if not file_exists:
+            writer.writeheader()
+        writer.writerow(output_row)
+
+
+@contextmanager
+def manifest_lock(
+    manifest_path: str,
+    *,
+    timeout_seconds: float = 60.0,
+    poll_interval_seconds: float = 0.1,
+):
+    lock_path = f"{manifest_path}.lock"
+    start = time.monotonic()
+    os.makedirs(os.path.dirname(os.path.abspath(lock_path)), exist_ok=True)
+
+    while True:
+        try:
+            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            with os.fdopen(fd, "w", encoding="utf-8") as file:
+                file.write(f"pid={os.getpid()}\ncreated_at={utc_now_iso8601()}\n")
+            break
+        except FileExistsError:
+            if (time.monotonic() - start) >= timeout_seconds:
+                raise TimeoutError(f"Timed out waiting for manifest lock: {lock_path}")
+            time.sleep(poll_interval_seconds)
+
+    try:
+        yield
+    finally:
+        try:
+            os.remove(lock_path)
+        except FileNotFoundError:
+            pass
+
+
+def _normalize_title_key(title: str) -> str:
+    return title.casefold().strip()
+
+
+def _strip_outer_quotes(text: str) -> str:
+    s = text.strip()
+    if len(s) >= 2 and s[0] in _QUOTE_CHARS and s[-1] in _QUOTE_CHARS:
+        return s[1:-1].strip()
+    return s
+
+
+def _single_nonempty_line(text: str) -> str:
+    lines = [ln.strip() for ln in str(text).splitlines() if ln.strip()]
+    if not lines:
+        raise ValueError("Title response is empty")
+    if len(lines) != 1:
+        raise ValueError("Title response must be a single line of text")
+    return lines[0]
+
+
+def _is_roman_numeral(word: str) -> bool:
+    return word in _ROMAN_NUMERALS
+
+
+def validate_title(title: str) -> None:
+    candidate = title.strip()
+    if not candidate:
+        raise ValueError("Title is empty")
+
+    if any(ch in candidate for ch in _QUOTE_CHARS):
+        raise ValueError("Title must not contain quotes")
+
+    if not _TITLE_ALLOWED_RE.match(candidate):
+        raise ValueError("Title contains invalid characters (only letters, spaces, hyphen allowed)")
+
+    words = candidate.split()
+    if not (2 <= len(words) <= 4):
+        raise ValueError("Title must be 2-4 words")
+
+    for word_idx, word in enumerate(words):
+        if _is_roman_numeral(word):
+            continue
+
+        if not _TITLE_WORD_RE.match(word):
+            raise ValueError("Title contains invalid punctuation")
+
+        segments = word.split("-")
+        for seg_idx, seg in enumerate(segments):
+            if _is_roman_numeral(seg):
+                continue
+            if not _TITLE_CASE_SEGMENT_RE.match(seg):
+                raise ValueError("Title must be Title Case")
+
+
+def sanitize_title(raw_title: str) -> str:
+    text = _single_nonempty_line(raw_title)
+    text = _strip_outer_quotes(text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+@dataclass(frozen=True)
+class GeneratedTitle:
+    title: str
+    title_source: str
+    title_raw: str
+
+
+def _disambiguate_title(base_title: str, existing_titles: Iterable[str]) -> str:
+    existing = {_normalize_title_key(t) for t in existing_titles if t}
+    base = base_title.strip()
+
+    words = base.split()
+    for roman in _ROMAN_NUMERALS[1:]:  # start at II
+        if len(words) < 4:
+            candidate = f"{base} {roman}"
+        else:
+            candidate = " ".join(words[:-1] + [f"{words[-1]}-{roman}"])
+
+        try:
+            validate_title(candidate)
+        except Exception:
+            continue
+
+        if _normalize_title_key(candidate) not in existing:
+            return candidate
+
+    raise ValueError("Failed to disambiguate title after exhausting suffixes")
+
+
+def generate_title(
+    *,
+    ai_text: Any,
+    image_prompt: str,
+    avoid_titles: Sequence[str] | None = None,
+    max_attempts: int = 3,
+    temperature: float = 0.2,
+) -> GeneratedTitle:
+    """
+    Generate a short, human-friendly title for an image prompt using the existing TextAI backend.
+
+    This function enforces hard constraints in code and retries up to `max_attempts` times.
+    If the model keeps colliding with existing titles, we deterministically disambiguate (II/III/etc).
+    """
+    if max_attempts < 1:
+        raise ValueError("max_attempts must be >= 1")
+
+    avoid_titles = list(avoid_titles or [])
+    existing_keys = {_normalize_title_key(t) for t in avoid_titles if t}
+
+    system = (
+        "You generate short image titles.\n"
+        "Return a 2-4 word Title Case name.\n"
+        "No quotes.\n"
+        "No proper nouns (no people/place/brand names).\n"
+        "No punctuation except optional hyphen.\n"
+        "Return only the title text.\n"
+    )
+
+    last_raw = ""
+    last_sanitized = ""
+    for attempt in range(1, max_attempts + 1):
+        avoid_block = ""
+        if avoid_titles:
+            avoid_block = "Do not reuse these titles (case-insensitive): " + "; ".join(avoid_titles[:25])
+
+        user = (
+            f"Prompt: {image_prompt.strip()}\n"
+            f"{avoid_block}\n"
+            "Return ONLY the title text."
+        ).strip()
+
+        messages = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ]
+        if attempt > 1:
+            messages.append(
+                {
+                    "role": "system",
+                    "content": "Reminder: output must be a single line containing only the title text.",
+                }
+            )
+
+        raw = ai_text.text_chat(messages, temperature=temperature)
+        last_raw = "" if raw is None else str(raw)
+
+        try:
+            sanitized = sanitize_title(last_raw)
+            validate_title(sanitized)
+        except Exception:
+            last_sanitized = ""
+            continue
+
+        last_sanitized = sanitized
+        if _normalize_title_key(sanitized) in existing_keys:
+            continue
+
+        return GeneratedTitle(title=sanitized, title_source=TITLE_SOURCE_LLM, title_raw=last_raw)
+
+    if not last_sanitized:
+        raise RuntimeError(
+            f"Title generation failed: model returned invalid titles for {max_attempts} attempts"
+        )
+
+    disambiguated = _disambiguate_title(last_sanitized, avoid_titles)
+    return GeneratedTitle(title=disambiguated, title_source=TITLE_SOURCE_LLM, title_raw=last_raw)
+

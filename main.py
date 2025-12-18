@@ -1,12 +1,32 @@
 import base64
 import logging
 import os
-import sys
-import pandas as pd
 import random
-from utils import load_config, download_and_convert_image, generate_unique_id, save_image, save_to_csv,generate_file_location
+import subprocess
+import sys
+
+import pandas as pd
+
+from ai_backend import ImageAI, TextAI
+from logging_utils import write_messages_log
 from message_handling import MessageHandler
-from ai_backend import TextAI, ImageAI
+from upscaling import UpscaleConfig, upscale_image_to_4k
+from titles import (
+    append_manifest_row,
+    generate_title,
+    get_next_seq,
+    manifest_lock,
+    read_manifest,
+    utc_now_iso8601,
+)
+from utils import (
+    download_and_convert_image,
+    generate_file_location,
+    generate_unique_id,
+    load_config,
+    save_image,
+    save_to_csv,
+)
 
 def load_prompt_data(file_path):
     # load the prompt data from the csv file
@@ -230,9 +250,31 @@ def setup_operational_logger(log_dir: str, generation_id: str):
     return logger, log_file
 
 
-def write_messages_log(log_path: str, messages_text: str):
-    with open(log_path, "w", encoding="utf-8") as file:
-        file.write(messages_text)
+def upload_to_photos_via_rclone(
+    file_path: str,
+    remote: str = "gphotos",
+    album: str = "Generated-Art",
+    logger: logging.Logger | None = None,
+) -> bool:
+    dest = f"{remote}:album/{album}"
+    if logger:
+        logger.info("Uploading %s to %s via rclone", file_path, dest)
+    try:
+        subprocess.run(["rclone", "copy", file_path, dest], check=True)
+    except FileNotFoundError as exc:
+        if logger:
+            logger.error("Upload skipped: rclone not found (%s).", exc)
+        return False
+    except subprocess.CalledProcessError as exc:
+        if logger:
+            logger.error("Upload failed (rclone exit=%s). Continuing.", exc.returncode)
+        return False
+    except Exception:
+        if logger:
+            logger.exception("Upload failed due to unexpected error. Continuing.")
+        return False
+
+    return True
 
 
 def message_with_log(ai_text: TextAI,
@@ -290,7 +332,28 @@ def main():
         fallback_logger.exception("Failed to load configuration. Logging to fallback file at %s", fallback_log_path)
         raise
 
-    log_dir = config.get('image', {}).get('save_path', os.getcwd())
+    image_cfg = config.get("image", {}) or {}
+    if not image_cfg:
+        raise ValueError("Missing required 'image' configuration section")
+
+    def require_path(key: str) -> str:
+        value = image_cfg.get(key)
+        if not value:
+            raise ValueError(f"Missing required config value image.{key}")
+        return value
+
+    generation_dir = require_path("generation_path")
+    upscale_dir = require_path("upscale_path")
+    log_dir = require_path("log_path")
+
+    prompt_cfg = config.get("prompt", {}) or {}
+    manifest_path = prompt_cfg.get("titles_manifest_path") or os.path.join(
+        generation_dir, "titles_manifest.csv"
+    )
+    caption_font_path = image_cfg.get("caption_font_path")
+
+    log_full_path_and_name = generate_file_location(log_dir, generation_id+'_log', '.txt')
+    messages_text = ""
     logger, operational_log_path = setup_operational_logger(log_dir, generation_id)
     logger.info("Run started for generation %s", generation_id)
 
@@ -311,8 +374,8 @@ def main():
         print("First Prompt:\n", prompt_1)
         logger.info("Generated first prompt with %d keyword selections", len(gen_keywords))
         
-        ai_text = TextAI(model="gpt-5.1", reasoning={ "effort": "medium" })
-        logger.info("Initialized TextAI with model gpt-5.1")
+        ai_text = TextAI(model="gpt-5.2", reasoning={ "effort": "medium" })
+        logger.info("Initialized TextAI with model gpt-5.2")
         
         user_role = "user"
         agent_role = "assistant"
@@ -396,7 +459,7 @@ def main():
                                                         step_name="section_4_concise_description",
                                                         temperature=.8
                                                         )
-
+        
         print("DALLE-----------------------------------------")
         dalle_context = generate_dalle_prompt()
         messages, messages_log,dalle_prompt = message_with_log(ai_text,
@@ -423,51 +486,167 @@ def main():
                                                         step_name="section_5_midjourney_refine",
                                                         temperature=.8
                                                         )
-
+ 
         ai_image = ImageAI()
         logger.info("Initialized ImageAI")
         
-        try:
-            image_result = ai_image.generate_image(
-                dalle_prompt,
-                model="gpt-image-1",
-                size="1536x1024",
-                quality="high"
-            )
-            logger.info("Image generation request sent (model=gpt-image-1, size=1536x1024)")
-        except Exception:
-            logger.exception("Image generation failed")
-            raise
-        
-        image_data = image_result['image']
-        logger.debug("Received image payload length: %d", len(image_data))
+        image_model = "gpt-image-1.5"
+        image_size = "1536x1024"
+        image_quality = "high"
+
+        upload_target_path = ""
+        seq = -1
+        title_result = None
 
         try:
-            image_bytes = base64.b64decode(image_data)
+            with manifest_lock(manifest_path):
+                manifest_rows = read_manifest(manifest_path)
+                existing_titles = [row.get("title", "") for row in manifest_rows if row.get("title")]
+                existing_titles = list(reversed(existing_titles))
+
+                seq = get_next_seq(manifest_path)
+                title_result = generate_title(
+                    ai_text=ai_text,
+                    image_prompt=dalle_prompt,
+                    avoid_titles=existing_titles,
+                )
+
+                caption_text = f"#{seq:03d} - {title_result.title}"
+                logger.info("Assigned image identifier %s", caption_text)
+
+                image_result = ai_image.generate_image(
+                    dalle_prompt,
+                    model=image_model,
+                    size=image_size,
+                    quality=image_quality,
+                    moderation="low",
+                )
+                logger.info(
+                    "Image generation request sent (model=%s, size=%s, quality=%s)",
+                    image_model,
+                    image_size,
+                    image_quality,
+                )
+
+                image_data = image_result["image"]
+                logger.debug("Received image payload length: %d", len(image_data))
+
+                image_bytes = base64.b64decode(image_data)
+
+                data = [generation_id, gen_keywords, dalle_prompt]
+
+                csv_file = config["prompt"]["generations_path"]
+                save_to_csv(data, csv_file)
+                logger.info("Saved generation metadata to %s", csv_file)
+
+                os.makedirs(generation_dir, exist_ok=True)
+                os.makedirs(log_dir, exist_ok=True)
+                os.makedirs(upscale_dir, exist_ok=True)
+
+                image_full_path_and_name = generate_file_location(
+                    generation_dir, generation_id + "_image", ".jpg"
+                )
+                save_image(
+                    image_bytes,
+                    image_full_path_and_name,
+                    caption_text=caption_text,
+                    caption_font_path=caption_font_path,
+                )
+                logger.info("Saved image to %s", image_full_path_and_name)
+
+                upload_target_path = image_full_path_and_name
+
+                upscale_section = config.get("upscale", {}) or {}
+                if upscale_section.get("enabled", False):
+                    upscale_out_path = generate_file_location(
+                        upscale_dir,
+                        generation_id + "_image_4k",
+                        ".jpg",
+                    )
+
+                    upscale_cfg = UpscaleConfig(
+                        target_long_edge_px=int(upscale_section.get("target_long_edge_px", 3840)),
+                        engine=str(upscale_section.get("engine", "realesrgan-ncnn-vulkan")),
+                        realesrgan_binary=upscale_section.get("realesrgan_binary"),
+                        model_name=str(upscale_section.get("model_name", "realesrgan-x4plus")),
+                        tile_size=int(upscale_section.get("tile_size", 0)),
+                        tta=bool(upscale_section.get("tta", False)),
+                        allow_fallback_resize=bool(upscale_section.get("allow_fallback_resize", False)),
+                    )
+
+                    logger.info(
+                        "Upscaling enabled: engine=%s model=%s target_long_edge_px=%d",
+                        upscale_cfg.engine,
+                        upscale_cfg.model_name,
+                        upscale_cfg.target_long_edge_px,
+                    )
+                    upscale_image_to_4k(
+                        input_path=image_full_path_and_name,
+                        output_path=upscale_out_path,
+                        config=upscale_cfg,
+                    )
+                    logger.info("Saved 4K upscaled image to %s", upscale_out_path)
+                    upload_target_path = upscale_out_path
+
+                append_manifest_row(
+                    manifest_path,
+                    {
+                        "seq": int(seq),
+                        "title": title_result.title,
+                        "generation_id": generation_id,
+                        "image_prompt": dalle_prompt,
+                        "image_path": upload_target_path,
+                        "created_at": utc_now_iso8601(),
+                        "model": image_model,
+                        "size": image_size,
+                        "quality": image_quality,
+                        "seed": image_result.get("seed", ""),
+                        "title_source": getattr(title_result, "title_source", "llm"),
+                        "title_raw": getattr(title_result, "title_raw", ""),
+                    },
+                )
+                logger.info("Appended manifest row to %s (seq=%d)", manifest_path, seq)
         except Exception:
-            logger.exception("Failed to decode image payload")
+            logger.exception("Generation failed during title/manifest/image pipeline")
             raise
 
-        data = [generation_id, gen_keywords, dalle_prompt]
-
-        csv_file = config['prompt']['generations_path']
-        save_to_csv(data, csv_file)
-        logger.info("Saved generation metadata to %s", csv_file)
-        
-        image_full_path_and_name = generate_file_location(config['image']['save_path'], generation_id+'_image', '.jpg')
-        log_full_path_and_name = generate_file_location(config['image']['save_path'], generation_id+'_log', '.txt')
-        
-        save_image(image_bytes, image_full_path_and_name)    
-        logger.info("Saved image to %s", image_full_path_and_name)
+        rclone_config = config.get("rclone", {}) or {}
+        if rclone_config.get("enabled", False):
+            remote = rclone_config.get("remote")
+            album = rclone_config.get("album")
+            if not remote or not album:
+                raise ValueError("Rclone upload enabled but 'remote' or 'album' is missing in config.rclone")
+            if not upload_target_path:
+                logger.error("Rclone upload enabled but upload target path is empty; skipping upload.")
+            else:
+                uploaded = upload_to_photos_via_rclone(
+                    upload_target_path,
+                    remote=remote,
+                    album=album,
+                    logger=logger,
+                )
+                if uploaded:
+                    logger.info("Uploaded image via rclone to %s", f"{remote}:album/{album}")
+                else:
+                    logger.error("Rclone upload failed; image remains at %s", upload_target_path)
         
         messages_text = str(messages_log.messages)
-        
         write_messages_log(log_full_path_and_name, messages_text)
         logger.info("Wrote message transcript to %s", log_full_path_and_name)
         logger.info("Operational log stored at %s", operational_log_path)
         logger.info("Run completed successfully for generation %s", generation_id)
     except Exception:
         logger.exception("Run failed for generation %s", generation_id)
+        try:
+            if "messages_log" in locals():
+                messages_text = str(messages_log.messages)
+            elif "messages_main" in locals():
+                messages_text = str(messages_main.messages)
+            else:
+                messages_text = ""
+            write_messages_log(log_full_path_and_name, messages_text)
+        except Exception:
+            logger.exception("Failed to write message transcript during error handling")
         raise
     
 
