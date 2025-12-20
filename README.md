@@ -207,8 +207,10 @@ Real-ESRGAN NCNN Vulkan portable executable.
 1. Download the portable executable for your OS from the Real-ESRGAN project:
    https://github.com/xinntao/Real-ESRGAN
 
-2. Download the model files (param/bin) and place them in a `models` directory
-   next to the executable, or provide an explicit `model_path` in config/CLI.
+2. It's easiest to download the OS executable (middle of README page, not a release) 
+   because it includes the models. If not download the model files (param/bin) and 
+   place them in a `models` directory next to the executable, or provide an 
+   explicit `model_path` in config/CLI.
 
 3. Ensure the binary can be found by the project by doing one of:
    - Put it on your PATH (so `realesrgan-ncnn-vulkan` is executable), OR
@@ -255,3 +257,30 @@ python scripts/manual_upscale.py path/to/image.jpg
 - Defaults to a 3840px long edge; override with `--target-long-edge 4096`, etc.
 - Provide a custom Real-ESRGAN binary with `--realesrgan-binary /path/to/realesrgan-ncnn-vulkan`.
 - Provide a custom models directory with `--model-path /path/to/models` (folder containing *.param/*.bin).
+
+## Google Photos Upload (Optional)
+
+This project can optionally upload the final output image to Google Photos after
+generation using `rclone`.
+
+Full setup (including creating your own Google OAuth client to avoid shared-quota
+issues) is documented in `docs/rclone-google-photos.md`.
+
+### Configure
+
+Add a `rclone` section to your config (example YAML):
+
+```yaml
+rclone:
+  enabled: true
+  remote: gphotos_personal
+  album: The Day's Art
+```
+
+When enabled, the script runs:
+
+`rclone copy <image_path> <remote>:album/<album>`
+
+Notes:
+- Upload is best-effort: failures are logged and the run continues (image remains on disk).
+- If upscaling is enabled, the upscaled `<generation_id>_image_4k.jpg` is uploaded; otherwise `<generation_id>_image.jpg` is uploaded.

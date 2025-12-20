@@ -731,6 +731,7 @@ def main() -> None:
     try:
         cfg_dict = load_config()
     except Exception:
+        # This is a rare exeception to the "no fallbacks" rule. Fallbacks are ONLY acceptable here to prevent loss of logging data
         fallback_logger, fallback_log_path = setup_operational_logger(os.getcwd(), generation_id)
         fallback_logger.exception(
             "Failed to load configuration. Logging to fallback file at %s", fallback_log_path
