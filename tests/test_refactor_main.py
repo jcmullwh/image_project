@@ -423,7 +423,7 @@ def test_csv_writer_raises_when_required_keys_missing(tmp_path):
 
 
 def test_integration_offline_run_generation_writes_artifacts(tmp_path, monkeypatch):
-    dalle_sentinel = "__TEST_DALLE_PROMPT_REQUEST__"
+    image_prompt_request = "__TEST_IMAGE_PROMPT_REQUEST__"
 
     class FakeTextAI:
         def __init__(self, *args, **kwargs):
@@ -431,7 +431,7 @@ def test_integration_offline_run_generation_writes_artifacts(tmp_path, monkeypat
 
         def text_chat(self, messages, **kwargs):
             last_user = (messages[-1].get("content", "") if messages else "") or ""
-            if last_user == dalle_sentinel:
+            if last_user == image_prompt_request:
                 return "A test image prompt"
             return "resp"
 
@@ -491,7 +491,7 @@ def test_integration_offline_run_generation_writes_artifacts(tmp_path, monkeypat
 
     monkeypatch.setattr(main, "TextAI", FakeTextAI)
     monkeypatch.setattr(main, "ImageAI", FakeImageAI)
-    monkeypatch.setattr(main, "generate_dalle_prompt", lambda: dalle_sentinel)
+    monkeypatch.setattr(main, "generate_image_prompt", lambda: image_prompt_request)
     monkeypatch.setattr(
         main,
         "generate_title",

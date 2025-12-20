@@ -4,6 +4,8 @@ import os
 from dataclasses import dataclass
 from typing import Any, Mapping
 
+from context_injectors import ContextManager
+
 
 def parse_bool(value: Any, path: str) -> bool:
     """
@@ -49,6 +51,10 @@ class RunConfig:
     caption_font_path: str | None
 
     random_seed: int | None
+
+    context_enabled: bool
+    context_injectors: tuple[str, ...]
+    context_cfg: Mapping[str, Any]
 
     rclone_enabled: bool
     rclone_remote: str | None
@@ -194,6 +200,53 @@ class RunConfig:
 
         random_seed = optional_int("prompt.random_seed")
 
+        context_cfg_raw = get_mapping("context")
+        context_enabled = optional_bool("context.enabled", default=False)
+        calendar_enabled = optional_bool("context.calendar.enabled", default=False)
+        if calendar_enabled:
+            raise ValueError(
+                "Calendar context injector is not implemented yet. Set context.calendar.enabled=false (default) "
+                "or remove 'calendar' from context.injectors."
+            )
+
+        context_injectors: tuple[str, ...] = ()
+        if context_enabled:
+            injectors_value = context_cfg_raw.get("injectors")
+            if injectors_value is None:
+                context_injectors = ("season", "holiday")
+                warnings.append(
+                    "Config key context.injectors is not set; defaulting to ['season', 'holiday']"
+                )
+            else:
+                if not isinstance(injectors_value, list):
+                    raise ValueError("Invalid config type for context.injectors: expected list[str]")
+                normalized: list[str] = []
+                for idx, item in enumerate(injectors_value):
+                    if not isinstance(item, str):
+                        raise ValueError(
+                            f"Invalid config type for context.injectors[{idx}]: expected string"
+                        )
+                    name = item.strip().lower()
+                    if not name:
+                        raise ValueError("context.injectors must not contain empty strings")
+                    normalized.append(name)
+                context_injectors = tuple(normalized)
+
+            if "calendar" in context_injectors:
+                raise ValueError(
+                    "Calendar context injector is not implemented yet. Set context.calendar.enabled=false (default) "
+                    "or remove 'calendar' from context.injectors."
+                )
+
+            known = set(ContextManager.available_injectors())
+            for injector in context_injectors:
+                if injector not in known:
+                    raise ValueError(f"Unknown context injector: {injector}")
+
+        context_cfg: Mapping[str, Any] = dict(context_cfg_raw)
+        context_cfg.pop("enabled", None)
+        context_cfg.pop("injectors", None)
+
         rclone_enabled = optional_bool("rclone.enabled", default=False)
         rclone_remote = optional_str("rclone.remote")
         rclone_album = optional_str("rclone.album")
@@ -232,6 +285,9 @@ class RunConfig:
                 titles_manifest_path=normalize_path(titles_manifest_raw),
                 caption_font_path=normalize_path(caption_font_raw) if caption_font_raw else None,
                 random_seed=random_seed,
+                context_enabled=context_enabled,
+                context_injectors=context_injectors,
+                context_cfg=context_cfg,
                 rclone_enabled=rclone_enabled,
                 rclone_remote=rclone_remote,
                 rclone_album=rclone_album,

@@ -16,6 +16,12 @@ def write_transcript(path: str, ctx: RunContext) -> None:
         "image_path": ctx.image_path,
         "created_at": ctx.created_at,
     }
+    context = ctx.outputs.get("context")
+    if context is not None:
+        payload["context"] = context
+    title_generation = ctx.outputs.get("title_generation")
+    if title_generation is not None:
+        payload["title_generation"] = title_generation
     if ctx.error is not None:
         payload["error"] = ctx.error
 

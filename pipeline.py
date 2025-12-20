@@ -266,7 +266,23 @@ class ChatRunner:
             working = parent_messages.copy()
             prompt_text = step.render_prompt(ctx, step_name=step_name)
 
-            ctx.logger.info("Step: %s", pipeline_path)
+            prompt_chars = len(prompt_text)
+            context_messages = len(working.messages)
+            context_chars = sum(
+                len(message.get("content", ""))
+                for message in working.messages
+                if isinstance(message, dict)
+            )
+            input_messages = context_messages + 1
+            input_chars = context_chars + prompt_chars
+
+            ctx.logger.info(
+                "Step: %s (context_chars=%d, prompt_chars=%d, input_chars=%d)",
+                pipeline_path,
+                context_chars,
+                prompt_chars,
+                input_chars,
+            )
 
             call_params: dict[str, Any] = dict(step.params)
             call_params["temperature"] = step.temperature
@@ -311,8 +327,12 @@ class ChatRunner:
                     "prompt": prompt_text,
                     "response": response_text,
                     "params": record_params,
-                    "prompt_chars": len(prompt_text),
+                    "prompt_chars": prompt_chars,
                     "response_chars": len(response_text),
+                    "context_chars": context_chars,
+                    "input_chars": input_chars,
+                    "context_messages": context_messages,
+                    "input_messages": input_messages,
                     "created_at": utc_now_iso8601(),
                 }
             )
@@ -321,7 +341,10 @@ class ChatRunner:
                 ctx.outputs[step.capture_key] = response_text
 
             ctx.logger.info(
-                "Received response for %s (chars=%d)", pipeline_path, len(response_text)
+                "Received response for %s (input_chars=%d, chars=%d)",
+                pipeline_path,
+                input_chars,
+                len(response_text),
             )
             return produced_messages, response_text
         except Exception as exc:

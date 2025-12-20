@@ -14,7 +14,7 @@ See `docs/pipeline.md` for the execution model, merge modes, and the ToT/enclave
 
 ### Add a new prompt step
 
-1. Add a new prompt function (or inline prompt factory) in `main.py`.
+1. Add a new prompt function (or inline prompt factory) in `prompts.py`.
 2. Add a new `ChatStep(...)` and include it in the `pipeline_root` construction in `main.run_generation()` (optionally wrap it as a `merge="last_response"` stage block and/or use `capture_key` to store the final output in `ctx.outputs`).
 
 ### Hardening behavior (fail-fast + reliable artifacts)
@@ -49,6 +49,11 @@ Optional keys:
 - `image.caption_font_path`: optional `.ttf` for the caption overlay.
   - If explicitly set and the font cannot be loaded, the run fails loudly (no silent fallback).
 - Boolean flags (e.g. `rclone.enabled`, `upscale.enabled`) accept booleans, `0`/`1`, and strings `"true"`/`"false"`/`"1"`/`"0"`/`"yes"`/`"no"` (case-insensitive); other values raise.
+- Context injectors (default off):
+  - `context.enabled` (bool): enable/disable context injection (default `false`).
+  - `context.injectors` (list[str]): ordered injector names; if omitted while enabled, defaults to `["season", "holiday"]` with a WARNING.
+  - `context.holiday.lookahead_days` (int), `context.holiday.base_probability` (float), `context.holiday.max_probability` (float).
+  - `context.calendar.enabled` (bool): not implemented yet; if set `true`, the run fails fast with a clear `ValueError`.
 
 ## Per-Image Identifiers (Seq + Title)
 
@@ -71,7 +76,7 @@ Sequence numbers are allocated as `max(seq)+1` from the manifest (starts at `1` 
 
 ### Failure behavior
 
-Title generation is fail-fast: if the title cannot be produced in a valid format, the run errors rather than silently omitting the identifier.
+Title generation is best-effort: it retries the model a few times, then falls back to a sanitized single-line title (logging the rejected attempts) so the run can continue.
 
 Optional: set `image.caption_font_path` to a `.ttf` file to control the caption font (otherwise common defaults are tried).
 
@@ -81,6 +86,7 @@ Optional: set `image.caption_font_path` to a `.ttf` file to control the caption 
 - Generation CSV: `prompt.generations_path` with schema `generation_id`, `selected_concepts` (JSON string), `final_image_prompt`, `image_path`, `created_at`, `seed`.
 - Transcript JSON: `<image.log_path>/<generation_id>_transcript.json` with keys:
   - `generation_id`, `seed`, `selected_concepts`, `steps`, `image_path`, `created_at`
+  - When context injection is enabled, the transcript also includes a `context` object (structured metadata keyed by injector name).
 
 ## How to run
 

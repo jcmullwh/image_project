@@ -5,6 +5,7 @@ import pytest
 from PIL import Image
 
 from titles import (
+    TITLE_SOURCE_FALLBACK,
     append_manifest_row,
     generate_title,
     get_next_seq,
@@ -111,6 +112,28 @@ def test_generate_title_collision_retries_then_disambiguates():
     )
 
     assert result.title == "Turquoise Citadel II"
+
+
+def test_generate_title_falls_back_instead_of_raising():
+    ai_text = _FakeTextAI(
+        [
+            "",
+            "turquoise citadel",
+            "One Two Three Four Five",
+        ]
+    )
+
+    result = generate_title(
+        ai_text=ai_text,
+        image_prompt="Some long image prompt here",
+        avoid_titles=[],
+        max_attempts=3,
+    )
+
+    assert result.title_source == TITLE_SOURCE_FALLBACK
+    assert result.title == "One Two Three Four Five"
+    assert len(result.attempts) == 3
+    assert result.attempts[0]["reason"] == "sanitize_failed"
 
 
 def test_caption_overlay_changes_pixels_without_resizing(tmp_path: Path):

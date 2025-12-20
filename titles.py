@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import logging
 import os
 import re
 import time
@@ -216,6 +217,39 @@ class GeneratedTitle:
     title: str
     title_source: str
     title_raw: str
+    attempts: tuple[dict[str, Any], ...] = ()
+
+
+def _sanitize_title_loose(raw_title: str) -> str:
+    lines = [ln.strip() for ln in str(raw_title).splitlines() if ln.strip()]
+    if not lines:
+        return ""
+    text = _strip_outer_quotes(lines[0])
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def _disambiguate_title_permissive(base_title: str, existing_titles: Iterable[str]) -> str:
+    existing = {_normalize_title_key(t) for t in existing_titles if t}
+    base = base_title.strip()
+    if not base:
+        base = "Untitled"
+
+    if _normalize_title_key(base) not in existing:
+        return base
+
+    for roman in _ROMAN_NUMERALS[1:]:  # start at II
+        candidate = f"{base} {roman}"
+        if _normalize_title_key(candidate) not in existing:
+            return candidate
+
+    # Last-resort suffix if we somehow exhaust roman numerals.
+    for idx in range(2, 50):
+        candidate = f"{base} ({idx})"
+        if _normalize_title_key(candidate) not in existing:
+            return candidate
+
+    return f"{base} ({int(time.time())})"
 
 
 def _disambiguate_title(base_title: str, existing_titles: Iterable[str]) -> str:
@@ -247,6 +281,7 @@ def generate_title(
     avoid_titles: Sequence[str] | None = None,
     max_attempts: int = 3,
     temperature: float = 0.2,
+    logger: logging.Logger | None = None,
 ) -> GeneratedTitle:
     """
     Generate a short, human-friendly title for an image prompt using the existing TextAI backend.
@@ -271,6 +306,7 @@ def generate_title(
 
     last_raw = ""
     last_sanitized = ""
+    attempts: list[dict[str, Any]] = []
     for attempt in range(1, max_attempts + 1):
         avoid_block = ""
         if avoid_titles:
@@ -297,24 +333,95 @@ def generate_title(
         raw = ai_text.text_chat(messages, temperature=temperature)
         last_raw = "" if raw is None else str(raw)
 
+        attempt_record: dict[str, Any] = {"attempt": attempt, "raw": last_raw}
+
         try:
             sanitized = sanitize_title(last_raw)
+        except Exception as exc:
+            attempt_record["status"] = "rejected"
+            attempt_record["reason"] = "sanitize_failed"
+            attempt_record["error"] = f"{exc.__class__.__name__}: {exc}"
+            attempts.append(dict(attempt_record))
+            if logger:
+                logger.info(
+                    "Title attempt %d rejected: %s (raw=%r)",
+                    attempt,
+                    attempt_record["error"],
+                    last_raw,
+                )
+            last_sanitized = ""
+            continue
+
+        try:
             validate_title(sanitized)
-        except Exception:
+        except Exception as exc:
+            attempt_record["status"] = "rejected"
+            attempt_record["reason"] = "validate_failed"
+            attempt_record["sanitized"] = sanitized
+            attempt_record["error"] = f"{exc.__class__.__name__}: {exc}"
+            attempts.append(dict(attempt_record))
+            if logger:
+                logger.info(
+                    "Title attempt %d rejected: %s (sanitized=%r raw=%r)",
+                    attempt,
+                    attempt_record["error"],
+                    sanitized,
+                    last_raw,
+                )
             last_sanitized = ""
             continue
 
         last_sanitized = sanitized
         if _normalize_title_key(sanitized) in existing_keys:
+            attempt_record["status"] = "rejected"
+            attempt_record["reason"] = "collision"
+            attempt_record["sanitized"] = sanitized
+            attempts.append(dict(attempt_record))
+            if logger:
+                logger.info(
+                    "Title attempt %d rejected: collision (sanitized=%r raw=%r)",
+                    attempt,
+                    sanitized,
+                    last_raw,
+                )
             continue
 
-        return GeneratedTitle(title=sanitized, title_source=TITLE_SOURCE_LLM, title_raw=last_raw)
+        attempt_record["status"] = "accepted"
+        attempt_record["sanitized"] = sanitized
+        attempts.append(dict(attempt_record))
+        return GeneratedTitle(
+            title=sanitized,
+            title_source=TITLE_SOURCE_LLM,
+            title_raw=last_raw,
+            attempts=tuple(dict(item) for item in attempts),
+        )
 
     if not last_sanitized:
-        raise RuntimeError(
-            f"Title generation failed: model returned invalid titles for {max_attempts} attempts"
+        loose = _sanitize_title_loose(last_raw)
+        if not loose:
+            loose = "Untitled"
+
+        disambiguated = _disambiguate_title_permissive(loose, avoid_titles)
+        if logger:
+            logger.warning(
+                "Title generation: using fallback title after %d invalid attempts (title=%r raw=%r)",
+                max_attempts,
+                disambiguated,
+                last_raw,
+            )
+
+        return GeneratedTitle(
+            title=disambiguated,
+            title_source=TITLE_SOURCE_FALLBACK,
+            title_raw=last_raw,
+            attempts=tuple(dict(item) for item in attempts),
         )
 
     disambiguated = _disambiguate_title(last_sanitized, avoid_titles)
-    return GeneratedTitle(title=disambiguated, title_source=TITLE_SOURCE_LLM, title_raw=last_raw)
+    return GeneratedTitle(
+        title=disambiguated,
+        title_source=TITLE_SOURCE_LLM,
+        title_raw=last_raw,
+        attempts=tuple(dict(item) for item in attempts),
+    )
 

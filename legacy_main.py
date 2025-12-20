@@ -24,6 +24,19 @@ def message_with_log(
         logger.info("Dispatching prompt: %s", label)
     messages_send.continue_messages(user_role, prompt)
     messages_log.continue_messages(user_role, prompt)
+    if logger:
+        prompt_chars = len(prompt)
+        input_chars = sum(
+            len(str(message.get("content", "")))
+            for message in messages_send.messages
+            if isinstance(message, dict)
+        )
+        logger.info(
+            "Sending prompt for %s (prompt_chars=%d, input_chars=%d)",
+            label,
+            prompt_chars,
+            input_chars,
+        )
     try:
         response = ai_text.text_chat(messages_send.messages, **kwargs)
     except Exception:
