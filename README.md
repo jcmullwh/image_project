@@ -6,6 +6,50 @@ Personal project exploring prompting and "art" generation. Takes randomly-select
 
 Uses tree-of-thought prompting, experiments with iterative improvement and identities to help guide prompt development.
 
+## Step-Driven Prompt Pipeline
+
+The generation workflow is implemented as a small, declarative chat pipeline built from **Steps** (`ChatStep`) and nested **Blocks** (`Block`). Each step records `{name, path, prompt, response, params, created_at}` into a JSON transcript for later inspection.
+
+See `docs/pipeline.md` for the execution model, merge modes, and the ToT/enclave wrapping pattern.
+
+### Add a new prompt step
+
+1. Add a new prompt function (or inline prompt factory) in `main.py`.
+2. Add a new `ChatStep(...)` and include it in the `pipeline_root` construction in `main.run_generation()` (optionally wrap it as a `merge="last_response"` stage block and/or use `capture_key` to store the final output in `ctx.outputs`).
+
+### Hardening behavior (fail-fast + reliable artifacts)
+
+- Pipeline fails fast on `None` / non-string / empty prompts or responses (unless a step explicitly opts into empties via `allow_empty_prompt` / `allow_empty_response`).
+- Config booleans are parsed strictly (e.g. `enabled: "false"` is treated as false; invalid values raise with the full key path).
+- Image save failures raise and abort the run (no successful run with missing files).
+- Transcript JSON is written on success and on failure (once `RunContext` exists). Failed runs include an `error` object with `type`, `message`, `phase`, and optional `step`.
+- If `rclone.enabled: true`, `rclone.remote` and `rclone.album` are required (no empty-string fallbacks).
+- `ChatStep.temperature` is the only supported way to set temperature (do not pass `"temperature"` inside `ChatStep.params`).
+
+### Legacy code
+
+- `main.py` contains the canonical implementation (`run_generation()`).
+- `main_legacy.py` and `legacy_main.py` contain older experimental orchestration/helpers kept for reference.
+
+## Configuration
+
+Required keys (fail-fast if missing/empty):
+
+- `prompt.categories_path`
+- `prompt.profile_path`
+- `prompt.generations_path`
+- `image.generation_path` (preferred) or `image.save_path` (deprecated alias)
+- `image.upscale_path`
+- `image.log_path`
+
+Optional keys:
+
+- `prompt.random_seed` (int): makes concept selection deterministic; if omitted, a seed is generated and logged.
+- `prompt.titles_manifest_path`: defaults to `<image.generation_path>/titles_manifest.csv` (logged at WARNING when defaulted).
+- `image.caption_font_path`: optional `.ttf` for the caption overlay.
+  - If explicitly set and the font cannot be loaded, the run fails loudly (no silent fallback).
+- Boolean flags (e.g. `rclone.enabled`, `upscale.enabled`) accept booleans, `0`/`1`, and strings `"true"`/`"false"`/`"1"`/`"0"`/`"yes"`/`"no"` (case-insensitive); other values raise.
+
 ## Per-Image Identifiers (Seq + Title)
 
 Each generated image is post-processed to add a subtle caption overlay so a viewer can reference images during feedback:
@@ -30,6 +74,18 @@ Sequence numbers are allocated as `max(seq)+1` from the manifest (starts at `1` 
 Title generation is fail-fast: if the title cannot be produced in a valid format, the run errors rather than silently omitting the identifier.
 
 Optional: set `image.caption_font_path` to a `.ttf` file to control the caption font (otherwise common defaults are tried).
+
+## Run Artifacts
+
+- Image: `<image.generation_path>/<generation_id>_image.jpg` (and optionally `<generation_id>_image_4k.jpg` when upscaling is enabled).
+- Generation CSV: `prompt.generations_path` with schema `generation_id`, `selected_concepts` (JSON string), `final_image_prompt`, `image_path`, `created_at`, `seed`.
+- Transcript JSON: `<image.log_path>/<generation_id>_transcript.json` with keys:
+  - `generation_id`, `seed`, `selected_concepts`, `steps`, `image_path`, `created_at`
+
+## How to run
+
+- Generate: `pdm run generate`
+- Tests: `pdm run test` (or `pytest`)
 
 ## Examples:
 

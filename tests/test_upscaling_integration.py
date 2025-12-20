@@ -1,3 +1,4 @@
+import os
 import sys
 from pathlib import Path
 
@@ -8,36 +9,39 @@ from upscaling import UpscaleConfig, upscale_image_to_4k
 
 def _make_fake_realesrgan(root: Path) -> Path:
     """Create a fake realesrgan executable that writes a tiny PNG and exits 0."""
-    script_path = root / "fake_realesrgan.py"
-    script_path.write_text(
-        "\n".join(
-            [
-                "import sys",
-                "from pathlib import Path",
-                "from PIL import Image",
-                "args = sys.argv[1:]",
-                "try:",
-                "    out_idx = args.index('-o')",
-                "    out_path = Path(args[out_idx + 1])",
-                "except (ValueError, IndexError):",
-                "    sys.exit(2)",
-                "out_path.parent.mkdir(parents=True, exist_ok=True)",
-                "Image.new('RGB', (8, 8), (0, 255, 0)).save(out_path, format='PNG')",
-            ]
-        )
-    )
+    tool_lines = [
+        "import sys",
+        "from pathlib import Path",
+        "from PIL import Image",
+        "args = sys.argv[1:]",
+        "try:",
+        "    out_idx = args.index('-o')",
+        "    out_path = Path(args[out_idx + 1])",
+        "except (ValueError, IndexError):",
+        "    sys.exit(2)",
+        "out_path.parent.mkdir(parents=True, exist_ok=True)",
+        "Image.new('RGB', (8, 8), (0, 255, 0)).save(out_path, format='PNG')",
+    ]
 
-    # Windows-friendly wrapper: a .cmd that invokes Python on the script.
-    cmd_path = root / "realesrgan-ncnn-vulkan.cmd"
-    cmd_path.write_text(
-        '\r\n'.join(
-            [
-                "@echo off",
-                f'"{sys.executable}" "{script_path}" %*',
-            ]
+    if os.name == "nt":
+        script_path = root / "fake_realesrgan.py"
+        script_path.write_text("\n".join(tool_lines))
+
+        cmd_path = root / "realesrgan-ncnn-vulkan.cmd"
+        cmd_path.write_text(
+            "\r\n".join(
+                [
+                    "@echo off",
+                    f'"{sys.executable}" "{script_path}" %*',
+                ]
+            )
         )
-    )
-    return cmd_path
+        return cmd_path
+
+    exe_path = root / "realesrgan-ncnn-vulkan"
+    exe_path.write_text("\n".join(["#!/usr/bin/env python3", *tool_lines]))
+    os.chmod(exe_path, 0o755)
+    return exe_path
 
 
 def test_integration_uses_binary_and_writes_expected_size(tmp_path: Path):

@@ -1,15 +1,25 @@
 import base64
+import json
 import logging
 import os
 import random
 import subprocess
 import sys
+import time
+from typing import Any
 
 import pandas as pd
 
-from ai_backend import ImageAI, TextAI
-from logging_utils import write_messages_log
+try:
+    from ai_backend import ImageAI, TextAI
+except ModuleNotFoundError:  # pragma: no cover
+    ImageAI = None  # type: ignore[assignment]
+    TextAI = None  # type: ignore[assignment]
 from message_handling import MessageHandler
+from pipeline import Block, ChatRunner, ChatStep, RunContext
+from records import append_generation_row
+from run_config import RunConfig
+from transcript import write_transcript
 from upscaling import UpscaleConfig, upscale_image_to_4k
 from titles import (
     append_manifest_row,
@@ -20,12 +30,10 @@ from titles import (
     utc_now_iso8601,
 )
 from utils import (
-    download_and_convert_image,
     generate_file_location,
     generate_unique_id,
     load_config,
     save_image,
-    save_to_csv,
 )
 
 def load_prompt_data(file_path):
@@ -35,10 +43,10 @@ def load_prompt_data(file_path):
     
     return data
 
-def generate_first_prompt(prompt_data,user_profile):
+def generate_first_prompt(prompt_data, user_profile, rng: random.Random):
 
-    likes = user_profile['Likes'].dropna().tolist()
-    dislikes = user_profile['Dislikes'].tolist()
+    likes = user_profile["Likes"].dropna().astype(str).tolist()
+    dislikes = user_profile["Dislikes"].dropna().astype(str).tolist()
     # Convert lists to comma-separated strings
     likes_text = ", ".join(likes)
     dislikes_text = ", ".join(dislikes)
@@ -65,17 +73,17 @@ Finally, ensure that they are not boring, cliche, trite, overdone, obvious, or m
     prompt = preamble
     random_values = []
 
-    random_value1 = get_random_value_from_group(group1, prompt_data)
+    random_value1 = get_random_value_from_group(group1, prompt_data, rng)
     if random_value1:
         prompt += f"{random_value1} "
         random_values.append(random_value1)
 
-    random_value2 = get_random_value_from_group(group2, prompt_data)
+    random_value2 = get_random_value_from_group(group2, prompt_data, rng)
     if random_value2:
         prompt += f"{random_value2} "
         random_values.append(random_value2)
 
-    random_value3 = get_random_value_from_group(group3, prompt_data)
+    random_value3 = get_random_value_from_group(group3, prompt_data, rng)
     if random_value3:
         prompt += f"{random_value3} "
         random_values.append(random_value3)
@@ -86,12 +94,12 @@ Finally, ensure that they are not boring, cliche, trite, overdone, obvious, or m
     return prompt, random_values
 
 # Function to get a random value from a group of columns
-def get_random_value_from_group(group, data):
+def get_random_value_from_group(group, data, rng: random.Random):
     combined_values = []
     for column in group:
         column_values = data[column].dropna().tolist()
         combined_values.extend(column_values)
-    return random.choice(combined_values) if combined_values else None
+    return rng.choice(combined_values) if combined_values else None
 
 
 
@@ -193,19 +201,89 @@ Composition: Portrait, headshot, closeup, birds-eye view, etc.\
 This time, provide only the final prompt to the AI. Do not include anything except the final prompt in your response."
     return seventh_prompt
 
-def enclave_opinion():
-    enclave_prompt = "Evaluating the last response, what is the opinion of each of the five artists about how it answers the intent of the quetions and tasks being posed? The five artists are \
-'Hemingway': an AI writer whose style is terse and direct, that embodies the iceberg theory of story telling - the facts float above the water, the supporting structure and meaning are hidden below the surface. \
-'Munch': an AI artist who is the world leading expert in creating emotional resonance that embodies the idea that art is not about what you see, but what you make others see. \
-'da Vinci': an AI artist who is the best in history at tying together disparate elements into a cohesive whole.\
-'Representative': an AI artist who is the best in history at interpreting and translating human preferences into Art. This artist is an expert on Lana's likes and dislikes.\
-'Chameleon': an AI artist who is the best in history at the specific style and subject matter of the art piece being described. \
-How should it be adjusted? Each artist considers the entirety of the conversation up until this point to inform their evaluation of the last response and then provides very specific observations and adjustments."
-    return enclave_prompt
+ENCLAVE_ARTISTS: list[tuple[str, str, str]] = [
+    (
+        "hemingway",
+        "Hemingway",
+        "Terse, concrete, and opinionated. Iceberg theory: focus on what matters and cut fluff.",
+    ),
+    (
+        "munch",
+        "Munch",
+        "Emotion-first expressionist. Prioritize mood, tension, symbolism, and visceral resonance.",
+    ),
+    (
+        "da_vinci",
+        "da Vinci",
+        "Systems thinker. Tie disparate elements into a cohesive whole with strong composition and purpose.",
+    ),
+    (
+        "representative",
+        "Representative",
+        "Audience translator. Optimize for Lana's stated likes/dislikes; remove anything that will annoy her.",
+    ),
+    (
+        "chameleon",
+        "Chameleon",
+        "Match the specific style and subject matter implied by the draft; sharpen genre conventions and specificity.",
+    ),
+]
 
-def enclave_consensus():
-    enclave_consensus_prompt = "A new panel of three general experts from the enclave discuss the response and inputs of the five artists. They weigh the options and the overal goal. What is their consensus on how the prompt should be adjusted? What is the new response?"
-    return enclave_consensus_prompt
+
+def enclave_thread_prompt(label: str, persona: str) -> str:
+    return (
+        f"You are {label}.\n"
+        f"Persona: {persona}\n\n"
+        "You are a single voice.\n"
+        "You do NOT see any other artists' feedback.\n"
+        "Critique and refine ONLY the last assistant response in this conversation.\n"
+        "Do not add meta commentary.\n\n"
+        "Return a structured critique with two sections:\n"
+        "## Issues\n"
+        "- ...\n\n"
+        "## Edits\n"
+        "- ... (concrete replacements/rewrites)\n"
+    )
+
+
+def make_tot_enclave_block(stage_name: str) -> Block:
+    nodes: list[Any] = []
+
+    for artist_key, label, persona in ENCLAVE_ARTISTS:
+        capture_key = f"enclave.{stage_name}.{artist_key}"
+
+        nodes.append(
+            ChatStep(
+                name=artist_key,
+                merge="none",
+                capture_key=capture_key,
+                prompt=lambda _ctx, label=label, persona=persona: enclave_thread_prompt(
+                    label, persona
+                ),
+                temperature=0.8,
+            )
+        )
+
+    def consensus_prompt(ctx: RunContext, stage_name: str = stage_name) -> str:
+        notes: list[str] = []
+        for artist_key, label, _persona in ENCLAVE_ARTISTS:
+            key = f"enclave.{stage_name}.{artist_key}"
+            value = ctx.outputs.get(key)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"Missing enclave thread output: {key}")
+            notes.append(f"## {label}\n{value.strip()}")
+
+        return (
+            "You are the enclave consensus editor.\n"
+            "Using the independent artist notes below, revise the last assistant response.\n"
+            "Keep the original intent and constraints.\n"
+            "Return ONLY the revised response (no preamble, no analysis).\n\n"
+            + "\n\n".join(notes)
+        )
+
+    nodes.append(ChatStep(name="consensus", prompt=consensus_prompt, temperature=0.8))
+
+    return Block(name="tot_enclave", merge="all_messages", nodes=nodes)
 
 
 def configure_stdio_utf8():
@@ -277,345 +355,316 @@ def upload_to_photos_via_rclone(
     return True
 
 
-def message_with_log(ai_text: TextAI,
-                    messages_send: MessageHandler,
-                    messages_log: MessageHandler,
-                    prompt:str,
-                    agent_role:str,
-                    user_role:str,
-                    logger: logging.Logger | None = None,
-                    step_name: str | None = None,
-                    **kwargs
-                    ):
-    label = step_name or prompt[:60]
-    if logger:
-        logger.info("Dispatching prompt: %s", label)
-    messages_send.continue_messages(user_role,prompt)
-    messages_log.continue_messages(user_role,prompt)
-    try:
-        response = ai_text.text_chat(messages_send.messages,**kwargs)
-    except Exception:
-        if logger:
-            logger.exception("AI text chat failed for step %s", label)
-        raise
-    print("Response:\n", response)
-    if logger:
-        logger.info("Received response for %s (chars=%d)", label, len(str(response)))
-    messages_send.continue_messages(agent_role,response)
-    messages_log.continue_messages(agent_role,response)
-    return messages_send,messages_log,response
 
-def tot_enclave(ai_text: TextAI,
-                messages_main: MessageHandler,
-                messages_log: MessageHandler,
-                prompt: str,
-                agent_role: str,
-                user_role:str ,
-                logger: logging.Logger | None = None,
-                **kwargs
-                ):
-    messages = messages_main.copy()
-    messages, messages_log,_ = message_with_log(ai_text, messages, messages_log, prompt,agent_role, user_role, logger=logger, **kwargs)
-    messages, messages_log,_ = message_with_log(ai_text, messages, messages_log, enclave_opinion(),agent_role, user_role, logger=logger, **kwargs)
-    messages, messages_log, response = message_with_log(ai_text, messages, messages_log, enclave_consensus(),agent_role, user_role, logger=logger, **kwargs)
-    messages_main.continue_messages(agent_role, response)
-    return messages_main, messages_log
+GENERATION_CSV_FIELDNAMES: list[str] = [
+    "generation_id",
+    "selected_concepts",
+    "final_image_prompt",
+    "image_path",
+    "created_at",
+    "seed",
+]
 
-def main(): 
-    
-    configure_stdio_utf8()
-    generation_id = generate_unique_id()
-    try:
-        config = load_config()
-    except Exception:
-        fallback_logger, fallback_log_path = setup_operational_logger(os.getcwd(), generation_id)
-        fallback_logger.exception("Failed to load configuration. Logging to fallback file at %s", fallback_log_path)
-        raise
 
-    image_cfg = config.get("image", {}) or {}
-    if not image_cfg:
-        raise ValueError("Missing required 'image' configuration section")
+def run_generation(cfg_dict, *, generation_id: str | None = None) -> RunContext:
+    cfg, cfg_warnings = RunConfig.from_dict(cfg_dict)
 
-    def require_path(key: str) -> str:
-        value = image_cfg.get(key)
-        if not value:
-            raise ValueError(f"Missing required config value image.{key}")
-        return value
-
-    generation_dir = require_path("generation_path")
-    upscale_dir = require_path("upscale_path")
-    log_dir = require_path("log_path")
-
-    prompt_cfg = config.get("prompt", {}) or {}
-    manifest_path = prompt_cfg.get("titles_manifest_path") or os.path.join(
-        generation_dir, "titles_manifest.csv"
-    )
-    caption_font_path = image_cfg.get("caption_font_path")
-
-    log_full_path_and_name = generate_file_location(log_dir, generation_id+'_log', '.txt')
-    messages_text = ""
-    logger, operational_log_path = setup_operational_logger(log_dir, generation_id)
+    generation_id = generation_id or generate_unique_id()
+    logger, operational_log_path = setup_operational_logger(cfg.log_dir, generation_id)
     logger.info("Run started for generation %s", generation_id)
 
+    for warning in cfg_warnings:
+        logger.warning("%s", warning)
+
+    ctx: RunContext | None = None
+    transcript_path: str | None = None
+    phase = "init"
+
     try:
-        categories_path = config['prompt']['categories_path']
-        categories_names = config['prompt']['categories_names']
-        
-        logger.info("Loading prompt data from %s", categories_path)
-        prompt_data = load_prompt_data(categories_path)
-        logger.info("Loaded %d category rows with columns: %s", len(prompt_data), prompt_data.columns.tolist())
-        
-        profile_path = config['prompt']['profile_path']
-        logger.info("Loading user profile from %s", profile_path)
-        user_profile = pd.read_csv(profile_path)
+        phase = "seed"
+        seed = cfg.random_seed
+        if seed is None:
+            seed = int(time.time())
+            logger.info("No prompt.random_seed configured; generated seed=%d", seed)
+        else:
+            logger.info("Using configured prompt.random_seed=%d", seed)
+
+        rng = random.Random(seed)
+
+        phase = "data_load"
+        logger.info("Loading prompt data from %s", cfg.categories_path)
+        prompt_data = load_prompt_data(cfg.categories_path)
+        logger.info("Loaded %d category rows", len(prompt_data))
+
+        logger.info("Loading user profile from %s", cfg.profile_path)
+        user_profile = pd.read_csv(cfg.profile_path)
         logger.info("Loaded %d user profile rows", len(user_profile))
-        
-        prompt_1,gen_keywords = generate_first_prompt(prompt_data,user_profile)
-        print("First Prompt:\n", prompt_1)
-        logger.info("Generated first prompt with %d keyword selections", len(gen_keywords))
-        
-        ai_text = TextAI(model="gpt-5.2", reasoning={ "effort": "medium" })
+
+        phase = "prompt_generation"
+        prompt_1, selected_concepts = generate_first_prompt(prompt_data, user_profile, rng)
+        logger.info("Generated first prompt (selected_concepts=%d)", len(selected_concepts))
+
+        phase = "init_text_ai"
+        text_ai_cls = TextAI
+        if text_ai_cls is None:  # pragma: no cover
+            from ai_backend import TextAI as text_ai_cls  # type: ignore[assignment]
+
+        ai_text = text_ai_cls(model="gpt-5.2", reasoning={"effort": "medium"})
         logger.info("Initialized TextAI with model gpt-5.2")
-        
-        user_role = "user"
-        agent_role = "assistant"
-        system_prompt = "You are a highly skilled enclave of Artists trained to generate meaningful, edgy, artistic images on par with the greatest artists of any time, anywhere, past or future, Earth or any other planet. The enclave invents unique images that weave together seemingly disparate elements into cohesive wholes that push boundaries and elicit deep emotions in a human viewer."
-        
-        messages_main = MessageHandler(system_prompt)
-        messages_main.continue_messages(user_role,prompt_1)
-        logger.info("Sending initial prompt to AI")
-        try:
-            response_1 = ai_text.text_chat(messages_main.messages,temperature=.8)
-        except Exception:
-            logger.exception("Initial prompt failed")
-            raise
-        print("First Response:\n", response_1)
-        logger.info("Received initial response (chars=%d)", len(str(response_1)))
-        messages_main.continue_messages(agent_role,response_1)
-        # initialize messages_log
-        messages_main, messages_log,_ = message_with_log(ai_text, messages_main, messages_main.copy(), enclave_opinion(), agent_role, user_role, logger=logger, step_name="enclave_opinion_initial", temperature=.8)
-        
-        print("SECTION 2-----------------------------------------")
-        second_prompt = generate_second_prompt()
-        messages_main, messages_log,_ = message_with_log(ai_text, 
-                                                        messages_main, 
-                                                        messages_log, 
-                                                        second_prompt,
-                                                        agent_role, 
-                                                        user_role, 
-                                                        logger=logger,
-                                                        step_name="section_2_choice",
-                                                        temperature=.8
-                                                        )    
 
-        print("SECTION 2B-----------------------------------------")
-        secondB_prompt = generate_secondB_prompt()
-        messages_main, messages_log,_ = message_with_log(ai_text,
-                                                        messages_main,
-                                                        messages_log,
-                                                        secondB_prompt,
-                                                        agent_role,
-                                                        user_role,
-                                                        logger=logger,
-                                                        step_name="section_2b_title_and_story",
-                                                        temperature=.8
-                                                        )
+        system_prompt = (
+            "You are a highly skilled enclave of Artists trained to generate meaningful, edgy, artistic images on par "
+            "with the greatest artists of any time, anywhere, past or future, Earth or any other planet. The enclave "
+            "invents unique images that weave together seemingly disparate elements into cohesive wholes that push "
+            "boundaries and elicit deep emotions in a human viewer."
+        )
 
-        print("SECTION 3-----------------------------------------")
-        third_prompt = generate_third_prompt()
-        messages_main, messages_log,_ = message_with_log(ai_text, 
-                                                        messages_main, 
-                                                        messages_log, 
-                                                        third_prompt,
-                                                        agent_role,
-                                                        user_role,
-                                                        logger=logger,
-                                                        step_name="section_3_message_focus",
-                                                        temperature=.8
-                                                        )
+        phase = "context"
+        ctx = RunContext(
+            generation_id=generation_id,
+            cfg=cfg,
+            logger=logger,
+            rng=rng,
+            seed=seed,
+            created_at=utc_now_iso8601(),
+            messages=MessageHandler(system_prompt),
+        )
+        ctx.selected_concepts = selected_concepts
 
-        print("SECTION 3B-----------------------------------------")
-        thirdB_prompt = generate_thirdB_prompt()
-        messages_main, messages_log,_ = message_with_log(ai_text,
-                                                        messages_main,
-                                                        messages_log,
-                                                        thirdB_prompt,
-                                                        agent_role,
-                                                        user_role,
-                                                        logger=logger,
-                                                        step_name="section_3b_message_clarity",
-                                                        temperature=.8
-                                                        )
+        transcript_path = generate_file_location(cfg.log_dir, generation_id + "_transcript", ".json")
 
-        print("SECTION 4-----------------------------------------")
-        fourth_prompt = generate_fourth_prompt()
-        messages_main, messages_log,_ = message_with_log(ai_text,
-                                                        messages_main,
-                                                        messages_log,
-                                                        fourth_prompt,
-                                                        agent_role,
-                                                        user_role,
-                                                        logger=logger,
-                                                        step_name="section_4_concise_description",
-                                                        temperature=.8
-                                                        )
-        
-        print("DALLE-----------------------------------------")
-        dalle_context = generate_dalle_prompt()
-        messages, messages_log,dalle_prompt = message_with_log(ai_text,
-                                                                messages_main, 
-                                                                messages_log, 
-                                                                dalle_context,
-                                                                agent_role, 
-                                                                user_role, 
-                                                                logger=logger,
-                                                                step_name="dalle_prompt_creation",
-                                                                temperature=.8
-                                                                )
-        
-        
-        print("SECTION 5-----------------------------------------")
-        fifth_prompt = generate_fifth_prompt()
-        messages_main, messages_log,_ = message_with_log(ai_text,
-                                                        messages_main,
-                                                        messages_log,
-                                                        fifth_prompt,
-                                                        agent_role,
-                                                        user_role,
-                                                        logger=logger,
-                                                        step_name="section_5_midjourney_refine",
-                                                        temperature=.8
-                                                        )
- 
-        ai_image = ImageAI()
+        phase = "pipeline"
+        def refined_stage(stage_step: ChatStep, *, capture_key: str | None = None) -> Block:
+            stage_name = stage_step.name
+            if stage_name is None:
+                raise ValueError("Stage steps must have names for stable pipeline paths")
+            if stage_step.capture_key:
+                raise ValueError(
+                    f"Stage step {stage_name} must not set capture_key; pass capture_key to refined_stage()"
+                )
+            draft_step = ChatStep(
+                name="draft",
+                prompt=stage_step.prompt,
+                temperature=stage_step.temperature,
+                allow_empty_prompt=stage_step.allow_empty_prompt,
+                allow_empty_response=stage_step.allow_empty_response,
+                params=dict(stage_step.params),
+            )
+            enclave = make_tot_enclave_block(stage_name)
+            return Block(
+                name=stage_name,
+                merge="last_response",
+                nodes=[draft_step, enclave],
+                capture_key=capture_key,
+            )
+
+        pipeline_root = Block(
+            name="pipeline",
+            merge="all_messages",
+            nodes=[
+                refined_stage(ChatStep(name="initial_prompt", prompt=prompt_1, temperature=0.8)),
+                refined_stage(
+                    ChatStep(
+                        name="section_2_choice",
+                        prompt=lambda _ctx: generate_second_prompt(),
+                        temperature=0.8,
+                    )
+                ),
+                refined_stage(
+                    ChatStep(
+                        name="section_2b_title_and_story",
+                        prompt=lambda _ctx: generate_secondB_prompt(),
+                        temperature=0.8,
+                    )
+                ),
+                refined_stage(
+                    ChatStep(
+                        name="section_3_message_focus",
+                        prompt=lambda _ctx: generate_third_prompt(),
+                        temperature=0.8,
+                    )
+                ),
+                refined_stage(
+                    ChatStep(
+                        name="section_3b_message_clarity",
+                        prompt=lambda _ctx: generate_thirdB_prompt(),
+                        temperature=0.8,
+                    )
+                ),
+                refined_stage(
+                    ChatStep(
+                        name="section_4_concise_description",
+                        prompt=lambda _ctx: generate_fourth_prompt(),
+                        temperature=0.8,
+                    )
+                ),
+                refined_stage(
+                    ChatStep(
+                        name="dalle_prompt_creation",
+                        prompt=lambda _ctx: generate_dalle_prompt(),
+                        temperature=0.8,
+                    ),
+                    capture_key="dalle_prompt",
+                ),
+                refined_stage(
+                    ChatStep(
+                        name="section_5_midjourney_refine",
+                        prompt=lambda _ctx: generate_fifth_prompt(),
+                        temperature=0.8,
+                    )
+                ),
+            ],
+        )
+
+        runner = ChatRunner(ai_text=ai_text)
+        runner.run(ctx, pipeline_root)
+
+        phase = "capture"
+        dalle_prompt = ctx.outputs.get("dalle_prompt")
+        if not dalle_prompt:
+            raise ValueError("Pipeline did not produce required output: dalle_prompt")
+
+        phase = "init_image_ai"
+        image_ai_cls = ImageAI
+        if image_ai_cls is None:  # pragma: no cover
+            from ai_backend import ImageAI as image_ai_cls  # type: ignore[assignment]
+
+        ai_image = image_ai_cls()
         logger.info("Initialized ImageAI")
-        
+
         image_model = "gpt-image-1.5"
         image_size = "1536x1024"
         image_quality = "high"
 
+        os.makedirs(cfg.generation_dir, exist_ok=True)
+        os.makedirs(cfg.log_dir, exist_ok=True)
+        os.makedirs(cfg.upscale_dir, exist_ok=True)
+
+        phase = "image_pipeline"
         upload_target_path = ""
         seq = -1
         title_result = None
 
-        try:
-            with manifest_lock(manifest_path):
-                manifest_rows = read_manifest(manifest_path)
-                existing_titles = [row.get("title", "") for row in manifest_rows if row.get("title")]
-                existing_titles = list(reversed(existing_titles))
+        with manifest_lock(cfg.titles_manifest_path):
+            manifest_rows = read_manifest(cfg.titles_manifest_path)
+            existing_titles = [row.get("title", "") for row in manifest_rows if row.get("title")]
+            existing_titles = list(reversed(existing_titles))
 
-                seq = get_next_seq(manifest_path)
-                title_result = generate_title(
-                    ai_text=ai_text,
-                    image_prompt=dalle_prompt,
-                    avoid_titles=existing_titles,
+            seq = get_next_seq(cfg.titles_manifest_path)
+            title_result = generate_title(
+                ai_text=ai_text,
+                image_prompt=dalle_prompt,
+                avoid_titles=existing_titles,
+            )
+
+            caption_text = f"#{seq:03d} - {title_result.title}"
+            logger.info("Assigned image identifier %s", caption_text)
+
+            image_result = ai_image.generate_image(
+                dalle_prompt,
+                model=image_model,
+                size=image_size,
+                quality=image_quality,
+                moderation="low",
+            )
+            logger.info(
+                "Image generation request sent (model=%s, size=%s, quality=%s)",
+                image_model,
+                image_size,
+                image_quality,
+            )
+
+            image_data = image_result["image"]
+            logger.debug("Received image payload length: %d", len(image_data))
+            image_bytes = base64.b64decode(image_data)
+
+            image_full_path_and_name = generate_file_location(
+                cfg.generation_dir, generation_id + "_image", ".jpg"
+            )
+            save_image(
+                image_bytes,
+                image_full_path_and_name,
+                caption_text=caption_text,
+                caption_font_path=cfg.caption_font_path,
+            )
+            logger.info("Saved image to %s", image_full_path_and_name)
+            upload_target_path = image_full_path_and_name
+            ctx.image_path = upload_target_path
+
+            if cfg.upscale_enabled:
+                upscale_out_path = generate_file_location(
+                    cfg.upscale_dir,
+                    generation_id + "_image_4k",
+                    ".jpg",
                 )
 
-                caption_text = f"#{seq:03d} - {title_result.title}"
-                logger.info("Assigned image identifier %s", caption_text)
-
-                image_result = ai_image.generate_image(
-                    dalle_prompt,
-                    model=image_model,
-                    size=image_size,
-                    quality=image_quality,
-                    moderation="low",
+                upscale_cfg = UpscaleConfig(
+                    target_long_edge_px=cfg.upscale_target_long_edge_px,
+                    engine=cfg.upscale_engine,
+                    realesrgan_binary=cfg.upscale_realesrgan_binary,
+                    model_name=cfg.upscale_model_name,
+                    model_path=cfg.upscale_model_path,
+                    tile_size=cfg.upscale_tile_size,
+                    tta=cfg.upscale_tta,
+                    allow_fallback_resize=cfg.upscale_allow_fallback_resize,
                 )
+
                 logger.info(
-                    "Image generation request sent (model=%s, size=%s, quality=%s)",
-                    image_model,
-                    image_size,
-                    image_quality,
+                    "Upscaling enabled: engine=%s model=%s target_long_edge_px=%d",
+                    upscale_cfg.engine,
+                    upscale_cfg.model_name,
+                    upscale_cfg.target_long_edge_px,
                 )
-
-                image_data = image_result["image"]
-                logger.debug("Received image payload length: %d", len(image_data))
-
-                image_bytes = base64.b64decode(image_data)
-
-                data = [generation_id, gen_keywords, dalle_prompt]
-
-                csv_file = config["prompt"]["generations_path"]
-                save_to_csv(data, csv_file)
-                logger.info("Saved generation metadata to %s", csv_file)
-
-                os.makedirs(generation_dir, exist_ok=True)
-                os.makedirs(log_dir, exist_ok=True)
-                os.makedirs(upscale_dir, exist_ok=True)
-
-                image_full_path_and_name = generate_file_location(
-                    generation_dir, generation_id + "_image", ".jpg"
+                upscale_image_to_4k(
+                    input_path=image_full_path_and_name,
+                    output_path=upscale_out_path,
+                    config=upscale_cfg,
                 )
-                save_image(
-                    image_bytes,
-                    image_full_path_and_name,
-                    caption_text=caption_text,
-                    caption_font_path=caption_font_path,
-                )
-                logger.info("Saved image to %s", image_full_path_and_name)
+                logger.info("Saved 4K upscaled image to %s", upscale_out_path)
+                upload_target_path = upscale_out_path
+                ctx.image_path = upload_target_path
 
-                upload_target_path = image_full_path_and_name
+            append_manifest_row(
+                cfg.titles_manifest_path,
+                {
+                    "seq": int(seq),
+                    "title": title_result.title,
+                    "generation_id": generation_id,
+                    "image_prompt": dalle_prompt,
+                    "image_path": upload_target_path,
+                    "created_at": utc_now_iso8601(),
+                    "model": image_model,
+                    "size": image_size,
+                    "quality": image_quality,
+                    "seed": image_result.get("seed", ""),
+                    "title_source": getattr(title_result, "title_source", "llm"),
+                    "title_raw": getattr(title_result, "title_raw", ""),
+                },
+            )
+            logger.info("Appended manifest row to %s (seq=%d)", cfg.titles_manifest_path, seq)
 
-                upscale_section = config.get("upscale", {}) or {}
-                if upscale_section.get("enabled", False):
-                    upscale_out_path = generate_file_location(
-                        upscale_dir,
-                        generation_id + "_image_4k",
-                        ".jpg",
-                    )
+        phase = "records"
+        append_generation_row(
+            cfg.generations_csv_path,
+            {
+                "generation_id": generation_id,
+                "selected_concepts": json.dumps(selected_concepts, ensure_ascii=False),
+                "final_image_prompt": dalle_prompt,
+                "image_path": upload_target_path,
+                "created_at": ctx.created_at,
+                "seed": seed,
+            },
+            GENERATION_CSV_FIELDNAMES,
+        )
+        logger.info("Appended generation row to %s", cfg.generations_csv_path)
 
-                    upscale_cfg = UpscaleConfig(
-                        target_long_edge_px=int(upscale_section.get("target_long_edge_px", 3840)),
-                        engine=str(upscale_section.get("engine", "realesrgan-ncnn-vulkan")),
-                        realesrgan_binary=upscale_section.get("realesrgan_binary"),
-                        model_name=str(upscale_section.get("model_name", "realesrgan-x4plus")),
-                        tile_size=int(upscale_section.get("tile_size", 0)),
-                        tta=bool(upscale_section.get("tta", False)),
-                        allow_fallback_resize=bool(upscale_section.get("allow_fallback_resize", False)),
-                    )
-
-                    logger.info(
-                        "Upscaling enabled: engine=%s model=%s target_long_edge_px=%d",
-                        upscale_cfg.engine,
-                        upscale_cfg.model_name,
-                        upscale_cfg.target_long_edge_px,
-                    )
-                    upscale_image_to_4k(
-                        input_path=image_full_path_and_name,
-                        output_path=upscale_out_path,
-                        config=upscale_cfg,
-                    )
-                    logger.info("Saved 4K upscaled image to %s", upscale_out_path)
-                    upload_target_path = upscale_out_path
-
-                append_manifest_row(
-                    manifest_path,
-                    {
-                        "seq": int(seq),
-                        "title": title_result.title,
-                        "generation_id": generation_id,
-                        "image_prompt": dalle_prompt,
-                        "image_path": upload_target_path,
-                        "created_at": utc_now_iso8601(),
-                        "model": image_model,
-                        "size": image_size,
-                        "quality": image_quality,
-                        "seed": image_result.get("seed", ""),
-                        "title_source": getattr(title_result, "title_source", "llm"),
-                        "title_raw": getattr(title_result, "title_raw", ""),
-                    },
-                )
-                logger.info("Appended manifest row to %s (seq=%d)", manifest_path, seq)
-        except Exception:
-            logger.exception("Generation failed during title/manifest/image pipeline")
-            raise
-
-        rclone_config = config.get("rclone", {}) or {}
-        if rclone_config.get("enabled", False):
-            remote = rclone_config.get("remote")
-            album = rclone_config.get("album")
+        phase = "rclone"
+        if cfg.rclone_enabled:
+            remote = cfg.rclone_remote
+            album = cfg.rclone_album
             if not remote or not album:
-                raise ValueError("Rclone upload enabled but 'remote' or 'album' is missing in config.rclone")
+                raise ValueError("rclone.enabled=true but rclone.remote/album missing")
+
             if not upload_target_path:
                 logger.error("Rclone upload enabled but upload target path is empty; skipping upload.")
             else:
@@ -629,26 +678,67 @@ def main():
                     logger.info("Uploaded image via rclone to %s", f"{remote}:album/{album}")
                 else:
                     logger.error("Rclone upload failed; image remains at %s", upload_target_path)
-        
-        messages_text = str(messages_log.messages)
-        write_messages_log(log_full_path_and_name, messages_text)
-        logger.info("Wrote message transcript to %s", log_full_path_and_name)
+
+        phase = "transcript"
+        write_transcript(transcript_path, ctx)
+        logger.info("Wrote transcript JSON to %s", transcript_path)
         logger.info("Operational log stored at %s", operational_log_path)
         logger.info("Run completed successfully for generation %s", generation_id)
-    except Exception:
-        logger.exception("Run failed for generation %s", generation_id)
-        try:
-            if "messages_log" in locals():
-                messages_text = str(messages_log.messages)
-            elif "messages_main" in locals():
-                messages_text = str(messages_main.messages)
-            else:
-                messages_text = ""
-            write_messages_log(log_full_path_and_name, messages_text)
-        except Exception:
-            logger.exception("Failed to write message transcript during error handling")
+
+        return ctx
+    except Exception as exc:
+        logger.exception("Run failed during phase %s", phase)
+        if ctx is not None:
+            step_name = getattr(exc, "pipeline_step", None)
+            pipeline_path = getattr(exc, "pipeline_path", None)
+            ctx.error = {
+                "type": exc.__class__.__name__,
+                "message": str(exc),
+                "phase": phase,
+            }
+            if step_name:
+                ctx.error["step"] = step_name
+            if pipeline_path:
+                ctx.error["path"] = pipeline_path
+
+            try:
+                if transcript_path is None:
+                    transcript_path = generate_file_location(
+                        cfg.log_dir, generation_id + "_transcript", ".json"
+                    )
+                write_transcript(transcript_path, ctx)
+                logger.info("Wrote transcript JSON to %s", transcript_path)
+            except Exception:
+                logger.exception("Failed to write transcript during error handling")
         raise
-    
+    finally:
+        for handler in list(logger.handlers):
+            try:
+                handler.flush()
+            except Exception:
+                pass
+            try:
+                handler.close()
+            except Exception:
+                pass
+        logger.handlers.clear()
+
+
+def main() -> None:
+    configure_stdio_utf8()
+    generation_id = generate_unique_id()
+
+    try:
+        cfg_dict = load_config()
+    except Exception:
+        fallback_logger, fallback_log_path = setup_operational_logger(os.getcwd(), generation_id)
+        fallback_logger.exception(
+            "Failed to load configuration. Logging to fallback file at %s", fallback_log_path
+        )
+        raise
+
+    run_generation(cfg_dict, generation_id=generation_id)
+
 
 if __name__ == "__main__":
     main()

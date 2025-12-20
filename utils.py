@@ -11,11 +11,11 @@ from PIL import Image, ImageDraw, ImageFont
 
 
 def _load_caption_font(font_size_px: int, font_path: str | None = None) -> ImageFont.ImageFont:
-    if font_path:
+    if font_path is not None:
         try:
             return ImageFont.truetype(font_path, font_size_px)
-        except Exception:
-            pass
+        except Exception as exc:
+            raise ValueError(f"Failed to load caption font from {font_path!r}: {exc}") from exc
 
     # Try common bundled/system fonts, then fall back to Pillow's default bitmap font.
     candidates: list[str] = []
@@ -109,8 +109,6 @@ def save_to_csv(data, csv_file, include_headers=True):
 
         writer.writerow(data)
 
-    print(f"Data saved to CSV for ID: {data[0]}")
-
 
 def generate_unique_id():
     # Generate a random UUID
@@ -153,31 +151,20 @@ def load_config(**kwargs):
     try:
         with open(config_path, 'r') as file:
             return yaml.safe_load(file)
-    except Exception as e:
-        print(f"Failed to load config file: {e}")
+    except Exception:
         raise
     
 def download_and_convert_image(image_url, image_full_path_and_name):
-    try:
-        if isinstance(image_url, str) and image_url.startswith("http"):
-            response = requests.get(image_url)
-            response.raise_for_status()
-            image_bytes = response.content
-        else:
-            image_bytes = base64.b64decode(image_url)
+    if isinstance(image_url, str) and image_url.startswith("http"):
+        response = requests.get(image_url)
+        response.raise_for_status()
+        image_bytes = response.content
+    else:
+        image_bytes = base64.b64decode(image_url)
 
-        image = Image.open(io.BytesIO(image_bytes))
-        rgb_image = image.convert('RGB')  # Convert to RGB in case the PNG is in RGBA format
-
-        # Save the image as JPG
-        rgb_image.save(image_full_path_and_name, format='JPEG')
-        print(f"Image saved to {image_full_path_and_name}")
-    except requests.exceptions.HTTPError as http_err:
-        print(f"HTTP error occurred: {http_err}")
-    except requests.exceptions.RequestException as e:
-        print(f"Network error occurred: {e}")
-    except Exception as e:
-        print(f"An error occurred while saving the image: {e}")
+    with Image.open(io.BytesIO(image_bytes)) as image:
+        rgb_image = image.convert("RGB")  # Convert to RGB in case the PNG is in RGBA format
+        rgb_image.save(image_full_path_and_name, format="JPEG")
 
 def save_image(
     image_bytes,
@@ -185,31 +172,21 @@ def save_image(
     caption_text: str | None = None,
     caption_font_path: str | None = None,
 ):
-    try:
-
-        image = Image.open(io.BytesIO(image_bytes))
-        rgb_image = image.convert('RGB')  # Convert to RGB in case the PNG is in RGBA format
+    with Image.open(io.BytesIO(image_bytes)) as image:
+        rgb_image = image.convert("RGB")  # Convert to RGB in case the PNG is in RGBA format
 
         if caption_text:
             rgb_image = _overlay_caption(rgb_image, caption_text, font_path=caption_font_path)
 
         # Save the image as JPG
-        rgb_image.save(image_full_path_and_name, format='JPEG')
-        print(f"Image saved to {image_full_path_and_name}")
-    except requests.exceptions.HTTPError as http_err:
-        print(f"HTTP error occurred: {http_err}")
-        raise
-    except requests.exceptions.RequestException as e:
-        print(f"Network error occurred: {e}")
-        raise
-    except Exception as e:
-        print(f"An error occurred while saving the image: {e}")
-        raise
+        rgb_image.save(image_full_path_and_name, format="JPEG")
         
 def generate_file_location(file_path, id,file_type):
-    try:
-        # Combine save_path and id to create the complete file path
-        file_path = os.path.join(file_path, id + file_type)
-        return file_path
-    except Exception as e:
-        print(f"An error occurred while saving the image: {e}")
+    if not file_path or not isinstance(file_path, str):
+        raise ValueError("file_path must be a non-empty string")
+    if not id or not isinstance(id, str):
+        raise ValueError("id must be a non-empty string")
+    if not file_type or not isinstance(file_type, str):
+        raise ValueError("file_type must be a non-empty string")
+
+    return os.path.join(file_path, id + file_type)

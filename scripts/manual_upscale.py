@@ -19,6 +19,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from upscaling import UpscaleConfig, upscale_image_to_4k
+from run_config import parse_bool
 from utils import load_config
 
 
@@ -84,7 +85,7 @@ def main() -> int:
     model_path = args.model_path or upscale_cfg.get("model_path")
     model_name = args.model_name or upscale_cfg.get("model_name", "realesrgan-x4plus")
     tile_size = args.tile_size if args.tile_size is not None else int(upscale_cfg.get("tile_size", 0))
-    tta = args.tta or bool(upscale_cfg.get("tta", False))
+    tta = args.tta or parse_bool(upscale_cfg.get("tta", False), "upscale.tta")
     # Explicitly disable any silent fallback paths.
     allow_fallback_resize = False
 
