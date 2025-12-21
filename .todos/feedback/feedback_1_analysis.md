@@ -49,5 +49,3 @@ Ban-list (if aiming upbeat/clean): haunted, survivors, oppressive, shouted order
 Replace with bright/clean cues: polished stone, clear luminous water, sparkling frost, warm lantern-glow, thriving garden, joyful calm.
 
 Keep dystopia only as design archaeology, not mood: “once-formal civic geometry now softened into a welcoming garden court” (no trauma words).
-
-If you want, I can also produce a “clean + uplifting” rewritten version of this exact prompt that preserves the composition (circular basin, koi, primary lights, pink-purple-blue dusk, couple on the path) but removes the depressing/dirty triggers.
