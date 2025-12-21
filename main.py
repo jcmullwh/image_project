@@ -7,7 +7,6 @@ import subprocess
 import sys
 import time
 from datetime import datetime
-from typing import Any, Callable
 
 import pandas as pd
 
@@ -17,13 +16,14 @@ except ModuleNotFoundError:  # pragma: no cover
     ImageAI = None  # type: ignore[assignment]
     TextAI = None  # type: ignore[assignment]
 from message_handling import MessageHandler
-from pipeline import Block, ChatRunner, ChatStep, RunContext
+from pipeline import Block, ChatRunner, RunContext
 from records import append_generation_row
 from run_config import RunConfig
 from transcript import write_transcript
 from upscaling import UpscaleConfig, upscale_image_to_4k
 from context_injectors import ContextManager
 from concept_filters import apply_concept_filters, extract_dislikes, make_dislike_rewrite_filter
+from refinement import TotEnclaveRefinement
 from titles import (
     append_manifest_row,
     generate_title,
@@ -49,7 +49,6 @@ from prompts import (
     generate_second_prompt,
     generate_third_prompt,
     load_prompt_data,
-    make_tot_enclave_block,
     select_random_concepts,
 )
 
@@ -247,70 +246,36 @@ def run_generation(cfg_dict, *, generation_id: str | None = None) -> RunContext:
 
         phase = "pipeline"
         # Prompt pipeline (text-only): a sequence of named stages that build toward the final image prompt.
-        #
-        # Flow:
-        # - Each stage is a `Block` (e.g. "section_2_choice") that produces a single refined assistant message.
-        # - Inside each stage:
-        #   1) A `draft` step generates the initial answer for that stage.
-        #   2) A Tree-of-Thought "enclave" critiques the draft in independent threads (`merge="none"`, captured
-        #      into `ctx.outputs`) and then emits a consensus rewrite.
-        # - The stage block uses `merge="last_response"` so only the refined consensus text is persisted back
-        #   into the parent conversation (keeps model context small). The transcript still records every step.
-        def refined_stage(
-            stage_name: str,
-            *,
-            prompt: str | Callable[[RunContext], str],
-            temperature: float,
-            allow_empty_prompt: bool = False,
-            allow_empty_response: bool = False,
-            params: dict[str, Any] | None = None,
-            capture_key: str | None = None,
-        ) -> Block:
-            # Use a stable inner step name so transcript paths are readable:
-            # `pipeline/<stage_name>/draft`.
-            draft_step = ChatStep(
-                name="draft",
-                prompt=prompt,
-                temperature=temperature,
-                allow_empty_prompt=allow_empty_prompt,
-                allow_empty_response=allow_empty_response,
-                params=dict(params or {}),
-            )
-            enclave = make_tot_enclave_block(stage_name)
-            return Block(
-                name=stage_name,
-                merge="last_response",
-                nodes=[draft_step, enclave],
-                capture_key=capture_key,
-            )
+        # Refinement is pluggable via a RefinementPolicy; default remains the Tree-of-Thought enclave.
+        refinement_policy = TotEnclaveRefinement()
 
         # Stages run in order; each stage sees the refined outputs of earlier stages as compact context.
         pipeline_root = Block(
             name="pipeline",
             merge="all_messages",
             nodes=[
-                refined_stage("initial_prompt", prompt=prompt_1, temperature=0.8),
-                refined_stage(
+                refinement_policy.stage("initial_prompt", prompt=prompt_1, temperature=0.8),
+                refinement_policy.stage(
                     "section_2_choice",
                     prompt=lambda _ctx: generate_second_prompt(),
                     temperature=0.8,
                 ),
-                refined_stage(
+                refinement_policy.stage(
                     "section_2b_title_and_story",
                     prompt=lambda _ctx: generate_secondB_prompt(),
                     temperature=0.8,
                 ),
-                refined_stage(
+                refinement_policy.stage(
                     "section_3_message_focus",
                     prompt=lambda _ctx: generate_third_prompt(),
                     temperature=0.8,
                 ),
-                refined_stage(
+                refinement_policy.stage(
                     "section_4_concise_description",
                     prompt=lambda _ctx: generate_fourth_prompt(),
                     temperature=0.8,
                 ),
-                refined_stage(
+                refinement_policy.stage(
                     "image_prompt_creation",
                     prompt=lambda _ctx: generate_image_prompt(),
                     temperature=0.8,
@@ -445,6 +410,8 @@ def run_generation(cfg_dict, *, generation_id: str | None = None) -> RunContext:
                     input_path=image_full_path_and_name,
                     output_path=upscale_out_path,
                     config=upscale_cfg,
+                    caption_text=caption_text,
+                    caption_font_path=cfg.caption_font_path,
                 )
                 logger.info("Saved 4K upscaled image to %s", upscale_out_path)
                 upload_target_path = upscale_out_path

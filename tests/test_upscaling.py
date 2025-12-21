@@ -195,3 +195,34 @@ def test_explicit_target_dimensions_override_long_edge(tmp_path: Path):
 
     with Image.open(out_path) as im:
         assert im.size == (1200, 600)
+
+
+def test_caption_applied_after_resize(tmp_path: Path):
+    in_path = tmp_path / "in.jpg"
+    out_path = tmp_path / "out.jpg"
+
+    base_color = (10, 20, 30)
+    Image.new("RGB", (120, 80), color=base_color).save(in_path, format="JPEG", quality=90)
+
+    cfg = UpscaleConfig(
+        target_long_edge_px=160,
+        target_aspect_ratio="16:9",
+        realesrgan_binary=None,
+        allow_fallback_resize=True,
+    )
+
+    caption = "Test Caption"
+    upscale_image_to_4k(
+        input_path=str(in_path),
+        output_path=str(out_path),
+        config=cfg,
+        caption_text=caption,
+    )
+
+    with Image.open(out_path) as im:
+        assert im.size == (160, 90)
+        top_pixel = im.getpixel((im.width // 2, im.height // 4))
+        bottom_pixel = im.getpixel((im.width // 2, im.height - 2))
+        # Caption overlay should alter bottom strip but leave upper region unchanged.
+        assert top_pixel == base_color
+        assert bottom_pixel != base_color

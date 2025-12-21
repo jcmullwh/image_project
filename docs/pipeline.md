@@ -90,6 +90,30 @@ Result:
 - model context stays minimal (parent only sees the refined stage output)
 - transcript still contains all internal steps with unique paths
 
+### Refinement policies
+
+Stage wrapping is handled by a `RefinementPolicy`. Pick a policy when building the stage list:
+
+```python
+from refinement import NoRefinement, TotEnclaveRefinement
+
+refinement = TotEnclaveRefinement()  # default Tree-of-Thought enclave
+# refinement = NoRefinement()        # draft-only, merge last response
+
+pipeline = Block(
+    name="pipeline",
+    merge="all_messages",
+    nodes=[
+        refinement.stage("stage_one", prompt="...", temperature=0.8),
+        refinement.stage("final_stage", prompt="...", temperature=0.8, capture_key="image_prompt"),
+    ],
+)
+```
+
+Policies always name the draft step `draft` and wrap the stage block with `merge="last_response"`. Only the final assistant message from each stage is merged into the parent conversation; the transcript still records every internal step.
+
+Flows should only call `refinement.stage(...)`; do not import the ToT/enclave block builder directly. The enclave pipeline construction lives in the refinement module, keeping prompt text helpers (`prompts.py`) focused on strings.
+
 ## Step Parameters
 
 - Set temperature via `ChatStep.temperature` (do not include `"temperature"` inside `ChatStep.params`).
@@ -103,4 +127,21 @@ Result:
 - Sibling name collisions are errors (no silent disambiguation).
 
 The transcript includes a `path` for every step (e.g. `pipeline/section_2_choice/tot_enclave/consensus`) so repeated sub-blocks remain uniquely identifiable.
+
+## Step recording
+
+Step telemetry is injected via a `StepRecorder`:
+
+- `DefaultStepRecorder` (production): emits `Step:`/`Received response` logs and appends the per-step dicts to `ctx.steps` (transcript schema unchanged).
+- `NullStepRecorder`: disables logging and transcript appends (useful for benchmarks/tests).
+- Custom recorders must implement `on_step_start`, `on_step_end`, and `on_step_error`; misconfiguration raises at construction time. `on_step_start` receives `path` plus `**metrics` so new fields can be added without breaking callers.
+
+Provide a recorder when constructing `ChatRunner`:
+
+```python
+from pipeline import ChatRunner, NullStepRecorder
+
+runner = ChatRunner(ai_text=fake_ai)  # default recorder
+# runner = ChatRunner(ai_text=fake_ai, recorder=NullStepRecorder())
+```
 

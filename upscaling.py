@@ -22,6 +22,8 @@ from pathlib import Path
 
 from PIL import Image, ImageOps
 
+from utils import _overlay_caption
+
 
 class UpscaleError(RuntimeError):
     """Raised when the upscaling step fails."""
@@ -275,6 +277,8 @@ def upscale_image_to_4k(
     input_path: str,
     output_path: str,
     config: UpscaleConfig | None = None,
+    caption_text: str | None = None,
+    caption_font_path: str | None = None,
 ) -> str:
     """Upscale an image to a 4K-ish target long edge.
 
@@ -289,12 +293,27 @@ def upscale_image_to_4k(
         (Lanczos) to the exact target dimensions.
       - If the Real-ESRGAN binary is unavailable and allow_fallback_resize is
         True, we fall back to a Lanczos resize/crop to the target dimensions.
+      - If caption_text is provided, the caption overlay is applied after the
+        final resize/crop so it remains visible in the output aspect ratio.
     """
 
     cfg = config or UpscaleConfig()
 
     in_path = Path(input_path)
     out_path = Path(output_path)
+
+    def _finalize_output() -> str:
+        if caption_text:
+            with Image.open(out_path) as im:
+                overlaid = _overlay_caption(im, caption_text, font_path=caption_font_path)
+                ext = out_path.suffix.lower()
+                fmt = "PNG" if ext == ".png" else "JPEG"
+                save_kwargs: dict[str, object] = {"format": fmt}
+                if fmt == "JPEG":
+                    save_kwargs.update({"quality": 95, "optimize": True})
+                overlaid.save(out_path, **save_kwargs)
+        return str(out_path)
+
     if (
         cfg.target_width_px is not None
         and cfg.target_height_px is not None
@@ -322,11 +341,11 @@ def upscale_image_to_4k(
 
     if width == target_w and height == target_h:
         shutil.copyfile(in_path, out_path)
-        return str(out_path)
+        return _finalize_output()
 
     if not has_explicit_size and aspect_ratio is None and max(width, height) >= cfg.target_long_edge_px:
         shutil.copyfile(in_path, out_path)
-        return str(out_path)
+        return _finalize_output()
 
     needs_upscale = width < target_w or height < target_h
 
@@ -337,13 +356,13 @@ def upscale_image_to_4k(
     # just resize/crop to the requested dimensions.
     if not needs_upscale:
         _lanczos_resize(in_path, out_path, target_w, target_h)
-        return str(out_path)
+        return _finalize_output()
 
     binary = _find_realesrgan_binary(cfg.realesrgan_binary)
     if not binary:
         if cfg.allow_fallback_resize:
             _lanczos_resize(in_path, out_path, target_w, target_h)
-            return str(out_path)
+            return _finalize_output()
         raise FileNotFoundError(
             "Upscaling is enabled but realesrgan-ncnn-vulkan was not found. "
             "Install the Real-ESRGAN NCNN Vulkan portable executable and either "
@@ -384,7 +403,7 @@ def upscale_image_to_4k(
         # Now convert/resize to the final target.
         _lanczos_resize(tmp_out, out_path, target_w, target_h)
 
-    return str(out_path)
+    return _finalize_output()
 
 
 def _lanczos_resize(src: Path, dst: Path, width: int, height: int) -> None:

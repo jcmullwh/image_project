@@ -4,7 +4,7 @@ import logging
 import random
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Callable, Literal, TypeAlias
+from typing import Any, Callable, Literal, Protocol, TypeAlias
 
 from message_handling import MessageHandler
 
@@ -128,9 +128,74 @@ class RunContext:
     error: dict[str, Any] | None = None
 
 
+class StepRecorder(Protocol):
+    def on_step_start(
+        self,
+        ctx: RunContext,
+        path: str,
+        **metrics: Any,
+    ) -> None:
+        ...
+
+    def on_step_end(self, ctx: RunContext, record: dict[str, Any]) -> None:
+        ...
+
+    def on_step_error(self, ctx: RunContext, path: str, step_name: str, exc: Exception) -> None:
+        ...
+
+
+class DefaultStepRecorder:
+    def on_step_start(
+        self,
+        ctx: RunContext,
+        path: str,
+        **metrics: Any,
+    ) -> None:
+        ctx.logger.info(
+            "Step: %s (context_chars=%d, prompt_chars=%d, input_chars=%d)",
+            path,
+            metrics.get("context_chars", 0),
+            metrics.get("prompt_chars", 0),
+            metrics.get("input_chars", 0),
+        )
+
+    def on_step_end(self, ctx: RunContext, record: dict[str, Any]) -> None:
+        ctx.steps.append(record)
+        path = record.get("path", "<unknown>")
+        input_chars = record.get("input_chars", 0)
+        response_chars = record.get("response_chars", len(str(record.get("response", ""))))
+        ctx.logger.info(
+            "Received response for %s (input_chars=%d, chars=%d)",
+            path,
+            input_chars,
+            response_chars,
+        )
+
+    def on_step_error(self, ctx: RunContext, path: str, step_name: str, exc: Exception) -> None:
+        ctx.logger.error("Step failed: %s (%s)", path, exc)
+
+
+class NullStepRecorder:
+    def on_step_start(
+        self,
+        ctx: RunContext,
+        path: str,
+        **metrics: Any,
+    ) -> None:
+        return
+
+    def on_step_end(self, ctx: RunContext, record: dict[str, Any]) -> None:
+        return
+
+    def on_step_error(self, ctx: RunContext, path: str, step_name: str, exc: Exception) -> None:
+        return
+
+
 class ChatRunner:
-    def __init__(self, *, ai_text: Any):
+    def __init__(self, *, ai_text: Any, recorder: StepRecorder | None = None):
         self._ai_text = ai_text
+        self._recorder = recorder or DefaultStepRecorder()
+        self._validate_recorder(self._recorder)
 
     def run(self, ctx: RunContext, node: Node) -> None:
         root_name = self._effective_root_name(node)
@@ -186,6 +251,13 @@ class ChatRunner:
         if isinstance(node, ChatStep):
             return node.name or f"step_{index + 1:02d}"
         return node.name or f"block_{index + 1:02d}"
+
+    def _validate_recorder(self, recorder: StepRecorder) -> None:
+        required = ("on_step_start", "on_step_end", "on_step_error")
+        for name in required:
+            method = getattr(recorder, name, None)
+            if method is None or not callable(method):
+                raise TypeError(f"Step recorder missing required method: {name}")
 
     def _attach_pipeline_error(
         self,
@@ -276,12 +348,14 @@ class ChatRunner:
             input_messages = context_messages + 1
             input_chars = context_chars + prompt_chars
 
-            ctx.logger.info(
-                "Step: %s (context_chars=%d, prompt_chars=%d, input_chars=%d)",
+            self._recorder.on_step_start(
+                ctx,
                 pipeline_path,
-                context_chars,
-                prompt_chars,
-                input_chars,
+                context_chars=context_chars,
+                prompt_chars=prompt_chars,
+                input_chars=input_chars,
+                context_messages=context_messages,
+                input_messages=input_messages,
             )
 
             call_params: dict[str, Any] = dict(step.params)
@@ -320,34 +394,32 @@ class ChatRunner:
 
             produced_messages = working.messages[len(parent_messages.messages) :]
 
-            ctx.steps.append(
-                {
-                    "name": step_name,
-                    "path": pipeline_path,
-                    "prompt": prompt_text,
-                    "response": response_text,
-                    "params": record_params,
-                    "prompt_chars": prompt_chars,
-                    "response_chars": len(response_text),
-                    "context_chars": context_chars,
-                    "input_chars": input_chars,
-                    "context_messages": context_messages,
-                    "input_messages": input_messages,
-                    "created_at": utc_now_iso8601(),
-                }
-            )
+            record = {
+                "name": step_name,
+                "path": pipeline_path,
+                "prompt": prompt_text,
+                "response": response_text,
+                "params": record_params,
+                "prompt_chars": prompt_chars,
+                "response_chars": len(response_text),
+                "context_chars": context_chars,
+                "input_chars": input_chars,
+                "context_messages": context_messages,
+                "input_messages": input_messages,
+                "created_at": utc_now_iso8601(),
+            }
+
+            self._recorder.on_step_end(ctx, record)
 
             if step.capture_key:
                 ctx.outputs[step.capture_key] = response_text
 
-            ctx.logger.info(
-                "Received response for %s (input_chars=%d, chars=%d)",
-                pipeline_path,
-                input_chars,
-                len(response_text),
-            )
             return produced_messages, response_text
         except Exception as exc:
+            try:
+                self._recorder.on_step_error(ctx, pipeline_path, step_name, exc)
+            except Exception:
+                ctx.logger.exception("Step recorder failed during error handling for %s", pipeline_path)
             self._attach_pipeline_error(
                 exc,
                 pipeline_path=pipeline_path,
