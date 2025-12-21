@@ -19,6 +19,9 @@ def write_transcript(path: str, ctx: RunContext) -> None:
     context = ctx.outputs.get("context")
     if context is not None:
         payload["context"] = context
+    concept_filter_log = ctx.outputs.get("concept_filter_log")
+    if concept_filter_log is not None:
+        payload["concept_filter_log"] = concept_filter_log
     title_generation = ctx.outputs.get("title_generation")
     if title_generation is not None:
         payload["title_generation"] = title_generation

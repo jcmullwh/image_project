@@ -170,7 +170,7 @@ class HolidayInjector:
 
         if ctx.logger:
             ctx.logger.info(
-                "Holiday injector: next=%s in %d days (p=%.3f roll=%.3f applied=%s). You should adopt it as an additional theme.",
+                "Holiday injector: next=%s in %d days (p=%.3f roll=%.3f applied=%s). You MUST adopt it as an additional theme.",
                 holiday.label,
                 days_until,
                 probability,
@@ -205,7 +205,7 @@ class HolidayInjector:
             hook = f"Holiday proximity: {holiday.label} — evoke subtly via materials/lighting/symbols."
 
         guidance = (
-            f"{hook} No readable text. Avoid obvious tropes; keep it non-literal and understated."
+            f"{hook} You MUST adopt it as an additional theme."
         )
 
         return InjectionResult(guidance_lines=[guidance], metadata=metadata)

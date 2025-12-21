@@ -21,6 +21,12 @@ DEFAULT_SYSTEM_PROMPT = (
     "boundaries and elicit deep emotions in a human viewer. Keep your responses concise and focused on the task at hand."
 )
 
+CONCEPT_GROUPS: tuple[tuple[str, ...], ...] = (
+    ("Subject Matter", "Narrative"),
+    ("Mood", "Composition", "Perspective"),
+    ("Style", "Time Period_Context", "Color Scheme"),
+)
+
 def build_preferences_guidance(user_profile: pd.DataFrame) -> str:
     if user_profile is None or user_profile.empty:
         return ""
@@ -43,12 +49,22 @@ def load_prompt_data(file_path):
     return data
 
 
+def select_random_concepts(prompt_data: pd.DataFrame, rng: random.Random) -> list[str]:
+    selections: list[str] = []
+    for group in CONCEPT_GROUPS:
+        value = get_random_value_from_group(group, prompt_data, rng)
+        if value:
+            selections.append(value)
+    return selections
+
+
 def generate_first_prompt(
     prompt_data,
     user_profile,
     rng: random.Random,
     *,
     context_guidance: str | None = None,
+    selected_concepts: list[str] | None = None,
 ):
     preferences_guidance = build_preferences_guidance(user_profile)
     preferences_block = ""
@@ -78,33 +94,16 @@ Ensure that the themes and stories are not similar to each other. Ensure that th
 Finally, ensure that they are not boring, cliche, trite, overdone, obvious, or most importantly: milquetoast. Say something and say it with conviction."      
 
     
-    # Define the groups
-    group1 = ['Subject Matter', 'Narrative']
-    group2 = ['Mood', 'Composition', 'Perspective']
-    group3 = ['Style', 'Time Period_Context', 'Color Scheme']
-    
-    # Generate the prompt
     prompt = preamble
-    random_values = []
+    random_values = [str(value).strip() for value in (selected_concepts or []) if str(value).strip()]
+    if not random_values:
+        random_values = select_random_concepts(prompt_data, rng)
 
-    random_value1 = get_random_value_from_group(group1, prompt_data, rng)
-    if random_value1:
-        prompt += f"{random_value1} "
-        random_values.append(random_value1)
-
-    random_value2 = get_random_value_from_group(group2, prompt_data, rng)
-    if random_value2:
-        prompt += f"{random_value2} "
-        random_values.append(random_value2)
-
-    random_value3 = get_random_value_from_group(group3, prompt_data, rng)
-    if random_value3:
-        prompt += f"{random_value3} "
-        random_values.append(random_value3)
-    
+    for value in random_values:
+        prompt += f"{value} "
 
     prompt += final_lines
-    
+
     return prompt, random_values
 
 
@@ -372,7 +371,9 @@ def make_tot_enclave_block(stage_name: str) -> Block:
             )
         )
 
-    def consensus_prompt(ctx: RunContext, stage_name: str = stage_name) -> str:
+    def consensus_prompt(
+        ctx: RunContext, stage_name: str = stage_name, thread_label: str | None = None
+    ) -> str:
         notes: list[str] = []
         for artist_key, label, _persona in ENCLAVE_ARTISTS:
             key = f"enclave.{stage_name}.{artist_key}"
@@ -381,8 +382,12 @@ def make_tot_enclave_block(stage_name: str) -> Block:
                 raise ValueError(f"Missing enclave thread output: {key}")
             notes.append(f"## {label}\n{value.strip()}")
 
+        consensus_label = "You are the enclave consensus editor."
+        if thread_label:
+            consensus_label = f"You are the enclave consensus editor (thread {thread_label})."
+
         return (
-            "You are the enclave consensus editor.\n"
+            f"{consensus_label}\n"
             "Using the independent artist notes below, revise the last assistant response.\n"
             "Keep the original intent and constraints.\n"
             "Return ONLY the revised response (no preamble, no analysis).\n\n"
@@ -390,6 +395,42 @@ def make_tot_enclave_block(stage_name: str) -> Block:
             + "\n\n".join(notes)
         )
 
-    nodes.append(ChatStep(name="consensus", prompt=consensus_prompt, temperature=0.8))
+    def final_consensus_prompt(ctx: RunContext, stage_name: str = stage_name) -> str:
+        drafts: list[str] = []
+        for idx in range(1, 4):
+            key = f"enclave.{stage_name}.consensus_{idx}"
+            value = ctx.outputs.get(key)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"Missing enclave consensus output: {key}")
+            drafts.append(f"## Consensus {idx}\n{value.strip()}")
+
+        return (
+            "You are the enclave final consensus editor.\n"
+            "Review the three independent consensus drafts below and synthesize them into a single refined response.\n"
+            "Keep the original intent and constraints. Prefer points of agreement; when opinions diverge, favor clarity, Lana's stated preferences, and the Representative's caution while retaining the Chameleon specificity when it does not conflict.\n"
+            "Return ONLY the revised response (no preamble, no analysis).\n\n"
+            + "\n\n".join(drafts)
+        )
+
+    for idx in range(1, 4):
+        nodes.append(
+            ChatStep(
+                name=f"consensus_{idx}",
+                merge="none",
+                capture_key=f"enclave.{stage_name}.consensus_{idx}",
+                prompt=lambda ctx, idx=idx, stage_name=stage_name: consensus_prompt(
+                    ctx, stage_name, f"#{idx}"
+                ),
+                temperature=0.8,
+            )
+        )
+
+    nodes.append(
+        ChatStep(
+            name="final_consensus",
+            prompt=final_consensus_prompt,
+            temperature=0.8,
+        )
+    )
 
     return Block(name="tot_enclave", merge="all_messages", nodes=nodes)

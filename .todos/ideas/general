@@ -1,1 +1,25 @@
 Would be good to make the config location configurable
+
+*** add a config for generation and upscaling that handles both aspect ratio and pixels. (16:9 specifically)
+
+
+add conditionals (when observed - x image, y time)
+
+
+add an Anki-style cooldown based on how confident we are.
+
+
+Modify the idea input number AND/OR make it better at integrating (maybe explicitly forbid one side x other side y)
+
+Make likes/dislikes inform concept selection
+
+Opportunities:
+
+Improve like/dislike
+
+
+
+
+Add a like/dislike gradient (love to hate)
+
+add an Anki-style cooldown based on how confident we are.

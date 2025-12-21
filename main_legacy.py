@@ -324,6 +324,19 @@ def main_legacy() -> None:
 
                     upscale_cfg = UpscaleConfig(
                         target_long_edge_px=int(upscale_section.get("target_long_edge_px", 3840)),
+                        target_width_px=(
+                            int(upscale_section["target_width_px"])
+                            if "target_width_px" in upscale_section
+                            and upscale_section.get("target_width_px") not in (None, "")
+                            else None
+                        ),
+                        target_height_px=(
+                            int(upscale_section["target_height_px"])
+                            if "target_height_px" in upscale_section
+                            and upscale_section.get("target_height_px") not in (None, "")
+                            else None
+                        ),
+                        target_aspect_ratio=upscale_section.get("target_aspect_ratio"),
                         engine=str(upscale_section.get("engine", "realesrgan-ncnn-vulkan")),
                         realesrgan_binary=upscale_section.get("realesrgan_binary"),
                         model_name=str(upscale_section.get("model_name", "realesrgan-x4plus")),
@@ -333,11 +346,21 @@ def main_legacy() -> None:
                         allow_fallback_resize=bool(upscale_section.get("allow_fallback_resize", False)),
                     )
 
+                    if upscale_cfg.target_width_px and upscale_cfg.target_height_px:
+                        target_desc = f"{upscale_cfg.target_width_px}x{upscale_cfg.target_height_px}"
+                    elif upscale_cfg.target_aspect_ratio:
+                        target_desc = (
+                            f"long_edge={upscale_cfg.target_long_edge_px} "
+                            f"aspect={upscale_cfg.target_aspect_ratio}"
+                        )
+                    else:
+                        target_desc = f"long_edge={upscale_cfg.target_long_edge_px} (preserve aspect)"
+
                     logger.info(
-                        "Upscaling enabled: engine=%s model=%s target_long_edge_px=%d",
+                        "Upscaling enabled: engine=%s model=%s target=%s",
                         upscale_cfg.engine,
                         upscale_cfg.model_name,
-                        upscale_cfg.target_long_edge_px,
+                        target_desc,
                     )
                     upscale_image_to_4k(
                         input_path=image_full_path_and_name,

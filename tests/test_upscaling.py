@@ -156,3 +156,42 @@ def test_model_path_forwarded_to_runner(tmp_path: Path):
     mock_run.assert_called_once()
     _, run_kwargs = mock_run.call_args
     assert run_kwargs["model_path"] == str(model_dir)
+
+
+def test_target_aspect_ratio_resizes_and_crops(tmp_path: Path):
+    in_path = tmp_path / "in.jpg"
+    out_path = tmp_path / "out.jpg"
+
+    Image.new("RGB", (1536, 1024), color=(10, 20, 30)).save(in_path, format="JPEG", quality=90)
+
+    cfg = UpscaleConfig(
+        target_long_edge_px=3840,
+        target_aspect_ratio="16:9",
+        realesrgan_binary=None,
+        allow_fallback_resize=True,
+    )
+
+    upscale_image_to_4k(input_path=str(in_path), output_path=str(out_path), config=cfg)
+
+    with Image.open(out_path) as im:
+        assert im.size == (3840, 2160)
+
+
+def test_explicit_target_dimensions_override_long_edge(tmp_path: Path):
+    in_path = tmp_path / "in.jpg"
+    out_path = tmp_path / "out.jpg"
+
+    Image.new("RGB", (800, 800), color=(0, 0, 255)).save(in_path, format="JPEG", quality=90)
+
+    cfg = UpscaleConfig(
+        target_long_edge_px=3840,  # ignored because explicit size is provided
+        target_width_px=1200,
+        target_height_px=600,
+        realesrgan_binary=None,
+        allow_fallback_resize=True,
+    )
+
+    upscale_image_to_4k(input_path=str(in_path), output_path=str(out_path), config=cfg)
+
+    with Image.open(out_path) as im:
+        assert im.size == (1200, 600)

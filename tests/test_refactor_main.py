@@ -77,6 +77,72 @@ def test_config_validation_empty_strings_are_missing():
     assert "prompt.categories_path" in str(excinfo.value)
 
 
+def test_config_validation_requires_both_upscale_dimensions(tmp_path):
+    cfg_dict = {
+        "prompt": {
+            "categories_path": str(tmp_path / "categories.csv"),
+            "profile_path": str(tmp_path / "profile.csv"),
+            "generations_path": str(tmp_path / "generations.csv"),
+        },
+        "image": {
+            "generation_path": str(tmp_path / "generated"),
+            "upscale_path": str(tmp_path / "upscaled"),
+            "log_path": str(tmp_path / "logs"),
+        },
+        "upscale": {"enabled": True, "target_width_px": 2000},
+    }
+
+    with pytest.raises(ValueError) as excinfo:
+        RunConfig.from_dict(cfg_dict)
+
+    assert "target_width_px" in str(excinfo.value)
+
+
+def test_config_validation_rejects_conflicting_upscale_size_and_aspect(tmp_path):
+    cfg_dict = {
+        "prompt": {
+            "categories_path": str(tmp_path / "categories.csv"),
+            "profile_path": str(tmp_path / "profile.csv"),
+            "generations_path": str(tmp_path / "generations.csv"),
+        },
+        "image": {
+            "generation_path": str(tmp_path / "generated"),
+            "upscale_path": str(tmp_path / "upscaled"),
+            "log_path": str(tmp_path / "logs"),
+        },
+        "upscale": {
+            "enabled": True,
+            "target_width_px": 2000,
+            "target_height_px": 1200,
+            "target_aspect_ratio": "16:9",
+        },
+    }
+
+    with pytest.raises(ValueError) as excinfo:
+        RunConfig.from_dict(cfg_dict)
+
+    assert "target_width_px/target_height_px" in str(excinfo.value)
+
+
+def test_config_parses_target_aspect_ratio(tmp_path):
+    cfg_dict = {
+        "prompt": {
+            "categories_path": str(tmp_path / "categories.csv"),
+            "profile_path": str(tmp_path / "profile.csv"),
+            "generations_path": str(tmp_path / "generations.csv"),
+        },
+        "image": {
+            "generation_path": str(tmp_path / "generated"),
+            "upscale_path": str(tmp_path / "upscaled"),
+            "log_path": str(tmp_path / "logs"),
+        },
+        "upscale": {"enabled": True, "target_aspect_ratio": "21:9"},
+    }
+    cfg, _warnings = RunConfig.from_dict(cfg_dict)
+
+    assert pytest.approx(cfg.upscale_target_aspect_ratio, rel=1e-6) == 21 / 9
+
+
 def test_seeded_randomness_is_deterministic_for_selected_concepts():
     categories = pd.DataFrame(
         {
@@ -383,6 +449,11 @@ def test_transcript_json_is_valid(tmp_path):
         messages=MessageHandler("system"),
     )
     ctx.selected_concepts = ["A", "B"]
+    ctx.outputs["concept_filter_log"] = {
+        "input": ["A", "B"],
+        "output": ["A", "B"],
+        "filters": [],
+    }
     ctx.steps.append(
         {
             "name": "step1",
@@ -400,6 +471,7 @@ def test_transcript_json_is_valid(tmp_path):
     loaded = json.loads(out_path.read_text(encoding="utf-8"))
     for key in ["generation_id", "seed", "selected_concepts", "steps", "image_path", "created_at"]:
         assert key in loaded
+    assert loaded["concept_filter_log"]["input"] == ["A", "B"]
 
 
 def test_csv_writer_creates_header_and_appends_row(tmp_path):

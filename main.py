@@ -7,6 +7,7 @@ import subprocess
 import sys
 import time
 from datetime import datetime
+from typing import Any, Callable
 
 import pandas as pd
 
@@ -22,6 +23,7 @@ from run_config import RunConfig
 from transcript import write_transcript
 from upscaling import UpscaleConfig, upscale_image_to_4k
 from context_injectors import ContextManager
+from concept_filters import apply_concept_filters, extract_dislikes, make_dislike_rewrite_filter
 from titles import (
     append_manifest_row,
     generate_title,
@@ -48,6 +50,7 @@ from prompts import (
     generate_third_prompt,
     load_prompt_data,
     make_tot_enclave_block,
+    select_random_concepts,
 )
 
 def configure_stdio_utf8():
@@ -164,6 +167,7 @@ def run_generation(cfg_dict, *, generation_id: str | None = None) -> RunContext:
         user_profile = pd.read_csv(cfg.profile_path)
         logger.info("Loaded %d user profile rows", len(user_profile))
         preferences_guidance = build_preferences_guidance(user_profile)
+        user_dislikes = extract_dislikes(user_profile)
 
         phase = "context_injection"
         context_guidance_text, context_metadata = ContextManager.build(
@@ -175,15 +179,6 @@ def run_generation(cfg_dict, *, generation_id: str | None = None) -> RunContext:
             preferences_guidance=preferences_guidance,
             logger=logger,
         )
-
-        phase = "prompt_generation"
-        prompt_1, selected_concepts = generate_first_prompt(
-            prompt_data,
-            user_profile,
-            rng,
-            context_guidance=(context_guidance_text or None),
-        )
-        logger.info("Generated first prompt (selected_concepts=%d)", len(selected_concepts))
 
         phase = "init_text_ai"
         text_ai_cls = TextAI
@@ -207,31 +202,79 @@ def run_generation(cfg_dict, *, generation_id: str | None = None) -> RunContext:
             created_at=utc_now_iso8601(),
             messages=MessageHandler(system_prompt),
         )
-        ctx.selected_concepts = selected_concepts
         ctx.outputs["preferences_guidance"] = preferences_guidance
+        ctx.outputs["dislikes"] = user_dislikes
         if context_guidance_text:
             ctx.outputs["context_guidance"] = context_guidance_text
         if context_metadata:
             ctx.outputs["context"] = context_metadata
 
+        phase = "concept_selection"
+        selected_concepts_raw = select_random_concepts(prompt_data, rng)
+        logger.info("Random concepts selected (raw): %s", selected_concepts_raw)
+
+        phase = "concept_filter"
+        filtered_concepts, filter_outcomes = apply_concept_filters(
+            selected_concepts_raw,
+            filters=[
+                make_dislike_rewrite_filter(dislikes=user_dislikes, ai_text=ai_text),
+            ],
+            logger=logger,
+        )
+        ctx.outputs["concept_filter_log"] = {
+            "input": selected_concepts_raw,
+            "output": filtered_concepts,
+            "filters": filter_outcomes,
+        }
+        if filtered_concepts != selected_concepts_raw:
+            logger.info("Concepts adjusted after filtering: %s", filtered_concepts)
+        else:
+            logger.info("Concepts unchanged after filtering.")
+        ctx.selected_concepts = list(filtered_concepts)
+
+        phase = "prompt_generation"
+        prompt_1, selected_concepts = generate_first_prompt(
+            prompt_data,
+            user_profile,
+            rng,
+            context_guidance=(context_guidance_text or None),
+            selected_concepts=filtered_concepts,
+        )
+        ctx.selected_concepts = selected_concepts
+        logger.info("Generated first prompt (selected_concepts=%d)", len(selected_concepts))
+
         transcript_path = generate_file_location(cfg.log_dir, generation_id + "_transcript", ".json")
 
         phase = "pipeline"
-        def refined_stage(stage_step: ChatStep, *, capture_key: str | None = None) -> Block:
-            stage_name = stage_step.name
-            if stage_name is None:
-                raise ValueError("Stage steps must have names for stable pipeline paths")
-            if stage_step.capture_key:
-                raise ValueError(
-                    f"Stage step {stage_name} must not set capture_key; pass capture_key to refined_stage()"
-                )
+        # Prompt pipeline (text-only): a sequence of named stages that build toward the final image prompt.
+        #
+        # Flow:
+        # - Each stage is a `Block` (e.g. "section_2_choice") that produces a single refined assistant message.
+        # - Inside each stage:
+        #   1) A `draft` step generates the initial answer for that stage.
+        #   2) A Tree-of-Thought "enclave" critiques the draft in independent threads (`merge="none"`, captured
+        #      into `ctx.outputs`) and then emits a consensus rewrite.
+        # - The stage block uses `merge="last_response"` so only the refined consensus text is persisted back
+        #   into the parent conversation (keeps model context small). The transcript still records every step.
+        def refined_stage(
+            stage_name: str,
+            *,
+            prompt: str | Callable[[RunContext], str],
+            temperature: float,
+            allow_empty_prompt: bool = False,
+            allow_empty_response: bool = False,
+            params: dict[str, Any] | None = None,
+            capture_key: str | None = None,
+        ) -> Block:
+            # Use a stable inner step name so transcript paths are readable:
+            # `pipeline/<stage_name>/draft`.
             draft_step = ChatStep(
                 name="draft",
-                prompt=stage_step.prompt,
-                temperature=stage_step.temperature,
-                allow_empty_prompt=stage_step.allow_empty_prompt,
-                allow_empty_response=stage_step.allow_empty_response,
-                params=dict(stage_step.params),
+                prompt=prompt,
+                temperature=temperature,
+                allow_empty_prompt=allow_empty_prompt,
+                allow_empty_response=allow_empty_response,
+                params=dict(params or {}),
             )
             enclave = make_tot_enclave_block(stage_name)
             return Block(
@@ -241,50 +284,44 @@ def run_generation(cfg_dict, *, generation_id: str | None = None) -> RunContext:
                 capture_key=capture_key,
             )
 
+        # Stages run in order; each stage sees the refined outputs of earlier stages as compact context.
         pipeline_root = Block(
             name="pipeline",
             merge="all_messages",
             nodes=[
-                refined_stage(ChatStep(name="initial_prompt", prompt=prompt_1, temperature=0.8)),
+                refined_stage("initial_prompt", prompt=prompt_1, temperature=0.8),
                 refined_stage(
-                    ChatStep(
-                        name="section_2_choice",
-                        prompt=lambda _ctx: generate_second_prompt(),
-                        temperature=0.8,
-                    )
+                    "section_2_choice",
+                    prompt=lambda _ctx: generate_second_prompt(),
+                    temperature=0.8,
                 ),
                 refined_stage(
-                    ChatStep(
-                        name="section_2b_title_and_story",
-                        prompt=lambda _ctx: generate_secondB_prompt(),
-                        temperature=0.8,
-                    )
+                    "section_2b_title_and_story",
+                    prompt=lambda _ctx: generate_secondB_prompt(),
+                    temperature=0.8,
                 ),
                 refined_stage(
-                    ChatStep(
-                        name="section_3_message_focus",
-                        prompt=lambda _ctx: generate_third_prompt(),
-                        temperature=0.8,
-                    )
+                    "section_3_message_focus",
+                    prompt=lambda _ctx: generate_third_prompt(),
+                    temperature=0.8,
                 ),
                 refined_stage(
-                    ChatStep(
-                        name="section_4_concise_description",
-                        prompt=lambda _ctx: generate_fourth_prompt(),
-                        temperature=0.8,
-                    )
+                    "section_4_concise_description",
+                    prompt=lambda _ctx: generate_fourth_prompt(),
+                    temperature=0.8,
                 ),
                 refined_stage(
-                    ChatStep(
-                        name="image_prompt_creation",
-                        prompt=lambda _ctx: generate_image_prompt(),
-                        temperature=0.8,
-                    ),
+                    "image_prompt_creation",
+                    prompt=lambda _ctx: generate_image_prompt(),
+                    temperature=0.8,
+                    # Capture the final refined image prompt for the downstream image generation step.
                     capture_key="image_prompt",
                 ),
             ],
         )
 
+        # Execute the pipeline. Full per-step prompts/responses are recorded in `ctx.steps`, while selected
+        # stage outputs can be captured into `ctx.outputs` via `capture_key`.
         runner = ChatRunner(ai_text=ai_text)
         runner.run(ctx, pipeline_root)
 
@@ -376,6 +413,9 @@ def run_generation(cfg_dict, *, generation_id: str | None = None) -> RunContext:
 
                 upscale_cfg = UpscaleConfig(
                     target_long_edge_px=cfg.upscale_target_long_edge_px,
+                    target_width_px=cfg.upscale_target_width_px,
+                    target_height_px=cfg.upscale_target_height_px,
+                    target_aspect_ratio=cfg.upscale_target_aspect_ratio,
                     engine=cfg.upscale_engine,
                     realesrgan_binary=cfg.upscale_realesrgan_binary,
                     model_name=cfg.upscale_model_name,
@@ -385,11 +425,21 @@ def run_generation(cfg_dict, *, generation_id: str | None = None) -> RunContext:
                     allow_fallback_resize=cfg.upscale_allow_fallback_resize,
                 )
 
+                if upscale_cfg.target_width_px and upscale_cfg.target_height_px:
+                    target_desc = f"{upscale_cfg.target_width_px}x{upscale_cfg.target_height_px}"
+                elif upscale_cfg.target_aspect_ratio:
+                    target_desc = (
+                        f"long_edge={upscale_cfg.target_long_edge_px} "
+                        f"aspect={upscale_cfg.target_aspect_ratio:.4g}"
+                    )
+                else:
+                    target_desc = f"long_edge={upscale_cfg.target_long_edge_px} (preserve aspect)"
+
                 logger.info(
-                    "Upscaling enabled: engine=%s model=%s target_long_edge_px=%d",
+                    "Upscaling enabled: engine=%s model=%s target=%s",
                     upscale_cfg.engine,
                     upscale_cfg.model_name,
-                    upscale_cfg.target_long_edge_px,
+                    target_desc,
                 )
                 upscale_image_to_4k(
                     input_path=image_full_path_and_name,

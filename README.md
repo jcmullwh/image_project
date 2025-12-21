@@ -228,12 +228,19 @@ Note: The Vulkan backend generally requires a Vulkan-compatible GPU.
 
 ### Configure
 
+Output sizing is configurable in two ways:
+- Preferred: set `upscale.target_aspect_ratio` (e.g., `"16:9"`) plus `target_long_edge_px`. The final resize uses a center-crop to fit the requested ratio (no stretching).
+- Explicit size: set both `upscale.target_width_px` and `upscale.target_height_px` to force an exact output size (overrides aspect ratio/long edge).
+
 Add an `upscale` section to your config (example YAML):
 
 ```yaml
 upscale:
   enabled: true
   target_long_edge_px: 3840
+  target_aspect_ratio: "16:9"  # default in config/config.yaml
+  # target_width_px: 3840      # optional exact sizing (must set both width/height)
+  # target_height_px: 2160
   engine: realesrgan-ncnn-vulkan
   # Optional. If omitted, PATH + REALESRGAN_NCNN_VULKAN_PATH are checked.
   realesrgan_binary: null
@@ -260,7 +267,7 @@ python scripts/manual_upscale.py path/to/image.jpg
 ```
 
 - Writes the result next to the input as `image_4k.jpg` (same extension preserved).
-- Defaults to a 3840px long edge; override with `--target-long-edge 4096`, etc.
+- Defaults to a 3840px long edge and uses the configured aspect ratio (config defaults to 16:9); override with `--target-long-edge`, `--target-aspect-ratio`, or explicit `--target-width/--target-height`.
 - Provide a custom Real-ESRGAN binary with `--realesrgan-binary /path/to/realesrgan-ncnn-vulkan`.
 - Provide a custom models directory with `--model-path /path/to/models` (folder containing *.param/*.bin).
 

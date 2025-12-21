@@ -37,6 +37,57 @@ def parse_bool(value: Any, path: str) -> bool:
     raise ValueError(f"Invalid boolean for {path}: {value!r}")
 
 
+def parse_aspect_ratio(value: Any, path: str) -> float:
+    """
+    Parse an aspect ratio (width/height) from a few common formats.
+
+    Accepts:
+      - numeric (int/float) values > 0
+      - strings like "16:9", "9/16", or "1.7778"
+      - 2-element lists/tuples
+    """
+
+    ratio: float
+    if isinstance(value, (int, float)):
+        ratio = float(value)
+    elif isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            raise ValueError(f"Invalid aspect ratio for {path}: {value!r}")
+        if ":" in raw:
+            parts = raw.split(":")
+        elif "/" in raw:
+            parts = raw.split("/")
+        else:
+            parts = [raw]
+
+        if len(parts) == 1:
+            try:
+                ratio = float(parts[0])
+            except Exception as exc:  # noqa: BLE001
+                raise ValueError(f"Invalid aspect ratio for {path}: {value!r}") from exc
+        elif len(parts) == 2:
+            try:
+                num = float(parts[0])
+                denom = float(parts[1])
+                ratio = num / denom
+            except Exception as exc:  # noqa: BLE001
+                raise ValueError(f"Invalid aspect ratio for {path}: {value!r}") from exc
+        else:
+            raise ValueError(f"Invalid aspect ratio for {path}: {value!r}")
+    elif isinstance(value, (list, tuple)) and len(value) == 2:
+        try:
+            ratio = float(value[0]) / float(value[1])
+        except Exception as exc:  # noqa: BLE001
+            raise ValueError(f"Invalid aspect ratio for {path}: {value!r}") from exc
+    else:
+        raise ValueError(f"Invalid aspect ratio for {path}: {value!r}")
+
+    if ratio <= 0:
+        raise ValueError(f"Invalid aspect ratio for {path}: must be > 0 (got {value!r})")
+    return ratio
+
+
 @dataclass(frozen=True)
 class RunConfig:
     generation_dir: str
@@ -62,6 +113,9 @@ class RunConfig:
 
     upscale_enabled: bool
     upscale_target_long_edge_px: int
+    upscale_target_width_px: int | None
+    upscale_target_height_px: int | None
+    upscale_target_aspect_ratio: float | None
     upscale_engine: str
     upscale_realesrgan_binary: str | None
     upscale_model_name: str
@@ -258,6 +312,32 @@ class RunConfig:
         upscale_target_long_edge_px = (
             int(upscale_cfg.get("target_long_edge_px", 3840)) if upscale_cfg else 3840
         )
+        if upscale_target_long_edge_px <= 0:
+            raise ValueError("Invalid config value for upscale.target_long_edge_px: must be > 0")
+
+        upscale_target_width_px = optional_int("upscale.target_width_px")
+        upscale_target_height_px = optional_int("upscale.target_height_px")
+        if (upscale_target_width_px is None) != (upscale_target_height_px is None):
+            raise ValueError(
+                "Both upscale.target_width_px and upscale.target_height_px must be provided together"
+            )
+        if upscale_target_width_px is not None and upscale_target_width_px <= 0:
+            raise ValueError("Invalid config value for upscale.target_width_px: must be > 0")
+        if upscale_target_height_px is not None and upscale_target_height_px <= 0:
+            raise ValueError("Invalid config value for upscale.target_height_px: must be > 0")
+
+        raw_aspect_ratio = upscale_cfg.get("target_aspect_ratio") if upscale_cfg else None
+        upscale_target_aspect_ratio: float | None = None
+        if raw_aspect_ratio is not None:
+            upscale_target_aspect_ratio = parse_aspect_ratio(
+                raw_aspect_ratio, "upscale.target_aspect_ratio"
+            )
+
+        if upscale_target_aspect_ratio is not None and upscale_target_width_px is not None:
+            raise ValueError(
+                "Provide either upscale.target_width_px/target_height_px or "
+                "upscale.target_aspect_ratio, not both"
+            )
         upscale_engine = (
             str(upscale_cfg.get("engine", "realesrgan-ncnn-vulkan"))
             if upscale_cfg
@@ -293,6 +373,9 @@ class RunConfig:
                 rclone_album=rclone_album,
                 upscale_enabled=upscale_enabled,
                 upscale_target_long_edge_px=upscale_target_long_edge_px,
+                upscale_target_width_px=upscale_target_width_px,
+                upscale_target_height_px=upscale_target_height_px,
+                upscale_target_aspect_ratio=upscale_target_aspect_ratio,
                 upscale_engine=upscale_engine,
                 upscale_realesrgan_binary=(
                     normalize_path(upscale_realesrgan_binary) if upscale_realesrgan_binary else None

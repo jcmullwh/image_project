@@ -20,7 +20,7 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from PIL import Image
+from PIL import Image, ImageOps
 
 
 class UpscaleError(RuntimeError):
@@ -33,6 +33,16 @@ class UpscaleConfig:
 
     target_long_edge_px:
         "4K" target expressed as the maximum(width, height). 3840 matches UHD.
+        Ignored when an explicit target width/height is provided.
+
+    target_width_px / target_height_px:
+        Optional explicit output dimensions. When both are set, they override
+        target_long_edge_px and target_aspect_ratio.
+
+    target_aspect_ratio:
+        Optional desired aspect ratio (width / height), e.g., 16:9. When set,
+        the final output is resized/cropped to that ratio using the configured
+        target_long_edge_px to determine the long edge.
 
     engine:
         Currently only "realesrgan-ncnn-vulkan" is supported.
@@ -60,6 +70,9 @@ class UpscaleConfig:
     """
 
     target_long_edge_px: int = 3840
+    target_width_px: int | None = None
+    target_height_px: int | None = None
+    target_aspect_ratio: float | None = None
     engine: str = "realesrgan-ncnn-vulkan"
     realesrgan_binary: str | None = None
     model_name: str = "realesrgan-x4plus"
@@ -86,6 +99,91 @@ def _compute_target_size(width: int, height: int, target_long_edge_px: int) -> t
 
     # Guard against rounding to 0 in degenerate cases.
     return max(1, new_w), max(1, new_h)
+
+
+def _normalize_aspect_ratio(value: float | int | str | tuple[int, int] | None) -> float | None:
+    """Parse and validate an aspect ratio, returning width/height as a float."""
+    if value is None:
+        return None
+
+    ratio: float
+    if isinstance(value, (int, float)):
+        ratio = float(value)
+    elif isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return None
+        if ":" in raw:
+            parts = raw.split(":")
+        elif "/" in raw:
+            parts = raw.split("/")
+        else:
+            parts = [raw]
+
+        if len(parts) == 1:
+            try:
+                ratio = float(parts[0])
+            except Exception as exc:  # noqa: BLE001
+                raise ValueError(f"Invalid aspect ratio: {value!r}") from exc
+        elif len(parts) == 2:
+            try:
+                num = float(parts[0])
+                denom = float(parts[1])
+                ratio = num / denom
+            except Exception as exc:  # noqa: BLE001
+                raise ValueError(f"Invalid aspect ratio: {value!r}") from exc
+        else:
+            raise ValueError(f"Invalid aspect ratio: {value!r}")
+    elif isinstance(value, (tuple, list)) and len(value) == 2:
+        try:
+            ratio = float(value[0]) / float(value[1])
+        except Exception as exc:  # noqa: BLE001
+            raise ValueError(f"Invalid aspect ratio: {value!r}") from exc
+    else:
+        raise ValueError(f"Invalid aspect ratio: {value!r}")
+
+    if ratio <= 0:
+        raise ValueError(f"Invalid aspect ratio (must be > 0): {value!r}")
+    return ratio
+
+
+def _resolve_target_dimensions(
+    *,
+    source_width: int,
+    source_height: int,
+    cfg: UpscaleConfig,
+) -> tuple[int, int, float]:
+    """Compute the desired output dimensions and aspect ratio."""
+    if source_width <= 0 or source_height <= 0:
+        raise ValueError(f"Invalid image size: {source_width}x{source_height}")
+    if cfg.target_long_edge_px <= 0:
+        raise ValueError("target_long_edge_px must be > 0")
+
+    if (cfg.target_width_px is None) != (cfg.target_height_px is None):
+        raise ValueError("Both target_width_px and target_height_px must be set together.")
+
+    if cfg.target_width_px is not None and cfg.target_height_px is not None:
+        if cfg.target_width_px <= 0 or cfg.target_height_px <= 0:
+            raise ValueError("target_width_px and target_height_px must be > 0")
+        ratio = cfg.target_width_px / float(cfg.target_height_px)
+        return cfg.target_width_px, cfg.target_height_px, ratio
+
+    aspect_ratio = _normalize_aspect_ratio(cfg.target_aspect_ratio)
+    if aspect_ratio is not None:
+        if aspect_ratio >= 1:
+            target_w = cfg.target_long_edge_px
+            target_h = int(round(target_w / aspect_ratio))
+        else:
+            target_h = cfg.target_long_edge_px
+            target_w = int(round(target_h * aspect_ratio))
+        target_w = max(1, target_w)
+        target_h = max(1, target_h)
+        ratio = target_w / float(target_h)
+        return target_w, target_h, ratio
+
+    target_w, target_h = _compute_target_size(source_width, source_height, cfg.target_long_edge_px)
+    ratio = target_w / float(target_h)
+    return target_w, target_h, ratio
 
 
 def _find_realesrgan_binary(explicit_path: str | None) -> str | None:
@@ -183,18 +281,28 @@ def upscale_image_to_4k(
     Returns the output_path.
 
     Behavior:
-      - If the input already meets/exceeds the target long edge, the image is
-        copied to output_path.
-      - Otherwise we run an x4 Real-ESRGAN model once, then resize (Lanczos) to
-        hit the exact target long-edge.
-      - If the input is extremely small (< target/4), x4 may still be below the
-        target; in that case we do an additional Lanczos resize.
+      - If the input already matches the target size, the image is copied to
+        output_path.
+      - If the input meets/exceeds the target size, we resize/crop directly to
+        the requested dimensions (no upscaling).
+      - Otherwise we run an x4 Real-ESRGAN model once, then resize/crop
+        (Lanczos) to the exact target dimensions.
+      - If the Real-ESRGAN binary is unavailable and allow_fallback_resize is
+        True, we fall back to a Lanczos resize/crop to the target dimensions.
     """
 
     cfg = config or UpscaleConfig()
 
     in_path = Path(input_path)
     out_path = Path(output_path)
+    if (
+        cfg.target_width_px is not None
+        and cfg.target_height_px is not None
+        and cfg.target_aspect_ratio is not None
+    ):
+        raise ValueError(
+            "Provide either explicit target_width_px/target_height_px or target_aspect_ratio, not both."
+        )
     if not in_path.exists():
         raise FileNotFoundError(f"Input image does not exist: {in_path}")
 
@@ -203,15 +311,33 @@ def upscale_image_to_4k(
     with Image.open(in_path) as im:
         width, height = im.size
 
-    if max(width, height) >= cfg.target_long_edge_px:
+    has_explicit_size = cfg.target_width_px is not None and cfg.target_height_px is not None
+    aspect_ratio = _normalize_aspect_ratio(cfg.target_aspect_ratio)
+
+    target_w, target_h, _ = _resolve_target_dimensions(
+        source_width=width,
+        source_height=height,
+        cfg=cfg,
+    )
+
+    if width == target_w and height == target_h:
         shutil.copyfile(in_path, out_path)
         return str(out_path)
 
-    # Determine desired final size up-front.
-    target_w, target_h = _compute_target_size(width, height, cfg.target_long_edge_px)
+    if not has_explicit_size and aspect_ratio is None and max(width, height) >= cfg.target_long_edge_px:
+        shutil.copyfile(in_path, out_path)
+        return str(out_path)
+
+    needs_upscale = width < target_w or height < target_h
 
     if cfg.engine != "realesrgan-ncnn-vulkan":
         raise ValueError(f"Unsupported upscaling engine: {cfg.engine}")
+
+    # If we already meet or exceed the target size, avoid the Real-ESRGAN hop and
+    # just resize/crop to the requested dimensions.
+    if not needs_upscale:
+        _lanczos_resize(in_path, out_path, target_w, target_h)
+        return str(out_path)
 
     binary = _find_realesrgan_binary(cfg.realesrgan_binary)
     if not binary:
@@ -268,7 +394,13 @@ def _lanczos_resize(src: Path, dst: Path, width: int, height: int) -> None:
 
     with Image.open(src) as im:
         im = im.convert("RGB")
-        resized = im.resize((width, height), resample=Image.Resampling.LANCZOS)
+        # ImageOps.fit preserves aspect ratio and crops (center) when ratios differ.
+        resized = ImageOps.fit(
+            im,
+            (int(width), int(height)),
+            method=Image.Resampling.LANCZOS,
+            centering=(0.5, 0.5),
+        )
 
         ext = dst.suffix.lower().lstrip(".")
         if ext in {"jpg", "jpeg"}:
