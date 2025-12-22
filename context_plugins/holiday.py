@@ -199,14 +199,14 @@ class HolidayInjector:
 
         if holiday.key == "halloween" and dislikes_horror:
             hook = (
-                "Halloween proximity — consider injecting subtle halloween nods or adopt it as an additional theme"
+                "Halloween proximity - incorporate playful, non-horror motifs (costumes, pumpkins, autumn light)."
             )
         else:
-            hook = f"Holiday proximity: {holiday.label} — evoke subtly via materials/lighting/symbols."
+            hook = (
+                f"Holiday proximity: {holiday.label} - incorporate it clearly into the scene "
+                "(motifs/decor/lighting/colors)."
+            )
 
-        guidance = (
-            f"{hook} You MUST adopt it as an additional theme."
-        )
+        guidance = f"{hook} You MUST adopt it as an additional theme."
 
         return InjectionResult(guidance_lines=[guidance], metadata=metadata)
-

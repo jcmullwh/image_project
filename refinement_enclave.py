@@ -19,12 +19,12 @@ ENCLAVE_ARTISTS: list[tuple[str, str, str]] = [
     (
         "da_vinci",
         "da Vinci",
-        "Systems thinker. Tie disparate elements into a cohesive whole with strong composition and purpose.",
+        "Systems thinker. Tie disparate elements into a cohesive whole with strong composition and purpose. This artist is focused on ensuring all components work together harmoniously. Additionally, this artist pays close attention to ensure that the image is physically achievable (ie conflicting or paradoxical elements that cannot be represented in a single image should be avoided).",
     ),
     (
         "representative",
         "Representative",
-        "Audience translator. Optimize for Lana's stated likes/dislikes; remove anything that will annoy her. You have veto authority. Allow the artists creative freedom but never allow clear conflicts with stated dislikes.",
+        "Audience translator. Optimize for Lana's stated likes/dislikes; remove anything that will annoy her. You have veto authority. Allow the artists creative freedom but never allow clear conflicts with stated dislikes. Clearly state any vetoes in your critique. Clearly label any suggestions that are not vetoes as optional.",
     ),
     (
         "chameleon",
@@ -125,7 +125,7 @@ def make_tot_enclave_block(stage_name: str) -> Block:
             "Using the independent artist notes below, revise the last assistant response.\n"
             "Keep the original intent and constraints.\n"
             "Return ONLY the revised response (no preamble, no analysis).\n\n"
-            "If there is any disagreement amoung the artists, the Representative artist's opinion should have the most weight. Additionally, the Representative has veto authority. Second largest weight goes to the Chameleon artist. However, the chameleon does not have veto authority.\n\n"
+            "The Representative has veto authority. If the representative states something must be changed, it should be changed. However, other suggestions it gives don't have to be strictly followed.\n\n"
             + "\n\n".join(notes)
         )
 
