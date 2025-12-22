@@ -48,6 +48,7 @@ class StepTiming:
 class StepReport:
     path: str
     name: str
+    step_index: Optional[int] = None
     prompt: Optional[str] = None
     response: Optional[str] = None
     prompt_chars: Optional[int] = None
@@ -72,6 +73,7 @@ class RunMetadata:
     context: Optional[Dict[str, Any]] = None
     title_generation: Optional[Any] = None
     concept_filter_log: Optional[Any] = None
+    oplog_stats: Optional[Dict[str, Any]] = None
     artifact_paths: Dict[str, Optional[str]] = field(default_factory=dict)
 
 

@@ -94,9 +94,7 @@ def _group_steps(report: RunReport) -> Dict[str, List[StepReport]]:
         parts = step.path.split("/")
         key = "/".join(parts[:2]) if len(parts) >= 2 else step.path
         groups.setdefault(key, []).append(step)
-    for steps in groups.values():
-        steps.sort(key=lambda s: (s.timing.start_ts or datetime.min, s.path))
-    return dict(sorted(groups.items(), key=lambda kv: kv[0]))
+    return groups
 
 
 def _group_steps_tree(report: RunReport) -> Dict[str, Dict[str, List[StepReport]]]:
@@ -106,14 +104,13 @@ def _group_steps_tree(report: RunReport) -> Dict[str, Dict[str, List[StepReport]
         group2 = "/".join(parts[:2]) if len(parts) >= 2 else step.path
         group3 = parts[2] if len(parts) >= 3 else ""
         tree.setdefault(group2, {}).setdefault(group3, []).append(step)
-    for sub in tree.values():
-        for steps in sub.values():
-            steps.sort(key=lambda s: (s.timing.start_ts or datetime.min, s.path))
-    return dict(sorted(tree.items(), key=lambda kv: kv[0]))
+    return tree
 
 
 def _step_anchor_id(step: StepReport) -> str:
-    return f"step-{_safe_id(step.path)}"
+    if step.step_index is None:
+        raise ValueError(f"StepReport.step_index missing for path={step.path!r}")
+    return f"step-{step.step_index:04d}-{_safe_id(step.path)}"
 
 
 def _truncate_preview(text: str, *, limit: int = 180) -> str:
@@ -121,6 +118,42 @@ def _truncate_preview(text: str, *, limit: int = 180) -> str:
     if len(stripped) <= limit:
         return stripped
     return stripped[: limit - 1] + "…"
+
+
+def _render_parser_health_banner(report: RunReport) -> str:
+    health_issues = [
+        issue
+        for issue in report.issues
+        if issue.code in {"oplog_parse_failed", "oplog_low_coverage"}
+    ]
+    if not health_issues:
+        return ""
+
+    severity = "error" if any(i.severity.lower() == "error" for i in health_issues) else "warn"
+    stats = report.metadata.oplog_stats or {}
+
+    detected_format = stats.get("detected_format") or "unknown"
+    total = stats.get("total_lines")
+    parsed = stats.get("parsed_lines")
+    coverage = stats.get("coverage")
+    event_count = stats.get("event_count")
+
+    details = []
+    if total is not None and parsed is not None and coverage is not None:
+        details.append(f"coverage {coverage:.1%} ({parsed}/{total})")
+    if event_count is not None:
+        details.append(f"events {event_count}")
+    details.append(f"format {detected_format}")
+    detail_text = " | ".join(details)
+
+    headline = "Oplog parsing degraded" if severity == "warn" else "Oplog parsing failed"
+    issue_text = "; ".join(sorted({i.message for i in health_issues}))
+    return (
+        f"<div class='banner banner-{html.escape(severity)}'>"
+        f"<div><strong>{html.escape(headline)}</strong> <span class='muted'>{html.escape(detail_text)}</span></div>"
+        f"<div class='muted'>{html.escape(issue_text)}</div>"
+        "</div>"
+    )
 
 
 def _step_card(step: StepReport) -> str:
@@ -211,6 +244,16 @@ def _guess_final_prompt_step(steps: List[StepReport]) -> StepReport | None:
 
 
 def render_html(report: RunReport) -> str:
+    anchors_seen: set[str] = set()
+    anchor_duplicates: set[str] = set()
+    for step in report.steps:
+        anchor = _step_anchor_id(step)
+        if anchor in anchors_seen:
+            anchor_duplicates.add(anchor)
+        anchors_seen.add(anchor)
+    if anchor_duplicates:
+        raise ValueError(f"Duplicate step anchor IDs detected: {sorted(anchor_duplicates)}")
+
     grouped = _group_steps(report)
     tree = _group_steps_tree(report)
 
@@ -288,10 +331,12 @@ def render_html(report: RunReport) -> str:
         highlight_parts.append("</ul></div>")
         highlight_html = "".join(highlight_parts)
 
+    banner_html = _render_parser_health_banner(report)
+
     tree_html_bits = []
     for group2, sub in tree.items():
         tree_html_bits.append(f"<details open><summary>{html.escape(group2)}</summary><div class='tree'>")
-        for group3, steps in sorted(sub.items(), key=lambda kv: kv[0] or ""):
+        for group3, steps in sub.items():
             if group3:
                 tree_html_bits.append(f"<details><summary>{html.escape(group3)}</summary><ul>")
             else:
@@ -357,6 +402,9 @@ def render_html(report: RunReport) -> str:
         .tree li {{ list-style: none; margin: 0.15rem 0; }}
         .unknown {{ margin-top: 1rem; }}
         .highlights {{ border: 1px solid var(--border); border-radius: 10px; padding: 0.8rem 1rem; background: var(--panel); max-width: 920px; }}
+        .banner {{ border: 1px solid var(--border); border-radius: 10px; padding: 0.8rem 1rem; margin-bottom: 1rem; }}
+        .banner-warn {{ border-color: rgba(245,158,11,.35); background: rgba(245,158,11,.08); }}
+        .banner-error {{ border-color: rgba(239,68,68,.35); background: rgba(239,68,68,.08); }}
       </style>
       <title>run_review - {html.escape(report.metadata.generation_id)}</title>
     </head>
@@ -381,6 +429,7 @@ def render_html(report: RunReport) -> str:
         </nav>
 
         <main>
+          {banner_html}
           <section id="summary">
             <h2>Summary</h2>
             <table class="meta">{_format_meta_table(report)}</table>

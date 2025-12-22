@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+from collections import defaultdict
 import dataclasses
 from datetime import datetime
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from . import TOOL_VERSION
 from .parse_oplog import parse_oplog
@@ -40,38 +41,34 @@ def _merge_step_data(
     oplog_events: List[OplogEvent],
     issues: List[Issue],
 ) -> Tuple[List[StepReport], List[str]]:
-    steps_by_path: Dict[str, StepReport] = {}
-    unmatched_oplog_paths: List[str] = []
-    transcript_paths = {s.path for s in transcript_steps}
+    start_by_path: Dict[str, List[OplogEvent]] = defaultdict(list)
+    end_by_path: Dict[str, List[OplogEvent]] = defaultdict(list)
 
-    for step in transcript_steps:
-        steps_by_path[step.path] = StepReport(
-            path=step.path,
-            name=step.name,
-            prompt=step.prompt,
-            response=step.response,
-            prompt_chars=step.prompt_chars,
-            input_chars=step.input_chars,
-            context_chars=step.context_chars,
-            response_chars=step.response_chars,
-        )
+    first_event_index_by_occurrence: Dict[tuple[str, int], int] = {}
+    start_occurrence_counter: Dict[str, int] = defaultdict(int)
+    end_occurrence_counter: Dict[str, int] = defaultdict(int)
 
-    start_events: Dict[str, OplogEvent] = {}
-    end_events: Dict[str, OplogEvent] = {}
-
-    for event in oplog_events:
+    for event_index, event in enumerate(oplog_events):
         if event.type == "step_start" and event.path:
-            start_events[event.path] = event
-            if event.path not in steps_by_path:
-                steps_by_path[event.path] = StepReport(path=event.path, name=_step_name_from_path(event.path))
+            start_by_path[event.path].append(event)
+            occurrence_index = start_occurrence_counter[event.path]
+            start_occurrence_counter[event.path] += 1
+            first_event_index_by_occurrence.setdefault((event.path, occurrence_index), event_index)
         if event.type == "step_end" and event.path:
-            end_events[event.path] = event
-            if event.path not in steps_by_path:
-                steps_by_path[event.path] = StepReport(path=event.path, name=_step_name_from_path(event.path))
+            end_by_path[event.path].append(event)
+            occurrence_index = end_occurrence_counter[event.path]
+            end_occurrence_counter[event.path] += 1
+            first_event_index_by_occurrence.setdefault((event.path, occurrence_index), event_index)
 
-    for path, step in steps_by_path.items():
-        start = start_events.get(path)
-        end = end_events.get(path)
+    transcript_paths = {s.path for s in transcript_steps if s.path}
+    unmatched_oplog_paths: List[str] = []
+
+    mismatch_paths: set[str] = set()
+    for path in set(start_by_path) | set(end_by_path):
+        if len(start_by_path.get(path, ())) != len(end_by_path.get(path, ())):
+            mismatch_paths.add(path)
+
+    def attach_oplog_timing(step: StepReport, start: OplogEvent | None, end: OplogEvent | None) -> None:
         timing = StepTiming()
         if start:
             timing.start_ts = start.timestamp
@@ -80,41 +77,177 @@ def _merge_step_data(
             step.oplog_context_chars = start.data.get("context_chars")
         if end:
             timing.end_ts = end.timestamp
-            step.oplog_response_chars = end.data.get("response_chars")
+            step.oplog_response_chars = end.data.get("response_chars") or end.data.get("chars")
             if end.data.get("duration_ms") is not None:
-                timing.duration_ms = end.data["duration_ms"]
+                timing.duration_ms = float(end.data["duration_ms"])
         if start and end and timing.duration_ms is None:
             timing.duration_ms = (end.timestamp - start.timestamp).total_seconds() * 1000
         step.timing = timing
 
         if start and not end:
-            step.issues.append(Issue("warn", "step_missing_end", f"No end event for {path}", path=path))
+            step.issues.append(Issue("warn", "step_missing_end", f"No end event for {step.path}", path=step.path))
         if end and not start:
-            step.issues.append(Issue("warn", "step_missing_start", f"No start event for {path}", path=path))
+            step.issues.append(Issue("warn", "step_missing_start", f"No start event for {step.path}", path=step.path))
+
+    def add_common_step_issues(step: StepReport) -> None:
         if step.response is not None and not str(step.response).strip():
-            step.issues.append(Issue("warn", "empty_response", f"Empty response for {path}", path=path))
+            step.issues.append(Issue("warn", "empty_response", f"Empty response for {step.path}", path=step.path))
         if (step.context_chars or 0) > LARGE_CONTEXT_CHARS_THRESHOLD:
             step.issues.append(
-                Issue("info", "large_context", f"Large context_chars={step.context_chars}", path=path)
+                Issue("info", "large_context", f"Large context_chars={step.context_chars}", path=step.path)
             )
         if (step.input_chars or 0) > LARGE_INPUT_CHARS_THRESHOLD:
-            step.issues.append(Issue("info", "large_input", f"Large input_chars={step.input_chars}", path=path))
+            step.issues.append(Issue("info", "large_input", f"Large input_chars={step.input_chars}", path=step.path))
 
-        if path not in transcript_paths:
-            step.issues.append(Issue("warn", "unmatched_oplog_step", f"Step appears in oplog but not transcript: {path}", path=path))
-            unmatched_oplog_paths.append(path)
+    # Transcript steps are authoritative for ordering.
+    step_reports: List[StepReport] = []
+    transcript_occurrence_counter: Dict[str, int] = defaultdict(int)
+    transcript_steps_by_path: Dict[str, List[StepReport]] = defaultdict(list)
 
-    for path in transcript_paths:
-        if path not in start_events and path not in end_events:
-            steps_by_path[path].issues.append(
+    for idx, t_step in enumerate(transcript_steps):
+        path = t_step.path or "unknown"
+        occurrence_index = transcript_occurrence_counter[path]
+        transcript_occurrence_counter[path] += 1
+
+        report = StepReport(
+            path=path,
+            name=t_step.name,
+            step_index=idx,
+            prompt=t_step.prompt,
+            response=t_step.response,
+            prompt_chars=t_step.prompt_chars,
+            input_chars=t_step.input_chars,
+            context_chars=t_step.context_chars,
+            response_chars=t_step.response_chars,
+        )
+
+        start_list = start_by_path.get(path, [])
+        end_list = end_by_path.get(path, [])
+        start_event = start_list[occurrence_index] if occurrence_index < len(start_list) else None
+        end_event = end_list[occurrence_index] if occurrence_index < len(end_list) else None
+        attach_oplog_timing(report, start_event, end_event)
+
+        if path in mismatch_paths:
+            starts = len(start_list)
+            ends = len(end_list)
+            report.issues.append(
+                Issue(
+                    "warn",
+                    "step_event_count_mismatch",
+                    f"Oplog has {starts} step_start and {ends} step_end events for {path}",
+                    path=path,
+                )
+            )
+
+        if start_event is None and end_event is None and path in transcript_paths:
+            report.issues.append(
                 Issue("warn", "unmatched_transcript_step", f"Step present only in transcript: {path}", path=path)
             )
             issues.append(
                 Issue("warn", "unmatched_transcript_step", f"Step present only in transcript: {path}", path=path)
             )
 
-    ordered_steps = sorted(steps_by_path.values(), key=lambda s: (s.timing.start_ts or datetime.min, s.path))
-    return ordered_steps, unmatched_oplog_paths
+        add_common_step_issues(report)
+        step_reports.append(report)
+        transcript_steps_by_path[path].append(report)
+
+    # Oplog-only steps (paths not present in transcript) are appended in oplog order.
+    oplog_only_paths = sorted((set(start_by_path) | set(end_by_path)) - transcript_paths)
+    occurrence_tuples: List[tuple[int, str, int]] = []
+    for path in oplog_only_paths:
+        starts = start_by_path.get(path, [])
+        ends = end_by_path.get(path, [])
+        occurrence_count = max(len(starts), len(ends))
+        for occurrence_index in range(occurrence_count):
+            first_index = first_event_index_by_occurrence.get((path, occurrence_index), 1_000_000_000)
+            occurrence_tuples.append((first_index, path, occurrence_index))
+
+    occurrence_tuples.sort(key=lambda t: (t[0], t[1], t[2]))
+
+    next_index = len(step_reports)
+    for _, path, occurrence_index in occurrence_tuples:
+        start_list = start_by_path.get(path, [])
+        end_list = end_by_path.get(path, [])
+        start_event = start_list[occurrence_index] if occurrence_index < len(start_list) else None
+        end_event = end_list[occurrence_index] if occurrence_index < len(end_list) else None
+
+        report = StepReport(path=path, name=_step_name_from_path(path), step_index=next_index)
+        next_index += 1
+
+        attach_oplog_timing(report, start_event, end_event)
+
+        if path in mismatch_paths:
+            report.issues.append(
+                Issue(
+                    "warn",
+                    "step_event_count_mismatch",
+                    f"Oplog has {len(start_list)} step_start and {len(end_list)} step_end events for {path}",
+                    path=path,
+                )
+            )
+
+        report.issues.append(
+            Issue("warn", "unmatched_oplog_step", f"Step appears in oplog but not transcript: {path}", path=path)
+        )
+        add_common_step_issues(report)
+        step_reports.append(report)
+        if path not in unmatched_oplog_paths:
+            unmatched_oplog_paths.append(path)
+
+    for path in sorted(mismatch_paths):
+        issues.append(
+            Issue(
+                "warn",
+                "step_event_count_mismatch",
+                f"Oplog has {len(start_by_path.get(path, []))} step_start and {len(end_by_path.get(path, []))} step_end events for {path}",
+                path=path,
+            )
+        )
+
+    return step_reports, unmatched_oplog_paths
+
+
+def _compute_oplog_header_stats(oplog_path: str) -> Dict[str, Any]:
+    from .parse_oplog import TIMESTAMP_PIPE_RE, TIMESTAMP_SPACE_RE, _parse_timestamp
+
+    total_lines = 0
+    parsed_lines = 0
+    pipe_lines = 0
+    space_lines = 0
+
+    with open(oplog_path, "r", encoding="utf-8") as handle:
+        for raw_line in handle:
+            if not raw_line.strip():
+                continue
+            total_lines += 1
+            ts, level, _message = _parse_timestamp(raw_line)
+            if ts is None or level is None:
+                continue
+            parsed_lines += 1
+            raw = raw_line.rstrip("\n")
+            if TIMESTAMP_PIPE_RE.match(raw):
+                pipe_lines += 1
+            elif TIMESTAMP_SPACE_RE.match(raw):
+                space_lines += 1
+
+    unparsed_lines = total_lines - parsed_lines
+    coverage = (parsed_lines / total_lines) if total_lines else 0.0
+    if pipe_lines and not space_lines:
+        detected_format = "pipe"
+    elif space_lines and not pipe_lines:
+        detected_format = "space"
+    elif pipe_lines and space_lines:
+        detected_format = "mixed"
+    else:
+        detected_format = "unknown"
+
+    return {
+        "total_lines": total_lines,
+        "parsed_lines": parsed_lines,
+        "unparsed_lines": unparsed_lines,
+        "coverage": coverage,
+        "detected_format": detected_format,
+    }
 
 
 def build_report(inputs: RunInputs, *, best_effort: bool = False) -> RunReport:
@@ -146,6 +279,53 @@ def build_report(inputs: RunInputs, *, best_effort: bool = False) -> RunReport:
         metadata = RunMetadata(inputs.generation_id or "unknown")
     metadata.artifact_paths.setdefault("oplog", inputs.oplog_path)
     metadata.artifact_paths.setdefault("transcript", inputs.transcript_path)
+
+    if inputs.oplog_path:
+        stats = _compute_oplog_header_stats(inputs.oplog_path)
+        stats.update(
+            {
+                "event_count": len(oplog_events),
+                "unknown_event_count": len(unknown_events),
+                "side_effect_count": len(side_effects),
+            }
+        )
+        metadata.oplog_stats = stats
+
+        total = int(stats.get("total_lines", 0) or 0)
+        parsed = int(stats.get("parsed_lines", 0) or 0)
+        coverage = float(stats.get("coverage", 0.0) or 0.0)
+        unparsed_ratio = (1.0 - coverage) if total else 0.0
+
+        parse_failed = False
+        if total and unparsed_ratio >= 0.95:
+            parse_failed = True
+            issues.append(
+                Issue(
+                    "error",
+                    "oplog_parse_failed",
+                    f"Oplog header parse failed: parsed {parsed}/{total} lines (coverage {coverage:.1%}).",
+                    artifact_path=inputs.oplog_path,
+                )
+            )
+        if total and not parse_failed and parsed and len(oplog_events) == 0:
+            parse_failed = True
+            issues.append(
+                Issue(
+                    "warn",
+                    "oplog_parse_failed",
+                    f"Oplog semantic parse produced 0 events ({parsed}/{total} headers parsed). Log formats may have changed.",
+                    artifact_path=inputs.oplog_path,
+                )
+            )
+        if total and not parse_failed and coverage < 0.9:
+            issues.append(
+                Issue(
+                    "warn",
+                    "oplog_low_coverage",
+                    f"Oplog header parse coverage low: parsed {parsed}/{total} lines (coverage {coverage:.1%}).",
+                    artifact_path=inputs.oplog_path,
+                )
+            )
 
     if not transcript_steps and inputs.transcript_path:
         issues.append(Issue("warn", "empty_transcript_steps", "Transcript contains no steps", artifact_path=inputs.transcript_path))
@@ -218,6 +398,7 @@ def report_to_dict(report: RunReport) -> Dict:
 
     def serialize_step(step: StepReport) -> Dict:
         return {
+            "step_index": step.step_index,
             "path": step.path,
             "name": step.name,
             "prompt": step.prompt,

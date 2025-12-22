@@ -1,13 +1,18 @@
 from __future__ import annotations
 
+import ast
+import json
 import re
 from datetime import datetime
 from typing import Any, Dict, List, Tuple
 
 from .report_model import OplogEvent, SideEffect
 
-TIMESTAMP_RE = re.compile(
+TIMESTAMP_SPACE_RE = re.compile(
     r"^(?P<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3})\s+(?P<level>\w+)\s+(?P<msg>.*)$"
+)
+TIMESTAMP_PIPE_RE = re.compile(
+    r"^(?P<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3})\s*\|\s*(?P<level>\w+)\s*\|\s*(?P<msg>.*)$"
 )
 
 RUN_START_FOR_GENERATION_RE = re.compile(r"^Run started for generation\s+(?P<id>\S+)", re.IGNORECASE)
@@ -61,18 +66,49 @@ OPLOG_STORED_RE = re.compile(r"^Operational log stored at\s+(?P<path>.+)\s*$", r
 
 KV_TOKEN_RE = re.compile(r"(?P<key>[\w.]+)=(?P<value>[^\s,]+)")
 
+OPLOG_INIT_RE = re.compile(r"^Operational logging initialized for generation\s+(?P<id>\S+)\s*$", re.IGNORECASE)
+OPLOG_FILE_RE = re.compile(r"^Operational log file:\s*(?P<path>.+)\s*$", re.IGNORECASE)
+LOAD_PROMPT_DATA_RE = re.compile(r"^Loading prompt data from\s+(?P<path>.+)\s*$", re.IGNORECASE)
+LOADED_CATEGORY_ROWS_RE = re.compile(r"^Loaded\s+(?P<count>\d+)\s+category rows\s*$", re.IGNORECASE)
+LOAD_USER_PROFILE_RE = re.compile(r"^Loading user profile from\s+(?P<path>.+)\s*$", re.IGNORECASE)
+LOADED_USER_PROFILE_ROWS_RE = re.compile(r"^Loaded\s+(?P<count>\d+)\s+user profile rows\s*$", re.IGNORECASE)
+TEXTAI_INIT_RE = re.compile(r"^Initialized TextAI with model\s+(?P<model>\S+)\s*$", re.IGNORECASE)
+IMAGEAI_INIT_RE = re.compile(r"^Initialized ImageAI\s*$", re.IGNORECASE)
+CONCEPTS_RAW_RE = re.compile(r"^Random concepts selected \(raw\):\s*(?P<concepts>.+)\s*$", re.IGNORECASE)
+CONCEPTS_ADJUSTED_RE = re.compile(r"^Concepts adjusted after filtering:\s*(?P<concepts>.+)\s*$", re.IGNORECASE)
+CONCEPTS_UNCHANGED_RE = re.compile(r"^Concepts unchanged after filtering\.\s*$", re.IGNORECASE)
+FIRST_PROMPT_RE = re.compile(r"^Generated first prompt\s*\(selected_concepts=(?P<count>\d+)\)\s*$", re.IGNORECASE)
+IMAGE_IDENTIFIER_RE = re.compile(r"^Assigned image identifier\s+#(?P<seq>\d+)\s*-\s*(?P<title>.+)\s*$", re.IGNORECASE)
+CONCEPT_FILTER_IO_RE = re.compile(
+    r"^Concept filter\s+(?P<name>[\w-]+):\s*input=(?P<input>.*?)\s+output=(?P<output>.+)\s*$",
+    re.IGNORECASE,
+)
+CONCEPT_FILTER_RAW_RE = re.compile(
+    r"^Concept filter\s+(?P<name>[\w-]+)\s+raw response:\s*(?P<raw>.+)\s*$",
+    re.IGNORECASE,
+)
+CONCEPT_FILTER_ERROR_RE = re.compile(
+    r"^Concept filter\s+(?P<name>[\w-]+)\s+error:\s*(?P<detail>.+)\s*$",
+    re.IGNORECASE,
+)
+CONCEPT_FILTER_NOTE_RE = re.compile(
+    r"^Concept filter\s+(?P<name>[\w-]+)\s+note:\s*(?P<detail>.+)\s*$",
+    re.IGNORECASE,
+)
+
 
 def _parse_timestamp(line: str) -> tuple[datetime | None, str | None, str]:
-    match = TIMESTAMP_RE.match(line.rstrip("\n"))
+    raw = line.rstrip("\n")
+    match = TIMESTAMP_PIPE_RE.match(raw) or TIMESTAMP_SPACE_RE.match(raw)
     if not match:
-        return None, None, line.strip()
+        return None, None, raw.strip()
     ts_raw = match.group("ts")
     level = match.group("level")
     message = match.group("msg").strip()
     try:
         ts = datetime.strptime(ts_raw, "%Y-%m-%d %H:%M:%S,%f")
     except ValueError:
-        return None, level, line.strip()
+        return None, level, raw.strip()
     return ts, level, message
 
 
@@ -89,6 +125,20 @@ def _parse_kv_metrics(text: str) -> Dict[str, Any]:
             value = raw_value
         metrics[key] = value
     return metrics
+
+
+def _parse_listish(value: str) -> Any:
+    raw = value.strip()
+    if not raw:
+        return raw
+    try:
+        return json.loads(raw)
+    except Exception:
+        pass
+    try:
+        return ast.literal_eval(raw)
+    except Exception:
+        return raw
 
 
 def parse_oplog(path: str) -> Tuple[List[OplogEvent], List[str], List[SideEffect]]:
@@ -149,6 +199,107 @@ def parse_oplog(path: str) -> Tuple[List[OplogEvent], List[str], List[SideEffect
                 events.append(
                     OplogEvent(ts, level, "seed_selection", message, data={"seed": int(m.group("seed"))}, raw=raw)
                 )
+                continue
+
+            if m := OPLOG_INIT_RE.match(message):
+                generation_id = m.group("id")
+                events.append(OplogEvent(ts, level, "oplog_init", message, data={"generation_id": generation_id}, raw=raw))
+                side_effects.append(SideEffect("oplog_init", ts, {"generation_id": generation_id}, raw=raw))
+                continue
+            if m := OPLOG_FILE_RE.match(message):
+                emitted_path = m.group("path").strip()
+                events.append(OplogEvent(ts, level, "oplog_file", message, data={"path": emitted_path}, raw=raw))
+                side_effects.append(SideEffect("oplog_file", ts, {"path": emitted_path}, raw=raw))
+                continue
+
+            if m := LOAD_PROMPT_DATA_RE.match(message):
+                data = {"kind": "categories", "stage": "start", "path": m.group("path").strip()}
+                events.append(OplogEvent(ts, level, "data_load", message, data=data, raw=raw))
+                side_effects.append(SideEffect("data_load", ts, data, raw=raw))
+                continue
+            if m := LOADED_CATEGORY_ROWS_RE.match(message):
+                data = {"kind": "categories", "stage": "end", "rows": int(m.group("count"))}
+                events.append(OplogEvent(ts, level, "data_load", message, data=data, raw=raw))
+                side_effects.append(SideEffect("data_load", ts, data, raw=raw))
+                continue
+            if m := LOAD_USER_PROFILE_RE.match(message):
+                data = {"kind": "user_profile", "stage": "start", "path": m.group("path").strip()}
+                events.append(OplogEvent(ts, level, "data_load", message, data=data, raw=raw))
+                side_effects.append(SideEffect("data_load", ts, data, raw=raw))
+                continue
+            if m := LOADED_USER_PROFILE_ROWS_RE.match(message):
+                data = {"kind": "user_profile", "stage": "end", "rows": int(m.group("count"))}
+                events.append(OplogEvent(ts, level, "data_load", message, data=data, raw=raw))
+                side_effects.append(SideEffect("data_load", ts, data, raw=raw))
+                continue
+
+            if m := TEXTAI_INIT_RE.match(message):
+                data = {"component": "TextAI", "model": m.group("model").strip()}
+                events.append(OplogEvent(ts, level, "ai_init", message, data=data, raw=raw))
+                side_effects.append(SideEffect("ai_init", ts, data, raw=raw))
+                continue
+            if IMAGEAI_INIT_RE.match(message):
+                data = {"component": "ImageAI"}
+                events.append(OplogEvent(ts, level, "ai_init", message, data=data, raw=raw))
+                side_effects.append(SideEffect("ai_init", ts, data, raw=raw))
+                continue
+
+            if m := IMAGE_IDENTIFIER_RE.match(message):
+                data = {"seq": int(m.group("seq")), "title": m.group("title").strip()}
+                events.append(OplogEvent(ts, level, "image_identifier", message, data=data, raw=raw))
+                side_effects.append(SideEffect("image_identifier", ts, data, raw=raw))
+                continue
+
+            if m := CONCEPTS_RAW_RE.match(message):
+                concepts = _parse_listish(m.group("concepts"))
+                data = {"concepts": concepts}
+                events.append(OplogEvent(ts, level, "concepts_raw", message, data=data, raw=raw))
+                side_effects.append(SideEffect("concepts_raw", ts, data, raw=raw))
+                continue
+            if m := CONCEPTS_ADJUSTED_RE.match(message):
+                concepts = _parse_listish(m.group("concepts"))
+                data = {"concepts": concepts}
+                events.append(OplogEvent(ts, level, "concepts_filtered", message, data=data, raw=raw))
+                side_effects.append(SideEffect("concepts_filtered", ts, data, raw=raw))
+                continue
+            if CONCEPTS_UNCHANGED_RE.match(message):
+                data = {"unchanged": True}
+                events.append(OplogEvent(ts, level, "concepts_filtered", message, data=data, raw=raw))
+                side_effects.append(SideEffect("concepts_filtered", ts, data, raw=raw))
+                continue
+
+            if m := CONCEPT_FILTER_IO_RE.match(message):
+                filter_name = m.group("name").strip()
+                input_concepts = _parse_listish(m.group("input"))
+                output_concepts = _parse_listish(m.group("output"))
+                data = {"filter": filter_name, "input": input_concepts, "output": output_concepts}
+                events.append(OplogEvent(ts, level, "concept_filter", message, data=data, raw=raw))
+                side_effects.append(SideEffect("concept_filter", ts, data, raw=raw))
+                continue
+            if m := CONCEPT_FILTER_RAW_RE.match(message):
+                filter_name = m.group("name").strip()
+                raw_response = _parse_listish(m.group("raw"))
+                data = {"filter": filter_name, "raw_response": raw_response}
+                events.append(OplogEvent(ts, level, "concept_filter_raw", message, data=data, raw=raw))
+                side_effects.append(SideEffect("concept_filter_raw", ts, data, raw=raw))
+                continue
+            if m := CONCEPT_FILTER_ERROR_RE.match(message):
+                filter_name = m.group("name").strip()
+                data = {"filter": filter_name, "detail": m.group("detail").strip()}
+                events.append(OplogEvent(ts, level, "concept_filter_error", message, data=data, raw=raw))
+                side_effects.append(SideEffect("concept_filter_error", ts, data, raw=raw))
+                continue
+            if m := CONCEPT_FILTER_NOTE_RE.match(message):
+                filter_name = m.group("name").strip()
+                data = {"filter": filter_name, "detail": m.group("detail").strip()}
+                events.append(OplogEvent(ts, level, "concept_filter_note", message, data=data, raw=raw))
+                side_effects.append(SideEffect("concept_filter_note", ts, data, raw=raw))
+                continue
+
+            if m := FIRST_PROMPT_RE.match(message):
+                data = {"selected_concepts": int(m.group("count"))}
+                events.append(OplogEvent(ts, level, "first_prompt_generated", message, data=data, raw=raw))
+                side_effects.append(SideEffect("first_prompt_generated", ts, data, raw=raw))
                 continue
 
             if CONFIG_DEFAULT_RE.search(message):
@@ -296,6 +447,5 @@ def parse_oplog(path: str) -> Tuple[List[OplogEvent], List[str], List[SideEffect
 
             unknown.append(raw)
 
-    events.sort(key=lambda e: (e.timestamp, e.path or "", e.type, e.message))
-    side_effects.sort(key=lambda e: (e.timestamp, e.type))
+    # Preserve oplog reading order: do not re-sort events or side effects.
     return events, unknown, side_effects

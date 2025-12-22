@@ -7,7 +7,7 @@ from typing import Optional
 
 from .render_html import render_compare_html, render_html
 from .report_builder import RunLoadError, build_report, report_to_dict, diff_reports
-from .report_model import RunInputs
+from .report_model import RunInputs, RunReport
 
 
 def _discover_artifact(logs_dir: str, generation_id: str, suffix: str) -> Optional[str]:
@@ -59,6 +59,29 @@ def resolve_inputs(args) -> RunInputs:
     return RunInputs(args.generation_id, oplog_path=oplog, transcript_path=transcript)
 
 
+def _print_oplog_summary(report: RunReport) -> None:
+    stats = report.metadata.oplog_stats or {}
+    total = stats.get("total_lines")
+    parsed = stats.get("parsed_lines")
+    coverage = stats.get("coverage")
+    unknown = stats.get("unknown_event_count")
+    events = stats.get("event_count")
+    fmt = stats.get("detected_format")
+    parse_failed = any(i.code == "oplog_parse_failed" for i in report.issues)
+
+    bits = [f"generation_id={report.metadata.generation_id}"]
+    if fmt:
+        bits.append(f"oplog_format={fmt}")
+    if total is not None and parsed is not None and coverage is not None:
+        bits.append(f"oplog_coverage={coverage:.1%} ({parsed}/{total})")
+    if events is not None:
+        bits.append(f"oplog_events={events}")
+    if unknown is not None:
+        bits.append(f"unknown_lines={unknown}")
+    bits.append(f"oplog_parse_failed={str(parse_failed).lower()}")
+    print("run_review:", " ".join(bits))
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Offline run analyzer")
     parser.add_argument("--generation-id", dest="generation_id")
@@ -78,6 +101,8 @@ def main(argv=None):
         other_inputs = resolve_inputs(args)
         base_report = build_report(base_inputs, best_effort=args.best_effort)
         other_report = build_report(other_inputs, best_effort=args.best_effort)
+        _print_oplog_summary(base_report)
+        _print_oplog_summary(other_report)
         diff = diff_reports(base_report, other_report)
         html_out = os.path.join(args.output_dir, f"{base_id}_vs_{other_id}_run_compare.html")
         json_out = os.path.join(args.output_dir, f"{base_id}_vs_{other_id}_run_compare.json")
@@ -99,6 +124,7 @@ def main(argv=None):
 
     inputs = resolve_inputs(args)
     report = build_report(inputs, best_effort=args.best_effort)
+    _print_oplog_summary(report)
     json_path = os.path.join(args.output_dir, f"{inputs.generation_id}_run_report.json")
     html_path = os.path.join(args.output_dir, f"{inputs.generation_id}_run_report.html")
     with open(json_path, "w", encoding="utf-8") as handle:
