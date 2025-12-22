@@ -122,6 +122,7 @@ class RunContext:
 
     selected_concepts: list[str] = field(default_factory=list)
     outputs: dict[str, Any] = field(default_factory=dict)
+    blackbox_scoring: dict[str, Any] | None = None
     steps: list[dict[str, Any]] = field(default_factory=list)
 
     image_path: str | None = None
@@ -365,7 +366,10 @@ class ChatRunner:
                 self._ai_text, "model_name", None
             )
             if model_name:
-                record_params["model"] = model_name
+                if "model" not in record_params:
+                    record_params["model"] = model_name
+                elif record_params.get("model") != model_name:
+                    record_params["base_model"] = model_name
 
             messages_for_call = [
                 *working.messages,

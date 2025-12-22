@@ -16,6 +16,8 @@ def write_transcript(path: str, ctx: RunContext) -> None:
         "image_path": ctx.image_path,
         "created_at": ctx.created_at,
     }
+    if ctx.blackbox_scoring is not None:
+        payload["blackbox_scoring"] = ctx.blackbox_scoring
     context = ctx.outputs.get("context")
     if context is not None:
         payload["context"] = context
