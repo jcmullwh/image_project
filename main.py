@@ -61,7 +61,40 @@ def configure_stdio_utf8():
         # If reconfigure is unavailable, continue with defaults.
         pass
 
-def setup_operational_logger(log_dir: str, generation_id: str):
+
+class _RunFilesFilter(logging.Filter):
+    def __init__(
+        self,
+        *,
+        generation_id: str,
+        categories_path: str | None = None,
+        profile_path: str | None = None,
+    ) -> None:
+        super().__init__()
+        self._generation_id = generation_id
+        self._categories_path = categories_path
+        self._profile_path = profile_path
+
+    def set_prompt_files(self, *, categories_path: str | None, profile_path: str | None) -> None:
+        self._categories_path = categories_path
+        self._profile_path = profile_path
+
+    def filter(self, record: logging.LogRecord) -> bool:  # noqa: A003
+        record.generation_id = self._generation_id
+        record.categories_file = (
+            os.path.basename(self._categories_path) if self._categories_path else "-"
+        )
+        record.profile_file = os.path.basename(self._profile_path) if self._profile_path else "-"
+        return True
+
+
+def setup_operational_logger(
+    log_dir: str,
+    generation_id: str,
+    *,
+    categories_path: str | None = None,
+    profile_path: str | None = None,
+):
     """
     Configure a logger that writes an operational log for traceability.
     Logs go to both stdout and a UTF-8 file under the provided directory.
@@ -73,8 +106,19 @@ def setup_operational_logger(log_dir: str, generation_id: str):
     logger = logging.getLogger(logger_name)
     logger.setLevel(logging.DEBUG)
     logger.handlers.clear()
+    logger.filters.clear()
 
-    formatter = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
+    run_filter = _RunFilesFilter(
+        generation_id=generation_id,
+        categories_path=categories_path,
+        profile_path=profile_path,
+    )
+    logger.addFilter(run_filter)
+    setattr(logger, "_run_files_filter", run_filter)
+
+    formatter = logging.Formatter(
+        "%(asctime)s | %(levelname)s | %(message)s [categories=%(categories_file)s profile=%(profile_file)s]"
+    )
 
     file_handler = logging.FileHandler(log_file, encoding="utf-8")
     file_handler.setLevel(logging.DEBUG)
@@ -92,6 +136,17 @@ def setup_operational_logger(log_dir: str, generation_id: str):
     logger.debug("Operational log file: %s", log_file)
 
     return logger, log_file
+
+
+def set_operational_log_prompt_files(
+    logger: logging.Logger,
+    *,
+    categories_path: str | None,
+    profile_path: str | None,
+) -> None:
+    run_filter = getattr(logger, "_run_files_filter", None)
+    if isinstance(run_filter, _RunFilesFilter):
+        run_filter.set_prompt_files(categories_path=categories_path, profile_path=profile_path)
 
 
 def upload_to_photos_via_rclone(
@@ -136,7 +191,12 @@ def run_generation(cfg_dict, *, generation_id: str | None = None) -> RunContext:
     cfg, cfg_warnings = RunConfig.from_dict(cfg_dict)
 
     generation_id = generation_id or generate_unique_id()
-    logger, operational_log_path = setup_operational_logger(cfg.log_dir, generation_id)
+    logger, operational_log_path = setup_operational_logger(
+        cfg.log_dir,
+        generation_id,
+        categories_path=cfg.categories_path,
+        profile_path=cfg.profile_path,
+    )
     logger.info("Run started for generation %s", generation_id)
 
     for warning in cfg_warnings:

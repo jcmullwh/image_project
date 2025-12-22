@@ -83,15 +83,26 @@ def main_legacy() -> None:
     )
     caption_font_path = image_cfg.get("caption_font_path")
 
+    categories_path = prompt_cfg.get("categories_path")
+    profile_path = prompt_cfg.get("profile_path")
+    categories_names = prompt_cfg.get("categories_names")
+    _ = categories_names
+
     log_full_path_and_name = generate_file_location(log_dir, generation_id + "_log", ".txt")
     messages_text = ""
-    logger, operational_log_path = setup_operational_logger(log_dir, generation_id)
+    logger, operational_log_path = setup_operational_logger(
+        log_dir,
+        generation_id,
+        categories_path=str(categories_path) if categories_path else None,
+        profile_path=str(profile_path) if profile_path else None,
+    )
     logger.info("Run started for generation %s", generation_id)
 
     try:
-        categories_path = config["prompt"]["categories_path"]
-        categories_names = config["prompt"]["categories_names"]
-        _ = categories_names
+        if not categories_path:
+            raise ValueError("Missing required config value prompt.categories_path")
+        if not profile_path:
+            raise ValueError("Missing required config value prompt.profile_path")
 
         logger.info("Loading prompt data from %s", categories_path)
         prompt_data = load_prompt_data(categories_path)
@@ -101,7 +112,6 @@ def main_legacy() -> None:
             prompt_data.columns.tolist(),
         )
 
-        profile_path = config["prompt"]["profile_path"]
         logger.info("Loading user profile from %s", profile_path)
         user_profile = pd.read_csv(profile_path)
         logger.info("Loaded %d user profile rows", len(user_profile))
