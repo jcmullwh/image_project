@@ -37,6 +37,40 @@ def parse_bool(value: Any, path: str) -> bool:
     raise ValueError(f"Invalid boolean for {path}: {value!r}")
 
 
+def parse_float(value: Any, path: str) -> float:
+    if value is None:
+        raise ValueError(f"Invalid config value for {path}: None")
+    if isinstance(value, bool):
+        raise ValueError(f"Invalid config type for {path}: expected float, got bool")
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        if not value.strip():
+            raise ValueError(f"Invalid config value for {path}: must be a float")
+        try:
+            return float(value.strip())
+        except Exception as exc:  # noqa: BLE001
+            raise ValueError(f"Invalid config value for {path}: must be a float") from exc
+    raise ValueError(f"Invalid config type for {path}: expected float")
+
+
+def parse_int(value: Any, path: str) -> int:
+    if value is None:
+        raise ValueError(f"Invalid config value for {path}: None")
+    if isinstance(value, bool):
+        raise ValueError(f"Invalid config type for {path}: expected int, got bool")
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        if not value.strip():
+            raise ValueError(f"Invalid config value for {path}: must be an int")
+        try:
+            return int(value.strip())
+        except Exception as exc:  # noqa: BLE001
+            raise ValueError(f"Invalid config value for {path}: must be an int") from exc
+    raise ValueError(f"Invalid config type for {path}: expected int")
+
+
 def parse_aspect_ratio(value: Any, path: str) -> float:
     """
     Parse an aspect ratio (width/height) from a few common formats.
@@ -89,6 +123,23 @@ def parse_aspect_ratio(value: Any, path: str) -> float:
 
 
 @dataclass(frozen=True)
+class PromptNoveltyConfig:
+    enabled: bool
+    window: int
+
+
+@dataclass(frozen=True)
+class PromptScoringConfig:
+    enabled: bool
+    num_ideas: int
+    exploration_rate: float
+    judge_temperature: float
+    judge_model: str | None
+    generator_profile_abstraction: bool
+    novelty: PromptNoveltyConfig
+
+
+@dataclass(frozen=True)
 class RunConfig:
     generation_dir: str
     upscale_dir: str
@@ -102,6 +153,7 @@ class RunConfig:
     caption_font_path: str | None
 
     random_seed: int | None
+    prompt_scoring: PromptScoringConfig
 
     context_enabled: bool
     context_injectors: tuple[str, ...]
@@ -254,6 +306,71 @@ class RunConfig:
 
         random_seed = optional_int("prompt.random_seed")
 
+        raw_scoring: Any = prompt_cfg.get("scoring")
+        scoring_cfg: Mapping[str, Any]
+        if raw_scoring is None:
+            scoring_cfg = {}
+        elif not isinstance(raw_scoring, Mapping):
+            raise ValueError("Invalid config type for prompt.scoring: expected mapping")
+        else:
+            scoring_cfg = raw_scoring
+
+        scoring_enabled = parse_bool(scoring_cfg.get("enabled", False), "prompt.scoring.enabled")
+
+        num_ideas = parse_int(scoring_cfg.get("num_ideas", 6), "prompt.scoring.num_ideas")
+        if num_ideas < 2:
+            raise ValueError("Invalid config value for prompt.scoring.num_ideas: must be >= 2")
+
+        exploration_rate = parse_float(
+            scoring_cfg.get("exploration_rate", 0.15), "prompt.scoring.exploration_rate"
+        )
+        if not (0.0 <= exploration_rate <= 0.5):
+            raise ValueError(
+                "Invalid config value for prompt.scoring.exploration_rate: must be in [0, 0.5]"
+            )
+
+        judge_temperature = parse_float(
+            scoring_cfg.get("judge_temperature", 0.0), "prompt.scoring.judge_temperature"
+        )
+        if scoring_enabled and judge_temperature != 0.0:
+            warnings.append(
+                "prompt.scoring.judge_temperature is nonzero; this may reduce determinism "
+                f"(value={judge_temperature})"
+            )
+
+        judge_model = optional_str("prompt.scoring.judge_model")
+
+        generator_profile_abstraction = parse_bool(
+            scoring_cfg.get("generator_profile_abstraction", True),
+            "prompt.scoring.generator_profile_abstraction",
+        )
+
+        raw_novelty: Any = scoring_cfg.get("novelty")
+        novelty_cfg: Mapping[str, Any]
+        if raw_novelty is None:
+            novelty_cfg = {}
+        elif not isinstance(raw_novelty, Mapping):
+            raise ValueError("Invalid config type for prompt.scoring.novelty: expected mapping")
+        else:
+            novelty_cfg = raw_novelty
+
+        novelty_enabled = parse_bool(
+            novelty_cfg.get("enabled", True), "prompt.scoring.novelty.enabled"
+        )
+        novelty_window = parse_int(novelty_cfg.get("window", 25), "prompt.scoring.novelty.window")
+        if novelty_window < 0:
+            raise ValueError("Invalid config value for prompt.scoring.novelty.window: must be >= 0")
+
+        prompt_scoring = PromptScoringConfig(
+            enabled=scoring_enabled,
+            num_ideas=num_ideas,
+            exploration_rate=exploration_rate,
+            judge_temperature=judge_temperature,
+            judge_model=judge_model,
+            generator_profile_abstraction=generator_profile_abstraction,
+            novelty=PromptNoveltyConfig(enabled=novelty_enabled, window=novelty_window),
+        )
+
         context_cfg_raw = get_mapping("context")
         context_enabled = optional_bool("context.enabled", default=False)
         calendar_enabled = optional_bool("context.calendar.enabled", default=False)
@@ -365,6 +482,7 @@ class RunConfig:
                 titles_manifest_path=normalize_path(titles_manifest_raw),
                 caption_font_path=normalize_path(caption_font_raw) if caption_font_raw else None,
                 random_seed=random_seed,
+                prompt_scoring=prompt_scoring,
                 context_enabled=context_enabled,
                 context_injectors=context_injectors,
                 context_cfg=context_cfg,

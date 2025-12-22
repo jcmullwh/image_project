@@ -6,6 +6,7 @@ import random
 import subprocess
 import sys
 import time
+from dataclasses import asdict
 from datetime import datetime
 
 import pandas as pd
@@ -16,7 +17,7 @@ except ModuleNotFoundError:  # pragma: no cover
     ImageAI = None  # type: ignore[assignment]
     TextAI = None  # type: ignore[assignment]
 from message_handling import MessageHandler
-from pipeline import Block, ChatRunner, RunContext
+from pipeline import Block, ChatRunner, ChatStep, RunContext
 from records import append_generation_row
 from run_config import RunConfig
 from transcript import write_transcript
@@ -42,15 +43,21 @@ from utils import (
 from prompts import (
     DEFAULT_SYSTEM_PROMPT,
     build_preferences_guidance,
+    final_prompt_from_selected_idea_prompt,
     generate_image_prompt,
     generate_first_prompt,
     generate_fourth_prompt,
     generate_secondB_prompt,
     generate_second_prompt,
     generate_third_prompt,
+    idea_cards_generate_prompt,
+    idea_cards_judge_prompt,
     load_prompt_data,
+    profile_abstraction_prompt,
     select_random_concepts,
 )
+
+import blackbox_scoring
 
 def configure_stdio_utf8():
     """Force stdout/stderr to UTF-8 so Unicode responses never crash on Windows consoles."""
@@ -231,64 +238,256 @@ def run_generation(cfg_dict, *, generation_id: str | None = None) -> RunContext:
             logger.info("Concepts unchanged after filtering.")
         ctx.selected_concepts = list(filtered_concepts)
 
-        phase = "prompt_generation"
-        prompt_1, selected_concepts = generate_first_prompt(
-            prompt_data,
-            user_profile,
-            rng,
-            context_guidance=(context_guidance_text or None),
-            selected_concepts=filtered_concepts,
-        )
-        ctx.selected_concepts = selected_concepts
-        logger.info("Generated first prompt (selected_concepts=%d)", len(selected_concepts))
-
         transcript_path = generate_file_location(cfg.log_dir, generation_id + "_transcript", ".json")
 
-        phase = "pipeline"
-        # Prompt pipeline (text-only): a sequence of named stages that build toward the final image prompt.
-        # Refinement is pluggable via a RefinementPolicy; default remains the Tree-of-Thought enclave.
-        refinement_policy = TotEnclaveRefinement()
+        scoring_cfg = cfg.prompt_scoring
+        ctx.blackbox_scoring = {
+            "enabled": scoring_cfg.enabled,
+            "config_snapshot": asdict(scoring_cfg),
+        }
 
-        # Stages run in order; each stage sees the refined outputs of earlier stages as compact context.
-        pipeline_root = Block(
-            name="pipeline",
-            merge="all_messages",
-            nodes=[
-                refinement_policy.stage("initial_prompt", prompt=prompt_1, temperature=0.8),
-                refinement_policy.stage(
-                    "section_2_choice",
-                    prompt=lambda _ctx: generate_second_prompt(),
-                    temperature=0.8,
-                ),
-                refinement_policy.stage(
-                    "section_2b_title_and_story",
-                    prompt=lambda _ctx: generate_secondB_prompt(),
-                    temperature=0.8,
-                ),
-                refinement_policy.stage(
-                    "section_3_message_focus",
-                    prompt=lambda _ctx: generate_third_prompt(),
-                    temperature=0.8,
-                ),
-                refinement_policy.stage(
-                    "section_4_concise_description",
-                    prompt=lambda _ctx: generate_fourth_prompt(),
-                    temperature=0.8,
-                ),
-                refinement_policy.stage(
-                    "image_prompt_creation",
-                    prompt=lambda _ctx: generate_image_prompt(),
-                    temperature=0.8,
-                    # Capture the final refined image prompt for the downstream image generation step.
-                    capture_key="image_prompt",
-                ),
-            ],
-        )
-
-        # Execute the pipeline. Full per-step prompts/responses are recorded in `ctx.steps`, while selected
-        # stage outputs can be captured into `ctx.outputs` via `capture_key`.
         runner = ChatRunner(ai_text=ai_text)
-        runner.run(ctx, pipeline_root)
+
+        if scoring_cfg.enabled:
+            novelty_enabled = bool(scoring_cfg.novelty.enabled and scoring_cfg.novelty.window > 0)
+            logger.info(
+                "Blackbox scoring enabled: num_ideas=%d, exploration_rate=%.3g, novelty=%s",
+                scoring_cfg.num_ideas,
+                scoring_cfg.exploration_rate,
+                novelty_enabled,
+            )
+
+            novelty_summary: dict[str, object] | None = None
+            if novelty_enabled:
+                try:
+                    novelty_summary = blackbox_scoring.extract_recent_motif_summary(
+                        generations_csv_path=cfg.generations_csv_path,
+                        window=scoring_cfg.novelty.window,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Novelty enabled but history unavailable; disabling novelty for this run: %s %s",
+                        cfg.generations_csv_path,
+                        exc,
+                    )
+                    novelty_enabled = False
+                    novelty_summary = {
+                        "enabled": False,
+                        "window": scoring_cfg.novelty.window,
+                        "rows_considered": 0,
+                        "top_tokens": [],
+                    }
+            else:
+                novelty_summary = {
+                    "enabled": False,
+                    "window": scoring_cfg.novelty.window,
+                    "rows_considered": 0,
+                    "top_tokens": [],
+                }
+
+            ctx.blackbox_scoring["novelty_summary"] = novelty_summary
+
+            blackbox_nodes: list[ChatStep] = []
+            if scoring_cfg.generator_profile_abstraction:
+                blackbox_nodes.append(
+                    ChatStep(
+                        name="profile_abstraction",
+                        prompt=lambda _ctx: profile_abstraction_prompt(
+                            preferences_guidance=preferences_guidance
+                        ),
+                        temperature=0.0,
+                        merge="none",
+                        capture_key="generator_profile_hints",
+                    )
+                )
+            else:
+                ctx.outputs["generator_profile_hints"] = preferences_guidance
+
+            def _idea_cards_prompt(inner_ctx: RunContext) -> str:
+                hints = inner_ctx.outputs.get("generator_profile_hints", "")
+                return idea_cards_generate_prompt(
+                    concepts=list(inner_ctx.selected_concepts),
+                    generator_profile_hints=str(hints or ""),
+                    num_ideas=scoring_cfg.num_ideas,
+                )
+
+            blackbox_nodes.append(
+                ChatStep(
+                    name="idea_cards_generate",
+                    prompt=_idea_cards_prompt,
+                    temperature=0.8,
+                    merge="none",
+                    capture_key="idea_cards_json",
+                )
+            )
+
+            def _judge_prompt(inner_ctx: RunContext) -> str:
+                idea_cards_json = inner_ctx.outputs.get("idea_cards_json")
+                if not isinstance(idea_cards_json, str) or not idea_cards_json.strip():
+                    raise ValueError("Missing required output: idea_cards_json")
+                return idea_cards_judge_prompt(
+                    concepts=list(inner_ctx.selected_concepts),
+                    raw_profile=preferences_guidance,
+                    idea_cards_json=idea_cards_json,
+                    recent_motif_summary=json.dumps(novelty_summary, ensure_ascii=False, indent=2)
+                    if novelty_enabled
+                    else None,
+                )
+
+            judge_params: dict[str, object] = {}
+            if scoring_cfg.judge_model:
+                judge_params["model"] = scoring_cfg.judge_model
+
+            blackbox_nodes.append(
+                ChatStep(
+                    name="idea_cards_judge_score",
+                    prompt=_judge_prompt,
+                    temperature=scoring_cfg.judge_temperature,
+                    merge="none",
+                    params=judge_params,
+                    capture_key="idea_scores_json",
+                )
+            )
+
+            phase = "prompt_pipeline"
+            blackbox_block = Block(name="blackbox_scoring", merge="none", nodes=blackbox_nodes)
+            runner.run(ctx, blackbox_block)
+
+            idea_cards_json = ctx.outputs.get("idea_cards_json")
+            if not isinstance(idea_cards_json, str) or not idea_cards_json.strip():
+                raise ValueError("Missing required output: idea_cards_json")
+            idea_scores_json = ctx.outputs.get("idea_scores_json")
+            if not isinstance(idea_scores_json, str) or not idea_scores_json.strip():
+                raise ValueError("Missing required output: idea_scores_json")
+
+            try:
+                idea_cards = blackbox_scoring.parse_idea_cards_json(
+                    idea_cards_json, expected_num_ideas=scoring_cfg.num_ideas
+                )
+            except Exception as exc:
+                setattr(exc, "pipeline_step", "idea_cards_generate")
+                setattr(exc, "pipeline_path", "blackbox_scoring/idea_cards_generate")
+                raise
+
+            expected_ids = [card.get("id") for card in idea_cards if isinstance(card, dict)]
+
+            try:
+                scores = blackbox_scoring.parse_judge_scores_json(
+                    idea_scores_json, expected_ids=expected_ids
+                )
+            except Exception as exc:
+                setattr(exc, "pipeline_step", "idea_cards_judge_score")
+                setattr(exc, "pipeline_path", "blackbox_scoring/idea_cards_judge_score")
+                raise
+
+            scoring_seed = seed ^ 0xB10C5C0F
+            selection = blackbox_scoring.select_candidate(
+                scores=scores,
+                idea_cards=idea_cards,
+                exploration_rate=scoring_cfg.exploration_rate,
+                rng=random.Random(scoring_seed),
+                novelty_summary=novelty_summary if novelty_enabled else None,
+            )
+
+            selected_card = next((card for card in idea_cards if card.get("id") == selection.selected_id), None)
+            if not isinstance(selected_card, dict):
+                raise ValueError(f"selection inconsistency: selected id not found: {selection.selected_id}")
+
+            ctx.outputs["selected_idea_card"] = selected_card
+            ctx.blackbox_scoring.update(
+                {
+                    "scoring_seed": scoring_seed,
+                    "exploration_rate": scoring_cfg.exploration_rate,
+                    "exploration_roll": selection.exploration_roll,
+                    "selection_mode": selection.selection_mode,
+                    "selected_id": selection.selected_id,
+                    "selected_score": selection.selected_score,
+                    "selected_effective_score": selection.selected_effective_score,
+                    "score_table": selection.score_table,
+                }
+            )
+
+            logger.info(
+                "Selected candidate: id=%s, score=%d, selection_mode=%s",
+                selection.selected_id,
+                selection.selected_score,
+                selection.selection_mode,
+            )
+
+            refinement_policy = TotEnclaveRefinement()
+            pipeline_root = Block(
+                name="pipeline",
+                merge="all_messages",
+                nodes=[
+                    refinement_policy.stage(
+                        "image_prompt_creation",
+                        prompt=lambda inner_ctx: final_prompt_from_selected_idea_prompt(
+                            concepts=list(inner_ctx.selected_concepts),
+                            raw_profile=preferences_guidance,
+                            selected_idea_card=selected_card,
+                        ),
+                        temperature=0.8,
+                        capture_key="image_prompt",
+                    ),
+                ],
+            )
+            runner.run(ctx, pipeline_root)
+        else:
+            phase = "prompt_generation"
+            prompt_1, selected_concepts = generate_first_prompt(
+                prompt_data,
+                user_profile,
+                rng,
+                context_guidance=(context_guidance_text or None),
+                selected_concepts=filtered_concepts,
+            )
+            ctx.selected_concepts = selected_concepts
+            logger.info("Generated first prompt (selected_concepts=%d)", len(selected_concepts))
+
+            phase = "pipeline"
+            # Prompt pipeline (text-only): a sequence of named stages that build toward the final image prompt.
+            # Refinement is pluggable via a RefinementPolicy; default remains the Tree-of-Thought enclave.
+            refinement_policy = TotEnclaveRefinement()
+
+            # Stages run in order; each stage sees the refined outputs of earlier stages as compact context.
+            pipeline_root = Block(
+                name="pipeline",
+                merge="all_messages",
+                nodes=[
+                    refinement_policy.stage("initial_prompt", prompt=prompt_1, temperature=0.8),
+                    refinement_policy.stage(
+                        "section_2_choice",
+                        prompt=lambda _ctx: generate_second_prompt(),
+                        temperature=0.8,
+                    ),
+                    refinement_policy.stage(
+                        "section_2b_title_and_story",
+                        prompt=lambda _ctx: generate_secondB_prompt(),
+                        temperature=0.8,
+                    ),
+                    refinement_policy.stage(
+                        "section_3_message_focus",
+                        prompt=lambda _ctx: generate_third_prompt(),
+                        temperature=0.8,
+                    ),
+                    refinement_policy.stage(
+                        "section_4_concise_description",
+                        prompt=lambda _ctx: generate_fourth_prompt(),
+                        temperature=0.8,
+                    ),
+                    refinement_policy.stage(
+                        "image_prompt_creation",
+                        prompt=lambda _ctx: generate_image_prompt(),
+                        temperature=0.8,
+                        # Capture the final refined image prompt for the downstream image generation step.
+                        capture_key="image_prompt",
+                    ),
+                ],
+            )
+
+            # Execute the pipeline. Full per-step prompts/responses are recorded in `ctx.steps`, while selected
+            # stage outputs can be captured into `ctx.outputs` via `capture_key`.
+            runner.run(ctx, pipeline_root)
 
         phase = "capture"
         image_prompt = ctx.outputs.get("image_prompt")
@@ -441,7 +640,7 @@ def run_generation(cfg_dict, *, generation_id: str | None = None) -> RunContext:
             cfg.generations_csv_path,
             {
                 "generation_id": generation_id,
-                "selected_concepts": json.dumps(selected_concepts, ensure_ascii=False),
+                "selected_concepts": json.dumps(list(ctx.selected_concepts), ensure_ascii=False),
                 "final_image_prompt": image_prompt,
                 "image_path": upload_target_path,
                 "created_at": ctx.created_at,

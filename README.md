@@ -46,6 +46,11 @@ Optional keys:
 
 - `prompt.random_seed` (int): makes concept selection deterministic; if omitted, a seed is generated and logged.
 - `prompt.titles_manifest_path`: defaults to `<image.generation_path>/titles_manifest.csv` (logged at WARNING when defaulted).
+- Black-box scoring + selection (default off):
+  - Enable with `prompt.scoring.enabled: true`.
+  - Generates multiple "idea cards", scores them with a separate LLM judge (numeric JSON only), selects one (epsilon-greedy with optional novelty), and then generates the final prompt.
+  - Scoring details are recorded in the transcript under `blackbox_scoring` but are not merged into downstream prompt context.
+  - Details: `docs/scoring.md`
 - `image.caption_font_path`: optional `.ttf` for the caption overlay.
   - If explicitly set and the font cannot be loaded, the run fails loudly (no silent fallback).
 - Boolean flags (e.g. `rclone.enabled`, `upscale.enabled`) accept booleans, `0`/`1`, and strings `"true"`/`"false"`/`"1"`/`"0"`/`"yes"`/`"no"` (case-insensitive); other values raise.
@@ -87,6 +92,7 @@ Optional: set `image.caption_font_path` to a `.ttf` file to control the caption 
 - Transcript JSON: `<image.log_path>/<generation_id>_transcript.json` with keys:
   - `generation_id`, `seed`, `selected_concepts`, `steps`, `image_path`, `created_at`
   - When context injection is enabled, the transcript also includes a `context` object (structured metadata keyed by injector name).
+  - The transcript includes a `blackbox_scoring` object (when enabled, includes score/selection metadata).
 
 ## How to run
 
@@ -193,7 +199,7 @@ Fast-paced action movies
 - Programmatically modify prompt structure and implement variations.
 - Implement prompting A/B testing
 
-- integrate grading mechanism based on how well it aligns with the selected concepts and additional requirements
+- Extend black-box scoring (rubrics, novelty heuristics, optional CSV columns)
 
 - automatically generate categories concepts at first install
 

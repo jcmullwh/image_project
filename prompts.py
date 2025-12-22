@@ -5,6 +5,7 @@ Enclave pipeline construction now lives in refinement_enclave; this module stays
 
 from __future__ import annotations
 
+import json
 import random
 import textwrap
 
@@ -265,5 +266,138 @@ Composition: Portrait, headshot, closeup, birds-eye view, etc.\
 	- you may add a double colon :: to a prompt indicates to the Midjourney Bot that it should consider each part of the prompt individually. For the prompt space ship both words are considered together, and the Midjourney Bot produces images of sci-fi spaceships. If the prompt is separated into two parts, space:: ship, both concepts are considered separately, then blended together creating a sailing ship traveling through space.\
 This time, provide only the final prompt to the AI. Do not include anything except the final prompt in your response."
     return seventh_prompt
+
+
+def profile_abstraction_prompt(*, preferences_guidance: str) -> str:
+    guidance = (preferences_guidance or "").strip()
+    return textwrap.dedent(
+        f"""
+        Create a generator-safe profile summary that captures broad tastes without overfitting.
+
+        Rules:
+        - Allowed: broad adjectives, high-level style constraints, general "avoid" constraints.
+        - Disallowed: explicit colors, named motifs, named artists, and repeated n-grams copied from the raw likes list.
+        - Keep it short (3-8 bullet points max). No prose beyond the bullets.
+
+        Raw profile (for you only; do not copy phrases verbatim):
+        {guidance}
+        """.strip()
+    )
+
+
+def idea_cards_generate_prompt(
+    *,
+    concepts: list[str],
+    generator_profile_hints: str,
+    num_ideas: int,
+) -> str:
+    from blackbox_scoring import expected_idea_ids  # local import to keep prompts.py lightweight
+
+    ids = expected_idea_ids(num_ideas)
+    concepts_block = "\n".join(f"- {c}" for c in concepts) if concepts else "- <none>"
+    hints = (generator_profile_hints or "").strip()
+    return textwrap.dedent(
+        f"""
+        Generate {num_ideas} distinct image "idea cards" using ONLY the selected concepts and the generator-safe profile hints.
+
+        Selected concepts:
+        {concepts_block}
+
+        Generator-safe profile hints:
+        {hints if hints else "<none>"}
+
+        Output must be STRICT JSON only (no markdown, no commentary), with this exact schema:
+        {{
+          "ideas": [
+            {{
+              "id": "A",
+              "hook": "One sentence pitch.",
+              "narrative": "Short paragraph.",
+              "options": {{
+                "composition": ["...", "..."],
+                "palette": ["...", "..."],
+                "medium": ["..."],
+                "mood": ["..."]
+              }},
+              "avoid": ["..."]
+            }}
+          ]
+        }}
+
+        Hard constraints:
+        - You MUST produce exactly {num_ideas} ideas with ids exactly: {json.dumps(ids)}.
+        - Each options list must contain meaningful, non-synonym variation.
+        - composition and palette lists must have at least 2 items.
+        - medium and mood lists must have at least 1 item.
+        - "avoid" may be omitted or an empty list.
+        """.strip()
+    )
+
+
+def idea_cards_judge_prompt(
+    *,
+    concepts: list[str],
+    raw_profile: str,
+    idea_cards_json: str,
+    recent_motif_summary: str | None,
+) -> str:
+    concepts_block = "\n".join(f"- {c}" for c in concepts) if concepts else "- <none>"
+    recent_block = (recent_motif_summary or "").strip()
+    return textwrap.dedent(
+        f"""
+        You are a strict numeric judge. Score each candidate idea card from 0 to 100.
+
+        Inputs:
+        - Selected concepts (must align strongly):
+        {concepts_block}
+
+        - Raw user profile (use for judging only; do not rewrite it):
+        {raw_profile.strip()}
+
+        - Candidate idea cards JSON:
+        {idea_cards_json.strip()}
+
+        - Recent motifs summary (penalize repetition when present):
+        {recent_block if recent_block else "<none>"}
+
+        Output MUST be strict JSON ONLY with this exact schema and nothing else:
+        {{
+          "scores": [
+            {{"id": "A", "score": 0}}
+          ]
+        }}
+
+        Rules:
+        - "score" must be an integer in [0, 100].
+        - Include exactly one score entry per candidate id (no missing, no extra ids).
+        - No additional keys, no explanations, no prose.
+        """.strip()
+    )
+
+
+def final_prompt_from_selected_idea_prompt(
+    *,
+    concepts: list[str],
+    raw_profile: str,
+    selected_idea_card: dict[str, object],
+) -> str:
+    concepts_block = "\n".join(f"- {c}" for c in concepts) if concepts else "- <none>"
+    idea_json = json.dumps(selected_idea_card, ensure_ascii=False, indent=2)
+    return textwrap.dedent(
+        f"""
+        Create a single final image prompt (Midjourney-style), based on the selected idea card.
+
+        Selected concepts (must be integrated thoughtfully):
+        {concepts_block}
+
+        Raw user profile (authoritative preferences and avoid constraints):
+        {raw_profile.strip()}
+
+        Selected idea card (JSON):
+        {idea_json}
+
+        Output ONLY the final image prompt. No title, no explanation, no quotes, no markdown.
+        """.strip()
+    )
 
 
