@@ -32,11 +32,12 @@ def parse_transcript(path: str) -> Tuple[RunMetadata, List[TranscriptStep]]:
 
     steps_data = payload.get("steps") or []
     steps: List[TranscriptStep] = []
-    for step in steps_data:
+    for transcript_index, step in enumerate(steps_data):
         steps.append(
             TranscriptStep(
                 name=step.get("name") or step.get("step_name") or step.get("path", "unknown"),
                 path=step.get("path") or step.get("name") or "unknown",
+                transcript_index=transcript_index,
                 prompt=step.get("prompt"),
                 response=step.get("response"),
                 prompt_chars=step.get("prompt_chars"),

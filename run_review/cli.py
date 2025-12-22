@@ -5,6 +5,7 @@ import json
 import os
 from typing import Optional
 
+from .evolution import thresholds_from_overrides
 from .render_html import render_compare_html, render_html
 from .report_builder import RunLoadError, build_report, report_to_dict, diff_reports
 from .report_model import RunInputs, RunReport
@@ -89,9 +90,19 @@ def main(argv=None):
     parser.add_argument("--oplog", dest="oplog")
     parser.add_argument("--transcript", dest="transcript")
     parser.add_argument("--best-effort", action="store_true", dest="best_effort")
+    parser.add_argument("--no-evolution", action="store_true", dest="no_evolution")
+    parser.add_argument("--evolution-thresholds", dest="evolution_thresholds", help="JSON overrides for evolution thresholds")
     parser.add_argument("--compare", nargs=2, dest="compare")
     parser.add_argument("--output-dir", dest="output_dir", default=".")
     args = parser.parse_args(argv)
+
+    evolution_thresholds = None
+    if args.evolution_thresholds:
+        try:
+            overrides = json.loads(args.evolution_thresholds)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"Invalid --evolution-thresholds JSON: {exc}") from exc
+        evolution_thresholds = thresholds_from_overrides(overrides)
 
     if args.compare:
         base_id, other_id = args.compare
@@ -99,8 +110,18 @@ def main(argv=None):
         base_inputs = resolve_inputs(args)
         args.generation_id = other_id
         other_inputs = resolve_inputs(args)
-        base_report = build_report(base_inputs, best_effort=args.best_effort)
-        other_report = build_report(other_inputs, best_effort=args.best_effort)
+        base_report = build_report(
+            base_inputs,
+            best_effort=args.best_effort,
+            enable_evolution=not args.no_evolution,
+            evolution_thresholds=evolution_thresholds,
+        )
+        other_report = build_report(
+            other_inputs,
+            best_effort=args.best_effort,
+            enable_evolution=not args.no_evolution,
+            evolution_thresholds=evolution_thresholds,
+        )
         _print_oplog_summary(base_report)
         _print_oplog_summary(other_report)
         diff = diff_reports(base_report, other_report)
@@ -123,7 +144,12 @@ def main(argv=None):
         return 0
 
     inputs = resolve_inputs(args)
-    report = build_report(inputs, best_effort=args.best_effort)
+    report = build_report(
+        inputs,
+        best_effort=args.best_effort,
+        enable_evolution=not args.no_evolution,
+        evolution_thresholds=evolution_thresholds,
+    )
     _print_oplog_summary(report)
     json_path = os.path.join(args.output_dir, f"{inputs.generation_id}_run_report.json")
     html_path = os.path.join(args.output_dir, f"{inputs.generation_id}_run_report.html")

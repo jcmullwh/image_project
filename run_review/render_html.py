@@ -113,6 +113,13 @@ def _step_anchor_id(step: StepReport) -> str:
     return f"step-{step.step_index:04d}-{_safe_id(step.path)}"
 
 
+def _path_to_anchor_map(report: RunReport) -> Dict[str, str]:
+    mapping: Dict[str, str] = {}
+    for step in report.steps:
+        mapping[step.path] = _step_anchor_id(step)
+    return mapping
+
+
 def _truncate_preview(text: str, *, limit: int = 180) -> str:
     stripped = text.replace("\r\n", "\n").strip()
     if len(stripped) <= limit:
@@ -233,7 +240,7 @@ def _guess_final_prompt_step(steps: List[StepReport]) -> StepReport | None:
             base += 2
         if re.search(r"/final_consensus$", path):
             base += 4
-        elif re.search(r"/consensus(_\\d+)?$", path):
+        elif re.search(r"/consensus(_\d+)?$", path):
             base += 3
         elif "consensus" in path:
             base += 1
@@ -241,6 +248,448 @@ def _guess_final_prompt_step(steps: List[StepReport]) -> StepReport | None:
         return (base, ts, step.path)
 
     return max(candidates, key=score)
+
+
+def _fmt_ratio(value: Optional[float]) -> str:
+    if value is None:
+        return "n/a"
+    return f"{value:.3f}"
+
+
+def _fmt_pct(value: Optional[float]) -> str:
+    if value is None:
+        return "n/a"
+    return f"{value * 100:.1f}%"
+
+
+def _render_evolution(report: RunReport) -> Tuple[str, Dict[str, Dict[str, Any]]]:
+    evolution = report.evolution
+    if evolution is None:
+        evo_issues = [i for i in report.issues if i.code.startswith("evolution_") or i.code == "evolution_failed"]
+        issues_html = ""
+        if evo_issues:
+            items = "".join(
+                f"<li><span class='sev sev-{html.escape(i.severity)}'>{html.escape(i.severity.upper())}</span> "
+                f"<span class='code'>[{html.escape(i.code)}]</span> "
+                f"{html.escape(i.message)}"
+                + (f" <span class='path'>({html.escape(i.path)})</span>" if i.path else "")
+                + "</li>"
+                for i in evo_issues
+            )
+            issues_html = f"<ul class='issues'>{items}</ul>"
+        return (
+            "<section id='evolution'><h2>Evolution</h2><p class='muted'>Evolution unavailable.</p>"
+            + issues_html
+            + "</section>",
+            {},
+        )
+
+    path_to_anchor = _path_to_anchor_map(report)
+
+    def link(path: Optional[str], step_index: Optional[int] = None, *, label: Optional[str] = None) -> str:
+        if not path:
+            return "<em class='muted'>missing</em>"
+        text = label if label is not None else path
+        if step_index is not None:
+            anchor = f"step-{step_index:04d}-{_safe_id(path)}"
+            return f"<a href='#{html.escape(anchor)}'>{html.escape(text)}</a>"
+        anchor = path_to_anchor.get(path)
+        if anchor:
+            return f"<a href='#{html.escape(anchor)}'>{html.escape(text)}</a>"
+        return f"<code>{html.escape(text)}</code>"
+
+    term_index: Dict[str, Dict[str, Any]] = {}
+    parts: List[str] = []
+    parts.append("<section id='evolution'>")
+    parts.append("<h2>Evolution</h2>")
+    parts.append(f"<p class='muted'>Sections analyzed: {len(evolution.sections)}</p>")
+    parts.append(
+        "<details class='evo-help' open><summary><strong>How to read this</strong></summary>"
+        "<ul class='muted'>"
+        "<li><strong>Model</strong>: base is the section's last <code>/draft</code>; candidates are <code>/consensus</code> (and <code>/consensus_N</code>); merge is the last <code>/final_consensus</code>; critiques are steps under <code>/tot_enclave/</code>.</li>"
+        "<li><strong>Deterministic</strong>: all metrics are offline heuristics (no LLM calls). Thresholds are in <code>evolution.config.thresholds</code> and overridable via <code>--evolution-thresholds</code>.</li>"
+        "<li><strong>Ordering</strong>: steps are ordered primarily by oplog <code>start_ts</code> when present, otherwise transcript order.</li>"
+        "<li><strong>Warnings</strong>: missing nodes or parse failures emit Issues; analysis continues per section (no silent omission).</li>"
+        "</ul></details>"
+    )
+
+    if not evolution.sections:
+        parts.append("<p class='muted'>No pipeline sections found for evolution analysis.</p>")
+        parts.append("</section>")
+        return "".join(parts), term_index
+
+    toc_items = []
+    for section in evolution.sections:
+        sec_id = f"evo-sec-{_safe_id(section.section_key)}"
+        toc_items.append(f"<li><a href='#{html.escape(sec_id)}'>{html.escape(section.section_key)}</a></li>")
+    parts.append("<details class='evo-toc' open><summary><strong>Sections</strong></summary>")
+    parts.append(f"<ul class='evo-toc-list'>{''.join(toc_items)}</ul></details>")
+
+    for section in evolution.sections:
+        sec_dom_id = f"evo-sec-{_safe_id(section.section_key)}"
+        sec_key_id = _safe_id(section.section_key)
+
+        candidate_index_by_path = {
+            p: idx
+            for p, idx in zip(section.candidate_paths, section.candidate_step_indices)
+            if p and idx is not None
+        }
+        critic_index_by_path = {
+            p: idx
+            for p, idx in zip(section.critique_paths, section.critique_step_indices)
+            if p and idx is not None
+        }
+        node_index_by_path: Dict[str, Optional[int]] = {}
+        if section.base_path:
+            node_index_by_path[section.base_path] = section.base_step_index
+        if section.merge_path:
+            node_index_by_path[section.merge_path] = section.merge_step_index
+        for p, idx in zip(section.candidate_paths, section.candidate_step_indices):
+            node_index_by_path[p] = idx
+
+        term_index[sec_key_id] = {}
+        for t in section.term_first_seen:
+            if t.first_seen_step_index is not None:
+                anchor = f"step-{t.first_seen_step_index:04d}-{_safe_id(t.first_seen_path)}"
+            else:
+                anchor = path_to_anchor.get(t.first_seen_path)
+            if not anchor or not t.first_seen_path:
+                continue
+            term_index[sec_key_id][t.term] = {
+                "anchor": anchor,
+                "path": t.first_seen_path,
+                "kind": t.first_seen_kind,
+                "injected": bool(t.injected),
+            }
+
+        issues_block = ""
+        if section.issues:
+            items = "".join(
+                "<li>"
+                f"<span class='sev sev-{html.escape(i.severity.lower())}'>{html.escape(i.severity.upper())}</span> "
+                f"<span class='code'>[{html.escape(i.code)}]</span> {html.escape(i.message)}"
+                + (f" <span class='path'>({html.escape(i.path)})</span>" if i.path else "")
+                + "</li>"
+                for i in section.issues
+            )
+            issues_block = (
+                "<details class='evo-issues' open><summary>Evolution issues</summary>"
+                f"<ul class='issues'>{items}</ul></details>"
+            )
+
+        parts.append(f"<details class='evo-section' open id='{html.escape(sec_dom_id)}'>")
+        parts.append(
+            f"<summary><strong>{html.escape(section.section_key)}</strong> "
+            f"<span class='muted'>ordering={html.escape(section.ordering)}</span></summary>"
+        )
+        parts.append("<div class='evo-body'>")
+        parts.append(issues_block)
+
+        parts.append("<div class='evo-graph'>")
+        parts.append(f"<div><strong>Base</strong>: {link(section.base_path, section.base_step_index)}</div>")
+        parts.append(f"<div><strong>Merge</strong>: {link(section.merge_path, section.merge_step_index)}</div>")
+        if section.candidate_paths:
+            cand_links = ", ".join(
+                link(p, idx) for p, idx in zip(section.candidate_paths, section.candidate_step_indices)
+            )
+            parts.append(f"<div><strong>Candidates</strong>: {cand_links}</div>")
+        else:
+            parts.append("<div><strong>Candidates</strong>: <em class='muted'>none</em></div>")
+        if section.critique_paths:
+            parts.append(f"<div><strong>Critiques</strong>: {len(section.critique_paths)}</div>")
+        parts.append("</div>")
+
+        if section.deltas:
+            rows = []
+            for d in section.deltas:
+                rows.append(
+                    "<tr>"
+                    f"<td>{link(d.from_path, node_index_by_path.get(d.from_path))}</td>"
+                    f"<td>{link(d.to_path, node_index_by_path.get(d.to_path))}</td>"
+                    f"<td>{html.escape(_fmt_ratio(d.seq_ratio))}</td>"
+                    f"<td>{html.escape(_fmt_ratio(d.jaccard))}</td>"
+                    f"<td>{html.escape(f'{d.token_change_ratio*100:.1f}%')}</td>"
+                    f"<td>{d.tokens_added}</td>"
+                    f"<td>{d.tokens_removed}</td>"
+                    "</tr>"
+                )
+            parts.append("<h4>Delta metrics</h4>")
+            parts.append(
+                "<p class='muted'>Seq = difflib.SequenceMatcher ratio on raw text (1.0 identical). "
+                "Jacc = content-token Jaccard similarity. Tok change = (added+removed tokens) / source token count.</p>"
+            )
+            parts.append(
+                "<div class='evo-table-wrap'><table class='evo-table'>"
+                "<tr><th align='left'>From</th><th align='left'>To</th><th>Seq</th><th>Jacc</th><th>Tok change</th><th>+Tok</th><th>-Tok</th></tr>"
+                + "".join(rows)
+                + "</table></div>"
+            )
+        else:
+            parts.append("<p class='muted'>No delta metrics available for this section.</p>")
+
+        if section.candidate_paths and len(section.candidate_paths) >= 2:
+            score_map: Dict[Tuple[str, str], Tuple[float, float]] = {}
+            for p in section.candidate_similarity:
+                score_map[(p.a_path, p.b_path)] = (p.seq_ratio, p.jaccard)
+                score_map[(p.b_path, p.a_path)] = (p.seq_ratio, p.jaccard)
+
+            header_cells = "".join(
+                f"<th title='{html.escape(path)}'>{html.escape(path.split('/')[-1])}</th>"
+                for path in section.candidate_paths
+            )
+            body_rows = []
+            for a in section.candidate_paths:
+                row_cells = []
+                for b in section.candidate_paths:
+                    if a == b:
+                        row_cells.append("<td class='evo-diag'>1.000<br><span class='muted'>1.000</span></td>")
+                        continue
+                    seq, jacc = score_map.get((a, b), (None, None))
+                    if seq is None:
+                        row_cells.append("<td class='muted'>n/a</td>")
+                    else:
+                        row_cells.append(
+                            f"<td>{html.escape(_fmt_ratio(seq))}<br><span class='muted'>{html.escape(_fmt_ratio(jacc))}</span></td>"
+                        )
+                body_rows.append(
+                    f"<tr><th title='{html.escape(a)}'>{html.escape(a.split('/')[-1])}</th>{''.join(row_cells)}</tr>"
+                )
+
+            parts.append("<h4>Candidate similarity</h4>")
+            parts.append(
+                "<p class='muted'>Matrix values are Seq (top) and Jacc (bottom). Near-1.0 pairs indicate redundant refinement branches.</p>"
+            )
+            parts.append(
+                "<div class='evo-table-wrap'><table class='evo-table evo-matrix'>"
+                f"<tr><th></th>{header_cells}</tr>"
+                + "".join(body_rows)
+                + "</table></div>"
+            )
+        elif section.candidate_paths:
+            parts.append("<p class='muted'>Candidate similarity unavailable (need at least 2 candidates).</p>")
+
+        if section.findings:
+            parts.append("<p class='muted'>Findings are heuristic flags derived from the metrics above.</p>")
+            items = "".join(
+                "<li>"
+                f"<span class='sev sev-{html.escape(f.severity.lower())}'>{html.escape(f.severity.upper())}</span> "
+                f"<span class='code'>[{html.escape(f.type)}]</span> {html.escape(f.message)}"
+                "</li>"
+                for f in section.findings
+            )
+            parts.append("<h4>Findings</h4>")
+            parts.append(f"<ul class='evo-findings'>{items}</ul>")
+
+        if section.critiques:
+            parts.append(
+                "<p class='muted'>Critique uptake extracts suggestion snippets from each critic's <code>## Edits</code> section (supports Replace/With). "
+                "A suggestion is counted as adopted if it matches any candidate/merge segment above thresholds.</p>"
+            )
+            rows = []
+            for c in section.critiques:
+                detail_bits = []
+                for s in c.suggestions[:12]:
+                    adopted = ", ".join(
+                        f"{html.escape(m.target_kind)}:{html.escape(m.target_path.split('/')[-1])} ({_fmt_ratio(m.seq_ratio)}/{_fmt_ratio(m.jaccard)})"
+                        for m in s.adopted_in[:3]
+                    )
+                    if adopted:
+                        detail_bits.append(
+                            f"<li><code>{html.escape(s.snippet)}</code> <span class='muted'>-> {adopted}</span></li>"
+                        )
+                    else:
+                        detail_bits.append(
+                            f"<li><code>{html.escape(s.snippet)}</code> <span class='muted'>-> not detected</span></li>"
+                        )
+                details_html = ""
+                if detail_bits:
+                    details_html = (
+                        "<details class='evo-inline'><summary class='muted'>details</summary>"
+                        f"<ul class='evo-suggestions'>{''.join(detail_bits)}</ul></details>"
+                    )
+                rows.append(
+                    "<tr>"
+                    f"<td>{link(c.critic_path, critic_index_by_path.get(c.critic_path))}</td>"
+                    f"<td>{html.escape(c.parse_status)}</td>"
+                    f"<td>{c.suggestions_total}</td>"
+                    f"<td>{c.adopted_in_candidates_count}</td>"
+                    f"<td>{c.adopted_in_merge_count}</td>"
+                    f"<td>{details_html}</td>"
+                    "</tr>"
+                )
+
+            parts.append("<h4>Critique uptake</h4>")
+            parts.append(
+                "<div class='evo-table-wrap'><table class='evo-table'>"
+                "<tr><th align='left'>Critic</th><th>Parse</th><th>Suggestions</th><th>Adopted in candidates</th><th>Adopted in merge</th><th></th></tr>"
+                + "".join(rows)
+                + "</table></div>"
+            )
+
+        if section.critique_provenance_segments_total_by_target:
+            parts.append("<h4>Critique provenance</h4>")
+            parts.append(
+                "<p class='muted'>Critique provenance estimates how much of each consensus output can be attributed to critics' suggested edits. "
+                "Each consensus output is segmented (lines or sentences). Each segment is assigned to the best-matching critic snippet "
+                "(from <code>## Edits</code>) if similarity is at least <code>provenance_origin_min_score</code>. "
+                "For the merge (final consensus), the tool first tries direct matches; if none, it traces through merge provenance when a segment "
+                "originated from a candidate.</p>"
+            )
+
+            targets: list[tuple[str, Optional[int]]] = [
+                (p, idx)
+                for p, idx in zip(
+                    section.critique_provenance_targets, section.critique_provenance_target_step_indices
+                )
+                if p
+            ]
+            header_cells = "".join(
+                "<th title='{full}'>{link}<br><span class='muted'>n={n}</span></th>".format(
+                    full=html.escape(path),
+                    link=link(path, idx, label=path.split("/")[-1]),
+                    n=section.critique_provenance_segments_total_by_target.get(path, 0),
+                )
+                for path, idx in targets
+            )
+
+            uptake_by_path = {c.critic_path: c for c in section.critiques}
+            body_rows: list[str] = []
+            for critic_path in section.critique_paths:
+                uptake = uptake_by_path.get(critic_path)
+                parse_status = uptake.parse_status if uptake else "unknown"
+                excluded = parse_status != "ok"
+
+                if excluded:
+                    cells = "".join("<td class='muted'>n/a</td>" for _ in targets)
+                else:
+                    per_target = section.critique_provenance_by_critic.get(critic_path, {})
+                    cells = "".join(
+                        f"<td>{html.escape(_fmt_pct(per_target.get(path, 0.0)))}</td>" for path, _ in targets
+                    )
+
+                label_bits = link(critic_path, critic_index_by_path.get(critic_path))
+                if excluded and uptake:
+                    label_bits += f" <span class='muted'>({html.escape(parse_status)})</span>"
+                body_rows.append(f"<tr><th align='left'>{label_bits}</th>{cells}</tr>")
+
+            unattributed_cells = "".join(
+                f"<td>{html.escape(_fmt_pct(section.critique_provenance_unattributed_by_target.get(path, 0.0)))}</td>"
+                for path, _ in targets
+            )
+            body_rows.append(
+                f"<tr><th align='left'><span class='muted'>Unattributed</span></th>{unattributed_cells}</tr>"
+            )
+
+            parts.append(
+                "<div class='evo-table-wrap'><table class='evo-table evo-matrix'>"
+                f"<tr><th align='left'>Critic</th>{header_cells}</tr>"
+                + "".join(body_rows)
+                + "</table></div>"
+            )
+        elif section.critique_paths and (section.candidate_paths or section.merge_path):
+            parts.append("<h4>Critique provenance</h4>")
+            parts.append(
+                "<p class='muted'>Critique provenance unavailable (no parsed critic snippets or no consensus targets in this section).</p>"
+            )
+
+        if section.merge_provenance:
+            parts.append(
+                "<p class='muted'>Merge provenance attributes each merge segment to the best-matching origin among base/candidates/critic suggestions. "
+                "<code>merge_new</code> means no origin exceeded the minimum similarity score.</p>"
+            )
+            contrib_rows = []
+            if section.merge_branch_contributions:
+                for path, frac in sorted(section.merge_branch_contributions.items(), key=lambda kv: (-kv[1], kv[0])):
+                    contrib_rows.append(
+                        f"<tr><td>{link(path, candidate_index_by_path.get(path))}</td><td>{html.escape(_fmt_pct(frac))}</td></tr>"
+                    )
+            contrib_table = (
+                "<div class='evo-table-wrap'><table class='evo-table'>"
+                "<tr><th align='left'>Candidate</th><th>Share of merge segments</th></tr>"
+                + "".join(contrib_rows)
+                + "</table></div>"
+                if contrib_rows
+                else ""
+            )
+
+            prov_rows = []
+            for a in section.merge_provenance[:250]:
+                origin = (
+                    link(a.origin_path, node_index_by_path.get(a.origin_path)) if a.origin_path else "<span class='muted'>merge_new</span>"
+                )
+                prov_rows.append(
+                    "<tr>"
+                    f"<td>{a.segment_index}</td>"
+                    f"<td><code>{html.escape(a.segment_preview)}</code></td>"
+                    f"<td>{html.escape(a.origin_kind)}</td>"
+                    f"<td>{origin}</td>"
+                    f"<td>{html.escape(_fmt_ratio(a.score))}</td>"
+                    "</tr>"
+                )
+
+            parts.append("<h4>Merge provenance</h4>")
+            parts.append(contrib_table)
+            parts.append(
+                "<details class='evo-provenance'><summary class='muted'>merge segment attribution (first 250)</summary>"
+                "<div class='evo-table-wrap'><table class='evo-table'>"
+                "<tr><th>#</th><th align='left'>Segment</th><th>Origin kind</th><th align='left'>Origin</th><th>Score</th></tr>"
+                + "".join(prov_rows)
+                + "</table></div></details>"
+            )
+
+        if section.term_first_seen:
+            parts.append("<h4>Term tracing</h4>")
+            parts.append(
+                "<p class='muted'>Content terms are tokenized (stopwords removed). "
+                "The index shows where each term first appears among base/candidates/merge. "
+                "<span class='pill'>injected</span> means the term is present in run <code>metadata.context</code>.</p>"
+            )
+            parts.append(
+                "<div class='evo-term-search'>"
+                f"<label>Term <input id='evo-term-input-{html.escape(sec_key_id)}' placeholder='e.g., christmas' /></label> "
+                f"<button type='button' onclick=\"evoFindTerm('{html.escape(sec_key_id)}')\">Find</button> "
+                f"<span class='muted' id='evo-term-out-{html.escape(sec_key_id)}'></span>"
+                "</div>"
+            )
+            term_rows = []
+            for t in section.term_first_seen[:250]:
+                inj = " <span class='pill'>injected</span>" if t.injected else ""
+                term_rows.append(
+                    "<tr>"
+                    f"<td><code>{html.escape(t.term)}</code>{inj}</td>"
+                    f"<td>{html.escape(t.first_seen_kind)}</td>"
+                    f"<td>{link(t.first_seen_path, t.first_seen_step_index)}</td>"
+                    "</tr>"
+                )
+            parts.append(
+                "<details class='evo-terms' open><summary class='muted'>first seen index (first 250)</summary>"
+                "<div class='evo-table-wrap'><table class='evo-table'>"
+                "<tr><th align='left'>Term</th><th>Kind</th><th align='left'>First seen</th></tr>"
+                + "".join(term_rows)
+                + "</table></div></details>"
+            )
+
+        if section.node_introduced_terms:
+            intro_rows = []
+            for path, terms in section.node_introduced_terms.items():
+                if not terms:
+                    continue
+                intro_rows.append(
+                    f"<tr><td>{link(path, node_index_by_path.get(path))}</td><td class='muted'>{html.escape(', '.join(terms))}</td></tr>"
+                )
+            if intro_rows:
+                parts.append(
+                    "<details class='evo-terms'><summary class='muted'>introduced terms</summary>"
+                    "<div class='evo-table-wrap'><table class='evo-table'>"
+                    "<tr><th align='left'>Node</th><th align='left'>Terms</th></tr>"
+                    + "".join(intro_rows)
+                    + "</table></div></details>"
+                )
+
+        parts.append("</div></details>")
+
+    parts.append("</section>")
+    return "".join(parts), term_index
 
 
 def render_html(report: RunReport) -> str:
@@ -349,6 +798,36 @@ def render_html(report: RunReport) -> str:
         tree_html_bits.append("</div></details>")
     tree_html = "".join(tree_html_bits) or "<p class='muted'>No steps</p>"
 
+    evolution_html, evolution_term_index = _render_evolution(report)
+    evolution_term_json = json.dumps(evolution_term_index, ensure_ascii=False, sort_keys=True).replace(
+        "</", "<\\/"
+    )
+    evo_script = (
+        "<script>\n"
+        f"window.__EVOLUTION_TERM_INDEX__ = {evolution_term_json};\n"
+        "function evoFindTerm(sectionId) {\n"
+        "  try {\n"
+        "    var input = document.getElementById('evo-term-input-' + sectionId);\n"
+        "    var out = document.getElementById('evo-term-out-' + sectionId);\n"
+        "    if (!input || !out) return;\n"
+        "    var term = (input.value || '').toLowerCase().trim();\n"
+        "    if (!term) { out.textContent = 'Enter a term.'; return; }\n"
+        "    var sec = (window.__EVOLUTION_TERM_INDEX__ || {})[sectionId] || {};\n"
+        "    var hit = sec[term];\n"
+        "    if (!hit) { out.textContent = 'Not found in index.'; return; }\n"
+        "    var injected = hit.injected ? ' injected' : '';\n"
+        "    while (out.firstChild) { out.removeChild(out.firstChild); }\n"
+        "    out.appendChild(document.createTextNode('First seen: '));\n"
+        "    var a = document.createElement('a');\n"
+        "    a.setAttribute('href', '#' + hit.anchor);\n"
+        "    a.textContent = hit.path;\n"
+        "    out.appendChild(a);\n"
+        "    out.appendChild(document.createTextNode(' (' + hit.kind + injected + ')'));\n"
+        "  } catch (e) { }\n"
+        "}\n"
+        "</script>\n"
+    )
+
     html_doc = f"""
     <!doctype html>
     <html>
@@ -405,6 +884,23 @@ def render_html(report: RunReport) -> str:
         .banner {{ border: 1px solid var(--border); border-radius: 10px; padding: 0.8rem 1rem; margin-bottom: 1rem; }}
         .banner-warn {{ border-color: rgba(245,158,11,.35); background: rgba(245,158,11,.08); }}
         .banner-error {{ border-color: rgba(239,68,68,.35); background: rgba(239,68,68,.08); }}
+        .evo-toc-list {{ padding-left: 1.25rem; }}
+        .evo-section {{ border: 1px solid var(--border); border-radius: 10px; padding: 0.35rem 0.6rem; margin: 0.6rem 0; background: #fff; }}
+        .evo-body {{ padding: 0.6rem 0.2rem 0.2rem 0.2rem; }}
+        .evo-graph div {{ margin: 0.15rem 0; }}
+        .evo-table-wrap {{ overflow: auto; border: 1px solid var(--border); border-radius: 10px; background: #fff; max-width: 920px; }}
+        .evo-table {{ border-collapse: collapse; width: 100%; }}
+        .evo-table th, .evo-table td {{ padding: 0.35rem 0.5rem; border-bottom: 1px solid var(--border); vertical-align: top; }}
+        .evo-table th {{ text-align: left; color: var(--muted); }}
+        .evo-table td {{ font-size: 0.92rem; }}
+        .evo-matrix td {{ text-align: center; }}
+        .evo-diag {{ color: var(--muted); }}
+        .evo-findings {{ padding-left: 1.25rem; }}
+        .evo-term-search {{ margin: 0.4rem 0 0.75rem 0; display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center; }}
+        .evo-term-search input {{ padding: 0.2rem 0.35rem; border: 1px solid var(--border); border-radius: 6px; }}
+        .evo-term-search button {{ padding: 0.25rem 0.5rem; border: 1px solid var(--border); border-radius: 6px; background: var(--panel); cursor: pointer; }}
+        .evo-inline summary {{ display: inline; }}
+        .evo-suggestions {{ padding-left: 1.25rem; }}
       </style>
       <title>run_review - {html.escape(report.metadata.generation_id)}</title>
     </head>
@@ -421,6 +917,7 @@ def render_html(report: RunReport) -> str:
             <li><a href="#summary">Summary</a></li>
             <li><a href="#issues">Issues</a></li>
             <li><a href="#timeline">Timeline</a></li>
+            <li><a href="#evolution">Evolution</a></li>
             <li><a href="#steps">Steps</a></li>
             <li><a href="#side-effects">Side effects</a></li>
           </ul>
@@ -457,6 +954,8 @@ def render_html(report: RunReport) -> str:
             </table>
           </section>
 
+          {evolution_html}
+
           <section id="steps">
             <h2>Steps</h2>
             {''.join(f"<h3>{html.escape(group)}</h3>{''.join(_step_card(s) for s in steps)}" for group, steps in grouped.items())}
@@ -470,6 +969,7 @@ def render_html(report: RunReport) -> str:
           {unknown_html}
         </main>
       </div>
+      {evo_script}
     </body>
     </html>
     """

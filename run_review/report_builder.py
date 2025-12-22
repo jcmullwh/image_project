@@ -8,8 +8,10 @@ from typing import Any, Dict, List, Optional, Tuple
 from . import TOOL_VERSION
 from .parse_oplog import parse_oplog
 from .parse_transcript import TranscriptParseError, parse_transcript
+from .evolution import analyze_evolution
 from .report_model import (
     CompareResult,
+    EvolutionThresholds,
     Issue,
     OplogEvent,
     RunInputs,
@@ -113,6 +115,7 @@ def _merge_step_data(
             path=path,
             name=t_step.name,
             step_index=idx,
+            transcript_index=t_step.transcript_index,
             prompt=t_step.prompt,
             response=t_step.response,
             prompt_chars=t_step.prompt_chars,
@@ -250,7 +253,13 @@ def _compute_oplog_header_stats(oplog_path: str) -> Dict[str, Any]:
     }
 
 
-def build_report(inputs: RunInputs, *, best_effort: bool = False) -> RunReport:
+def build_report(
+    inputs: RunInputs,
+    *,
+    best_effort: bool = False,
+    enable_evolution: bool = True,
+    evolution_thresholds: EvolutionThresholds | None = None,
+) -> RunReport:
     issues: List[Issue] = []
     metadata: Optional[RunMetadata] = None
     transcript_steps: List[TranscriptStep] = []
@@ -371,6 +380,25 @@ def build_report(inputs: RunInputs, *, best_effort: bool = False) -> RunReport:
             )
         )
 
+    evolution_report = None
+    if enable_evolution:
+        try:
+            evolution_report, evolution_issues = analyze_evolution(
+                metadata_context=metadata.context,
+                steps=steps,
+                thresholds=evolution_thresholds,
+            )
+            issues.extend(evolution_issues)
+        except Exception as exc:  # pragma: no cover - safety net
+            issues.append(
+                Issue(
+                    "warn",
+                    "evolution_failed",
+                    f"Evolution analysis failed: {exc}",
+                    path="run_review/evolution",
+                )
+            )
+
     run_report = RunReport(
         metadata=metadata,
         steps=steps,
@@ -378,6 +406,7 @@ def build_report(inputs: RunInputs, *, best_effort: bool = False) -> RunReport:
         issues=issues,
         parser_version=PARSER_VERSION,
         tool_version=TOOL_VERSION,
+        evolution=evolution_report,
         run_start_ts=run_start_ts,
         run_end_ts=run_end_ts,
         runtime_ms=runtime_ms,
@@ -399,6 +428,7 @@ def report_to_dict(report: RunReport) -> Dict:
     def serialize_step(step: StepReport) -> Dict:
         return {
             "step_index": step.step_index,
+            "transcript_index": step.transcript_index,
             "path": step.path,
             "name": step.name,
             "prompt": step.prompt,
@@ -419,6 +449,85 @@ def report_to_dict(report: RunReport) -> Dict:
             "issues": [serialize_issue(i) for i in step.issues],
         }
 
+    def serialize_evolution(report: RunReport) -> Dict | None:
+        evolution = report.evolution
+        if evolution is None:
+            return None
+
+        def serialize_delta(delta) -> Dict:
+            return dataclasses.asdict(delta)
+
+        def serialize_pair(pair) -> Dict:
+            return dataclasses.asdict(pair)
+
+        def serialize_finding(finding) -> Dict:
+            return dataclasses.asdict(finding)
+
+        def serialize_suggestion_match(match) -> Dict:
+            return dataclasses.asdict(match)
+
+        def serialize_suggestion(suggestion) -> Dict:
+            return {
+                "snippet": suggestion.snippet,
+                "source_bullet": suggestion.source_bullet,
+                "extracted_via": suggestion.extracted_via,
+                "adopted_in": [serialize_suggestion_match(m) for m in suggestion.adopted_in],
+            }
+
+        def serialize_critique_uptake(uptake) -> Dict:
+            return {
+                "critic_path": uptake.critic_path,
+                "suggestions_total": uptake.suggestions_total,
+                "adopted_in_candidates_count": uptake.adopted_in_candidates_count,
+                "adopted_in_merge_count": uptake.adopted_in_merge_count,
+                "parse_status": uptake.parse_status,
+                "warnings": uptake.warnings,
+                "suggestions": [serialize_suggestion(s) for s in uptake.suggestions],
+            }
+
+        def serialize_segment_attr(attr) -> Dict:
+            return dataclasses.asdict(attr)
+
+        def serialize_term_first_seen(item) -> Dict:
+            return dataclasses.asdict(item)
+
+        def serialize_section(section) -> Dict:
+            return {
+                "section_key": section.section_key,
+                "ordering": section.ordering,
+                "base_path": section.base_path,
+                "base_step_index": section.base_step_index,
+                "merge_path": section.merge_path,
+                "merge_step_index": section.merge_step_index,
+                "candidate_paths": list(section.candidate_paths),
+                "candidate_step_indices": list(section.candidate_step_indices),
+                "critique_paths": list(section.critique_paths),
+                "critique_step_indices": list(section.critique_step_indices),
+                "node_paths_in_order": list(section.node_paths_in_order),
+                "node_step_indices_in_order": list(section.node_step_indices_in_order),
+                "deltas": [serialize_delta(d) for d in section.deltas],
+                "candidate_similarity": [serialize_pair(p) for p in section.candidate_similarity],
+                "findings": [serialize_finding(f) for f in section.findings],
+                "critiques": [serialize_critique_uptake(c) for c in section.critiques],
+                "merge_provenance": [serialize_segment_attr(a) for a in section.merge_provenance],
+                "merge_branch_contributions": dict(section.merge_branch_contributions),
+                "critique_provenance_targets": list(section.critique_provenance_targets),
+                "critique_provenance_target_step_indices": list(section.critique_provenance_target_step_indices),
+                "critique_provenance_by_critic": {
+                    critic: dict(values) for critic, values in section.critique_provenance_by_critic.items()
+                },
+                "critique_provenance_unattributed_by_target": dict(section.critique_provenance_unattributed_by_target),
+                "critique_provenance_segments_total_by_target": dict(section.critique_provenance_segments_total_by_target),
+                "term_first_seen": [serialize_term_first_seen(t) for t in section.term_first_seen],
+                "node_introduced_terms": dict(section.node_introduced_terms),
+                "issues": [serialize_issue(i) for i in section.issues],
+            }
+
+        return {
+            "config": {"thresholds": dataclasses.asdict(evolution.config.thresholds)},
+            "sections": [serialize_section(s) for s in evolution.sections],
+        }
+
     def serialize_side_effect(effect: SideEffect) -> Dict:
         return {
             "type": effect.type,
@@ -434,6 +543,7 @@ def report_to_dict(report: RunReport) -> Dict:
         "issues": [serialize_issue(i) for i in report.issues],
         "parser_version": report.parser_version,
         "tool_version": report.tool_version,
+        "evolution": serialize_evolution(report),
         "run_timing": {
             "start_ts": report.run_start_ts.isoformat() if report.run_start_ts else None,
             "end_ts": report.run_end_ts.isoformat() if report.run_end_ts else None,
