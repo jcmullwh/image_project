@@ -5,7 +5,7 @@
 groups = ["default", "dev"]
 strategy = ["inherit_metadata"]
 lock_version = "4.5.0"
-content_hash = "sha256:c4bedbf16e50c1315b411343c0bbf951098c7881d089bf054eae694a536603b7"
+content_hash = "sha256:5a0544a96ed29256f04352487f9193de1dc6afb6288203e69d2a332aa6f8f35d"
 
 [[metadata.targets]]
 requires_python = "==3.13.*"
@@ -14,8 +14,9 @@ requires_python = "==3.13.*"
 name = "ai-backend"
 version = "0.0.0"
 requires_python = ">=3.13"
-editable = true
-path = "../ai_backend"
+git = "https://github.com/jcmullwh/ai_backend.git"
+ref = "main"
+revision = "4515c012f5dcfa59dc387d9ee87f05830372e413"
 summary = "A simple interface to easily swap between AI providers and models"
 groups = ["default"]
 dependencies = [
