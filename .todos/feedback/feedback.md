@@ -9,15 +9,13 @@
 "20251220_200934_fdf3c776-76a9-4a5d-8fc7-c239da8b5839_oplog.log"
 "20251220_200934_fdf3c776-76a9-4a5d-8fc7-c239da8b5839_transcript.json"
 
-3) #011 harbor of quiet defiance - too simple. Two different colors.
+3) #011 harbor of quiet defiance - too simple. Two different colors. I don't like the style it uses a lot where it's one thing on the left, a different thing on the right and the couple in middle.
 "20251220_130620_ea7b81d0-88ac-4675-bc70-93104d763ee0_oplog.log"
 "20251220_130620_ea7b81d0-88ac-4675-bc70-93104d763ee0_transcript.json"
 
 4) #019 Prism-Warmed Winter Vigil - kinda cute but kinda weird
 "20251221_003443_8848ed1c-0d0f-40ff-9317-3d938a1ebe35_oplog.log"
 "20251221_003443_8848ed1c-0d0f-40ff-9317-3d938a1ebe35_transcript.json"
-
-It doesn't make sense. Also it just looks like a real photograph it's not whimsical or fantastical
 
 5) #014 aqueduct - I like this one. It looks like it's something we'd go out and do.
 "20251220_135640_50cd6e01-e5cb-4ddf-939b-146eeb6b6e3d_oplog.log"
@@ -50,3 +48,31 @@ It doesn't make sense. Also it just looks like a real photograph it's not whimsi
 12) #003 fading neon cartography - a bit dull with not a lot of visual interest to look at. I don't really like things that are mostly cityscapes. 
 "20251218_191244_0d25e03f-ca90-4093-9373-dc85a4c0c4ee_oplog.log"
 "20251218_191244_0d25e03f-ca90-4093-9373-dc85a4c0c4ee_transcript.json"
+
+13) #024 Harbor Mirror Hearth - Why is there a broken cup and cell phone? Why is there random coins and stuff on a lake it makes no sense.
+"20251221_160614_e1cec6ef-e46c-4195-ac5d-169d52f0aab0_oplog.log"
+"20251221_160614_e1cec6ef-e46c-4195-ac5d-169d52f0aab0_transcript.json"
+
+14) #022 Quantum Winter Terrace - This is nice.
+"20251221_143241_aecd6915-5683-4428-a4fe-ac55c67007f0_oplog.log"
+"20251221_143241_aecd6915-5683-4428-a4fe-ac55c67007f0_transcript.json"
+
+15) #021 Winter Harbor Threshold - This one is okay
+"20251221_135713_9c64c1bb-7087-46c2-843d-28645bb3461a_oplog.log"
+"20251221_135713_9c64c1bb-7087-46c2-843d-28645bb3461a_transcript.json"
+
+16) #025 Solstice Harbor Game - There's too much going on. The people in the front kind of distract actually. I like the background. Okay I get that it thinks I only like pink and blue but I like other colors too
+"20251221_165323_cf30ee15-c6f9-45cb-bd11-0f19d9645648_oplog.log"
+"20251221_165323_cf30ee15-c6f9-45cb-bd11-0f19d9645648_transcript.json"
+
+17) #023 Pier Of Unlived Journeys - I don't like this one because the two people are just awkwardly in the Middle with no legs and also the composition has issues with the left and right side again and overall I'd rather have nobody in the picture at all and just to appreciate the landscape than have two people who don't look like us randomly in the middle or in the back.
+"20251221_145809_8e67958e-62c5-4af6-83ec-8c19f4d8e757_oplog.log"
+"20251221_145809_8e67958e-62c5-4af6-83ec-8c19f4d8e757_transcript.json"
+
+18) #026 Neon Winter Rooftop - I like this generally, but I don't like the two people in the front. Maybe it'd be interesting if they were aliens.
+"20251221_172950_0d4f893b-a37c-43ad-8afd-f7c3389a937f_oplog.log"
+"20251221_172950_0d4f893b-a37c-43ad-8afd-f7c3389a937f_transcript.json"
+
+
+
+
