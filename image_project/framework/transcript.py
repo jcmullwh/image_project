@@ -11,6 +11,8 @@ def write_transcript(path: str, ctx: RunContext) -> None:
     payload: dict[str, Any] = {
         "generation_id": ctx.generation_id,
         "seed": ctx.seed,
+        "categories_file": os.path.basename(ctx.cfg.categories_path),
+        "profile_file": os.path.basename(ctx.cfg.profile_path),
         "selected_concepts": list(ctx.selected_concepts),
         "steps": list(ctx.steps),
         "image_path": ctx.image_path,
