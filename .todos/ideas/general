@@ -23,3 +23,7 @@ Improve like/dislike
 Add a like/dislike gradient (love to hate)
 
 add an Anki-style cooldown based on how confident we are.
+
+
+
+Should add a blackbox scoring system. Everything is presented as discreet ideas with multiple options. Each one is black-box scored by llm judge. No feedback given. It provides a gradient for improvement while not introducing specific details that steer the generation too specifically (ie user says they like blue and purple so then everything becomes blue and purple.)
