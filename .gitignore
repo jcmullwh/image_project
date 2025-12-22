@@ -155,3 +155,5 @@ prompt_files/
 config.yaml
 *.csv
 .pdm-python
+*.html
+*.json
