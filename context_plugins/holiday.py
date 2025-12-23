@@ -193,6 +193,7 @@ class HolidayInjector:
         }
 
         if not applied:
+            metadata["theme_strength"] = "none"
             return InjectionResult(guidance_lines=[], metadata=metadata)
 
         dislikes_horror = _parse_dislikes_contains(ctx.preferences_guidance, "horror")

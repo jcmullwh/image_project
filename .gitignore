@@ -157,3 +157,4 @@ config.yaml
 .pdm-python
 *.html
 *.json
+.pdm-python
