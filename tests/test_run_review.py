@@ -261,6 +261,121 @@ def test_cli_writes_reports(tmp_path: Path):
     assert (tmp_path / "run123_run_report.html").exists()
 
 
+def test_cli_defaults_to_config_and_most_recent(tmp_path: Path):
+    config_path = tmp_path / "pipeline_config.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "image:",
+                f"  log_path: '{tmp_path}'",
+                f"  generation_path: '{tmp_path}'",
+                f"  upscale_path: '{tmp_path}'",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    old_id = "run_old"
+    old_oplog = tmp_path / f"{old_id}_oplog.log"
+    _write_file(
+        old_oplog,
+        "\n".join(
+            [
+                f"2025-12-21 12:00:00,000 | INFO | Run started for generation {old_id}",
+                f"2025-12-21 12:00:01,000 | INFO | Run completed successfully for generation {old_id}",
+            ]
+        )
+        + "\n",
+    )
+    (tmp_path / f"{old_id}_transcript.json").write_text(
+        json.dumps({"generation_id": old_id, "steps": []}),
+        encoding="utf-8",
+    )
+
+    new_id = "run_new"
+    new_oplog = tmp_path / f"{new_id}_oplog.log"
+    _write_file(
+        new_oplog,
+        "\n".join(
+            [
+                f"2025-12-21 12:00:00,000 | INFO | Run started for generation {new_id}",
+                f"2025-12-21 12:00:01,000 | INFO | Run completed successfully for generation {new_id}",
+            ]
+        )
+        + "\n",
+    )
+    (tmp_path / f"{new_id}_transcript.json").write_text(
+        json.dumps({"generation_id": new_id, "steps": []}),
+        encoding="utf-8",
+    )
+
+    os.utime(old_oplog, (1_700_000_000, 1_700_000_000))
+    os.utime(tmp_path / f"{old_id}_transcript.json", (1_700_000_000, 1_700_000_000))
+    os.utime(new_oplog, (1_700_000_100, 1_700_000_100))
+    os.utime(tmp_path / f"{new_id}_transcript.json", (1_700_000_100, 1_700_000_100))
+
+    exit_code = cli_main(["--config", str(config_path), "--output-dir", str(tmp_path)])
+    assert exit_code == 0
+    assert (tmp_path / f"{new_id}_run_report.json").exists()
+    assert (tmp_path / f"{new_id}_run_report.html").exists()
+
+
+def test_most_recent_skips_incomplete_runs_without_best_effort(tmp_path: Path):
+    config_path = tmp_path / "pipeline_config.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "image:",
+                f"  log_path: '{tmp_path}'",
+                f"  generation_path: '{tmp_path}'",
+                f"  upscale_path: '{tmp_path}'",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    complete_id = "run_complete"
+    complete_oplog = tmp_path / f"{complete_id}_oplog.log"
+    _write_file(
+        complete_oplog,
+        "\n".join(
+            [
+                f"2025-12-21 12:00:00,000 | INFO | Run started for generation {complete_id}",
+                f"2025-12-21 12:00:01,000 | INFO | Run completed successfully for generation {complete_id}",
+            ]
+        )
+        + "\n",
+    )
+    (tmp_path / f"{complete_id}_transcript.json").write_text(
+        json.dumps({"generation_id": complete_id, "steps": []}),
+        encoding="utf-8",
+    )
+
+    incomplete_id = "run_incomplete"
+    (tmp_path / f"{incomplete_id}_transcript.json").write_text(
+        json.dumps({"generation_id": incomplete_id, "steps": []}),
+        encoding="utf-8",
+    )
+
+    os.utime(complete_oplog, (1_700_000_000, 1_700_000_000))
+    os.utime(tmp_path / f"{complete_id}_transcript.json", (1_700_000_000, 1_700_000_000))
+    os.utime(tmp_path / f"{incomplete_id}_transcript.json", (1_700_000_100, 1_700_000_100))
+
+    exit_code = cli_main(
+        [
+            "--config",
+            str(config_path),
+            "--most-recent",
+            "--output-dir",
+            str(tmp_path),
+        ]
+    )
+    assert exit_code == 0
+    assert (tmp_path / f"{complete_id}_run_report.json").exists()
+
+
 def test_transcript_order_is_preserved_when_oplog_has_no_steps(tmp_path: Path):
     transcript = tmp_path / "run200_transcript.json"
     transcript.write_text(

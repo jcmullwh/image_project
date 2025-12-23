@@ -5,17 +5,22 @@
 ## Usage
 
 ```bash
-python -m run_review.cli --generation-id <id> --logs-dir <artifact_dir>
+python -m run_review.cli --generation-id <id> [--logs-dir <artifact_dir>]
+python -m run_review.cli --most-recent
+python -m run_review.cli  # defaults to --most-recent (prints what it's doing)
 python -m run_review.cli --oplog /path/to/oplog.log --transcript /path/to/transcript.json [--generation-id <id>]
 python -m run_review.cli --best-effort --generation-id <id> --logs-dir <artifact_dir>
 python -m run_review.cli --compare <runA> <runB> --logs-dir <artifact_dir>
 ```
+
+When `--logs-dir` (and `--images-dir`) are omitted, the tool loads the pipeline config (`config/config.yaml` by default) and uses `image.log_path` (and `image.generation_path` / `image.upscale_path`) as defaults, printing the config path it used.
 
 The tool writes `<generation_id>_run_report.json` and `<generation_id>_run_report.html` (or `<runA>_vs_<runB>_run_compare.*` in compare mode) to the current directory by default. Use `--output-dir` to change the destination.
 
 ## Behavior
 
 - **Discovery:** When only a generation ID is supplied, the tool looks for `<id>_oplog.log` and `<id>_transcript.json` inside `--logs-dir`.
+- **Most recent:** `--most-recent` picks the most recently modified run in `--logs-dir`. If no run selector is provided, the CLI defaults to `--most-recent` and prints a message describing the behavior.
 - **Best effort:** By default the tool requires both oplog + transcript; when `--best-effort` is set, missing artifacts produce warnings instead of hard failures.
 - **Oplog formats:** Both `YYYY-mm-dd HH:MM:SS,mmm LEVEL message` and `YYYY-mm-dd HH:MM:SS,mmm | LEVEL | message` headers are supported.
 - **Parsing:** The oplog parser extracts run boundaries, config defaults, seed selection, context injection, step start/end markers, image generation, upscaling, manifest appends, uploads, and file writes. Unrecognized lines are retained under `unknown_events`.
