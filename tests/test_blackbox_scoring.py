@@ -9,8 +9,9 @@ import pandas as pd
 import pytest
 from PIL import Image
 
-import blackbox_scoring
-import main
+from image_project.app import generate as app_generate
+from image_project.framework import scoring as blackbox_scoring
+from image_project.impl.current import prompting as prompts
 
 
 def test_parse_idea_cards_json_valid():
@@ -269,29 +270,56 @@ def test_integration_scoring_enabled_isolated_from_downstream(tmp_path, monkeypa
     generation_id = "unit_test_scoring"
 
     fake_text = FakeTextAI()
-    monkeypatch.setattr(main, "TextAI", lambda *args, **kwargs: fake_text)
-    monkeypatch.setattr(main, "ImageAI", FakeImageAI)
-    monkeypatch.setattr(main, "profile_abstraction_prompt", fake_profile_abstraction_prompt)
-    monkeypatch.setattr(main, "idea_cards_generate_prompt", fake_idea_cards_generate_prompt)
-    monkeypatch.setattr(main, "idea_cards_judge_prompt", fake_idea_cards_judge_prompt)
-    monkeypatch.setattr(main, "final_prompt_from_selected_idea_prompt", fake_final_prompt_from_selected_idea_prompt)
+    monkeypatch.setattr(app_generate, "TextAI", lambda *args, **kwargs: fake_text)
+    monkeypatch.setattr(app_generate, "ImageAI", FakeImageAI)
+    monkeypatch.setattr(prompts, "profile_abstraction_prompt", fake_profile_abstraction_prompt)
+    monkeypatch.setattr(prompts, "idea_cards_generate_prompt", fake_idea_cards_generate_prompt)
+    monkeypatch.setattr(prompts, "idea_cards_judge_prompt", fake_idea_cards_judge_prompt)
     monkeypatch.setattr(
-        main,
+        prompts,
+        "final_prompt_from_selected_idea_prompt",
+        fake_final_prompt_from_selected_idea_prompt,
+    )
+    monkeypatch.setattr(
+        app_generate,
         "generate_title",
         lambda **_kwargs: types.SimpleNamespace(
             title="Test Title", title_source="test", title_raw="Test Title"
         ),
     )
 
-    main.run_generation(cfg_dict, generation_id=generation_id)
+    app_generate.run_generation(cfg_dict, generation_id=generation_id)
 
     transcript_path = log_dir / f"{generation_id}_transcript.json"
     assert transcript_path.exists()
 
     transcript = json.loads(transcript_path.read_text(encoding="utf-8"))
+    assert transcript["outputs"]["prompt_pipeline"]["requested_plan"] == "auto"
+    assert transcript["outputs"]["prompt_pipeline"]["plan"] == "blackbox"
+    assert transcript["outputs"]["prompt_pipeline"]["refinement_policy"] == "tot"
+    assert transcript["outputs"]["prompt_pipeline"]["capture_stage"] == "blackbox.image_prompt_creation"
+    assert transcript["outputs"]["prompt_pipeline"]["blackbox_profile_sources"] == {
+        "judge_profile_source": "raw",
+        "final_profile_source": "raw",
+    }
+    assert transcript["outputs"]["prompt_pipeline"]["resolved_stages"] == [
+        "preprompt.select_concepts",
+        "preprompt.filter_concepts",
+        "blackbox.prepare",
+        "blackbox.profile_abstraction",
+        "blackbox.idea_cards_generate",
+        "blackbox.idea_cards_judge_score",
+        "blackbox.select_idea_card",
+        "blackbox.image_prompt_creation",
+    ]
     assert transcript["blackbox_scoring"]["selected_id"] == expected_ids[1]
-    assert any(step["path"].endswith("idea_cards_generate") for step in transcript["steps"])
-    assert any(step["path"].endswith("idea_cards_judge_score") for step in transcript["steps"])
+    assert any(
+        step["path"] == "pipeline/blackbox.idea_cards_generate/draft" for step in transcript["steps"]
+    )
+    assert any(
+        step["path"] == "pipeline/blackbox.idea_cards_judge_score/draft"
+        for step in transcript["steps"]
+    )
 
     idea_call = next(
         call["messages"]
@@ -312,7 +340,11 @@ def test_integration_scoring_enabled_isolated_from_downstream(tmp_path, monkeypa
     )
     assert judge_call["kwargs"].get("model") == "judge-model"
 
-    judge_step = next(step for step in transcript["steps"] if step["path"].endswith("idea_cards_judge_score"))
+    judge_step = next(
+        step
+        for step in transcript["steps"]
+        if step["path"] == "pipeline/blackbox.idea_cards_judge_score/draft"
+    )
     assert judge_step["params"]["model"] == "judge-model"
     assert judge_step["params"]["base_model"] == "base-model"
 

@@ -1,0 +1,54 @@
+run:
+  mode: full # full|prompt_only
+
+# Prompt-only mode needs only a logs directory; image output paths are optional.
+image:
+  log_path: "M:/My Drive/image_project/logs"
+  generation_path: "M:/My Drive/image_project/generated"  # required for run.mode=full
+  upscale_path: "M:/My Drive/image_project/upscaled"      # required when upscale.enabled=true
+
+prompt:
+  categories_path: "M:/My Drive/image_project/data/category_list_v1.csv"
+  profile_path: "M:/My Drive/image_project/data/user_profile_v4.csv"
+  generations_path: "M:/My Drive/image_project/data/generations_v2.csv"  # required for run.mode=full
+
+  # Prompt Plans + Stage Modifiers (config-driven experimentation)
+  # See docs/experiments.md for examples and available plans (including plan_plugins/*).
+  plan: auto  # auto -> blackbox when scoring.enabled=true; otherwise standard
+  refinement:
+    policy: none  # tot|none
+  stages:
+    include: []
+    exclude: []
+    overrides: {}
+  output:
+    capture_stage: null
+  scoring:
+    enabled: false
+
+# Optional: label runs for lightweight A/B testing and discovery.
+experiment:
+  id: null          # string | null
+  variant: null     # string | null
+  notes: null       # string | null
+  tags: []          # list[string]
+
+rclone:
+  enabled: true
+  # Setup guide: docs/rclone-google-photos.md
+  remote: "gphotos_w_project"
+  album: "The Day's Art"
+
+upscale:
+  enabled: true
+  target_long_edge_px: 3840
+  target_aspect_ratio: "16:9"
+  engine: realesrgan-ncnn-vulkan
+  # Optional. If omitted, PATH + REALESRGAN_NCNN_VULKAN_PATH are checked.
+  realesrgan_binary: C:\Users\jason\projects\code\realesrgan-ncnn-vulkan\realesrgan-ncnn-vulkan.exe
+  # Optional. Directory containing the *.param/*.bin model files.
+  model_path: null
+  model_name: realesrgan-x4plus
+  tile_size: 0
+  tta: false
+  allow_fallback_resize: false

@@ -11,12 +11,14 @@ import pandas as pd
 import pytest
 from PIL import Image
 
-import main
-from message_handling import MessageHandler
-from pipeline import ChatRunner, ChatStep, RunContext
-from records import append_generation_row
-from run_config import RunConfig
-from transcript import write_transcript
+from image_project.app import generate as app_generate
+from image_project.impl.current import prompting as prompts
+from image_project.foundation.messages import MessageHandler
+from image_project.foundation.pipeline import ChatRunner, ChatStep
+from image_project.framework.artifacts import append_generation_row
+from image_project.framework.config import RunConfig
+from image_project.framework.runtime import RunContext
+from image_project.framework.transcript import write_transcript
 
 
 def test_config_validation_missing_prompt_categories_path_raises():
@@ -75,6 +77,69 @@ def test_config_validation_empty_strings_are_missing():
         RunConfig.from_dict(cfg_dict)
 
     assert "prompt.categories_path" in str(excinfo.value)
+
+
+def test_config_validation_run_mode_defaults_full(tmp_path):
+    cfg_dict = {
+        "prompt": {
+            "categories_path": str(tmp_path / "categories.csv"),
+            "profile_path": str(tmp_path / "profile.csv"),
+            "generations_path": str(tmp_path / "generations.csv"),
+        },
+        "image": {
+            "generation_path": str(tmp_path / "generated"),
+            "upscale_path": str(tmp_path / "upscaled"),
+            "log_path": str(tmp_path / "logs"),
+        },
+        "rclone": {"enabled": False},
+        "upscale": {"enabled": False},
+    }
+
+    cfg, _warnings = RunConfig.from_dict(cfg_dict)
+    assert cfg.run_mode == "full"
+
+
+def test_config_validation_run_mode_unknown_raises(tmp_path):
+    cfg_dict = {
+        "run": {"mode": "nope"},
+        "prompt": {
+            "categories_path": str(tmp_path / "categories.csv"),
+            "profile_path": str(tmp_path / "profile.csv"),
+            "generations_path": str(tmp_path / "generations.csv"),
+        },
+        "image": {
+            "generation_path": str(tmp_path / "generated"),
+            "upscale_path": str(tmp_path / "upscaled"),
+            "log_path": str(tmp_path / "logs"),
+        },
+        "rclone": {"enabled": False},
+        "upscale": {"enabled": False},
+    }
+
+    with pytest.raises(ValueError, match=r"Unknown run\.mode:"):
+        RunConfig.from_dict(cfg_dict)
+
+
+@pytest.mark.parametrize("key", ["judge_profile_source", "final_profile_source"])
+def test_config_validation_blackbox_profile_source_enum_is_strict(tmp_path, key):
+    cfg_dict = {
+        "prompt": {
+            "categories_path": str(tmp_path / "categories.csv"),
+            "profile_path": str(tmp_path / "profile.csv"),
+            "generations_path": str(tmp_path / "generations.csv"),
+            "scoring": {key: "nope"},
+        },
+        "image": {
+            "generation_path": str(tmp_path / "generated"),
+            "upscale_path": str(tmp_path / "upscaled"),
+            "log_path": str(tmp_path / "logs"),
+        },
+        "rclone": {"enabled": False},
+        "upscale": {"enabled": False},
+    }
+
+    with pytest.raises(ValueError, match=rf"prompt\.scoring\.{key}"):
+        RunConfig.from_dict(cfg_dict)
 
 
 def test_config_validation_requires_both_upscale_dimensions(tmp_path):
@@ -156,18 +221,11 @@ def test_seeded_randomness_is_deterministic_for_selected_concepts():
             "Color Scheme": ["Vibrant", "Monochrome"],
         }
     )
-    profile = pd.DataFrame(
-        {
-            "Likes": ["colorful", None],
-            "Dislikes": ["boring", "cliche"],
-        }
-    )
-
     rng1 = random.Random(123)
     rng2 = random.Random(123)
 
-    _, selected1 = main.generate_first_prompt(categories, profile, rng1)
-    _, selected2 = main.generate_first_prompt(categories, profile, rng2)
+    selected1 = prompts.select_random_concepts(categories, rng1)
+    selected2 = prompts.select_random_concepts(categories, rng2)
 
     assert selected1 == selected2
 
@@ -561,18 +619,18 @@ def test_integration_offline_run_generation_writes_artifacts(tmp_path, monkeypat
 
     generation_id = "unit_test_generation"
 
-    monkeypatch.setattr(main, "TextAI", FakeTextAI)
-    monkeypatch.setattr(main, "ImageAI", FakeImageAI)
-    monkeypatch.setattr(main, "generate_image_prompt", lambda: image_prompt_request)
+    monkeypatch.setattr(app_generate, "TextAI", FakeTextAI)
+    monkeypatch.setattr(app_generate, "ImageAI", FakeImageAI)
+    monkeypatch.setattr(prompts, "generate_image_prompt", lambda: image_prompt_request)
     monkeypatch.setattr(
-        main,
+        app_generate,
         "generate_title",
         lambda **_kwargs: types.SimpleNamespace(
             title="Test Title", title_source="test", title_raw="Test Title"
         ),
     )
 
-    main.run_generation(cfg_dict, generation_id=generation_id)
+    app_generate.run_generation(cfg_dict, generation_id=generation_id)
 
     image_path = generation_dir / f"{generation_id}_image.jpg"
     transcript_path = log_dir / f"{generation_id}_transcript.json"
@@ -582,6 +640,11 @@ def test_integration_offline_run_generation_writes_artifacts(tmp_path, monkeypat
 
     transcript = json.loads(transcript_path.read_text(encoding="utf-8"))
     assert transcript["generation_id"] == generation_id
+    assert transcript["outputs"]["prompt_pipeline"]["requested_plan"] == "auto"
+    assert transcript["outputs"]["prompt_pipeline"]["plan"] == "standard"
+    assert transcript["outputs"]["prompt_pipeline"]["refinement_policy"] == "tot"
+    assert transcript["outputs"]["prompt_pipeline"]["capture_stage"] == "standard.image_prompt_creation"
+    assert transcript["outputs"]["prompt_pipeline"]["resolved_stages"]
 
     with open(generations_csv, newline="", encoding="utf-8") as file:
         rows = list(csv.DictReader(file))
@@ -589,6 +652,99 @@ def test_integration_offline_run_generation_writes_artifacts(tmp_path, monkeypat
     assert rows
     assert rows[-1]["generation_id"] == generation_id
     assert rows[-1]["image_path"]
+
+
+def test_integration_prompt_only_mode_skips_media_pipeline(tmp_path, monkeypatch):
+    image_prompt_request = "__TEST_IMAGE_PROMPT_REQUEST__"
+    final_prompt_response = "A test image prompt"
+
+    class FakeTextAI:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def text_chat(self, messages, **kwargs):
+            last_user = (messages[-1].get("content", "") if messages else "") or ""
+            if last_user == image_prompt_request:
+                return final_prompt_response
+            return "resp"
+
+    class BoomImageAI:
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("ImageAI should not be constructed in prompt_only mode")
+
+    categories_path = tmp_path / "categories.csv"
+    profile_path = tmp_path / "profile.csv"
+
+    categories = pd.DataFrame(
+        {
+            "Subject Matter": ["Cat", "Dog"],
+            "Narrative": ["Quest", "Heist"],
+            "Mood": ["Moody", "Joyful"],
+            "Composition": ["Wide", "Closeup"],
+            "Perspective": ["Top-down", "Eye-level"],
+            "Style": ["Baroque", "Minimalist"],
+            "Time Period_Context": ["Renaissance", "Futuristic"],
+            "Color Scheme": ["Vibrant", "Monochrome"],
+        }
+    )
+    categories.to_csv(categories_path, index=False)
+
+    profile = pd.DataFrame({"Likes": ["colorful"], "Dislikes": ["boring"]})
+    profile.to_csv(profile_path, index=False)
+
+    generation_dir = tmp_path / "generated"
+    upscale_dir = tmp_path / "upscaled"
+    log_dir = tmp_path / "logs"
+    generations_csv = tmp_path / "generations.csv"
+
+    cfg_dict = {
+        "run": {"mode": "prompt_only"},
+        "prompt": {
+            "categories_path": str(categories_path),
+            "profile_path": str(profile_path),
+            "random_seed": 123,
+            "plan": "simple",
+            "refinement": {"policy": "none"},
+        },
+        "image": {
+            "log_path": str(log_dir),
+        },
+        "rclone": {"enabled": False},
+        "upscale": {"enabled": False},
+        "experiment": {"id": "exp_prompt_only", "variant": "A", "tags": ["unit-test"]},
+    }
+
+    generation_id = "unit_test_prompt_only"
+
+    monkeypatch.setattr(app_generate, "TextAI", FakeTextAI)
+    monkeypatch.setattr(app_generate, "ImageAI", BoomImageAI)
+    monkeypatch.setattr(prompts, "generate_image_prompt", lambda: image_prompt_request)
+
+    app_generate.run_generation(cfg_dict, generation_id=generation_id)
+
+    image_path = generation_dir / f"{generation_id}_image.jpg"
+    transcript_path = log_dir / f"{generation_id}_transcript.json"
+    prompt_path = log_dir / f"{generation_id}_final_prompt.txt"
+
+    assert not image_path.exists()
+    assert not generations_csv.exists()
+    assert transcript_path.exists()
+    assert prompt_path.exists()
+    assert (log_dir / "runs_index.jsonl").exists()
+
+    transcript = json.loads(transcript_path.read_text(encoding="utf-8"))
+    assert transcript["generation_id"] == generation_id
+    assert transcript["final_image_prompt"] == final_prompt_response
+    assert transcript.get("image_path") in (None, "")
+    assert transcript["experiment"]["id"] == "exp_prompt_only"
+
+    run_index_lines = (log_dir / "runs_index.jsonl").read_text(encoding="utf-8").splitlines()
+    assert run_index_lines
+    last_entry = json.loads(run_index_lines[-1])
+    assert last_entry["generation_id"] == generation_id
+    assert last_entry["status"] == "success"
+    assert last_entry["run_mode"] == "prompt_only"
+    assert last_entry["experiment"]["id"] == "exp_prompt_only"
 
 
 def test_transcript_written_on_pipeline_failure(tmp_path, monkeypatch):
@@ -647,11 +803,11 @@ def test_transcript_written_on_pipeline_failure(tmp_path, monkeypatch):
 
     generation_id = "unit_test_failure"
 
-    monkeypatch.setattr(main, "TextAI", FakeTextAI)
-    monkeypatch.setattr(main, "generate_second_prompt", lambda: fail_sentinel)
+    monkeypatch.setattr(app_generate, "TextAI", FakeTextAI)
+    monkeypatch.setattr(prompts, "generate_second_prompt", lambda: fail_sentinel)
 
     with pytest.raises(RuntimeError, match="boom"):
-        main.run_generation(cfg_dict, generation_id=generation_id)
+        app_generate.run_generation(cfg_dict, generation_id=generation_id)
 
     transcript_path = log_dir / f"{generation_id}_transcript.json"
     assert transcript_path.exists()
@@ -662,8 +818,8 @@ def test_transcript_written_on_pipeline_failure(tmp_path, monkeypatch):
     assert transcript["error"]["type"] == "RuntimeError"
     assert transcript["error"]["phase"] == "pipeline"
     assert transcript["error"]["step"] == "draft"
-    assert transcript["error"]["path"] == "pipeline/section_2_choice/draft"
+    assert transcript["error"]["path"] == "pipeline/standard.section_2_choice/draft"
 
     recorded_step_paths = [step.get("path") for step in transcript.get("steps", [])]
-    assert "pipeline/initial_prompt/draft" in recorded_step_paths
-    assert "pipeline/section_2_choice/draft" not in recorded_step_paths
+    assert "pipeline/standard.initial_prompt/draft" in recorded_step_paths
+    assert "pipeline/standard.section_2_choice/draft" not in recorded_step_paths

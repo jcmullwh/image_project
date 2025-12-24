@@ -5,11 +5,17 @@ from pathlib import Path
 
 import pytest
 
-from run_review.cli import main as cli_main
-from run_review.parse_oplog import parse_oplog
-from run_review.report_builder import build_report, diff_reports, report_to_dict
-from run_review.render_html import render_html
-from run_review.report_model import RunInputs, RunMetadata, RunReport, SideEffect, StepReport
+from image_project.run_review.cli import main as cli_main
+from image_project.run_review.parse_oplog import parse_oplog
+from image_project.run_review.report_builder import build_report, diff_reports, report_to_dict
+from image_project.run_review.render_html import render_html
+from image_project.run_review.report_model import (
+    RunInputs,
+    RunMetadata,
+    RunReport,
+    SideEffect,
+    StepReport,
+)
 
 
 def _write_file(path: Path, content: str):
@@ -67,6 +73,21 @@ def _sample_transcript(tmpdir: Path) -> Path:
     }
     transcript.write_text(json.dumps(payload), encoding="utf-8")
     return transcript
+
+
+def _sample_oplog_for_id(tmpdir: Path, generation_id: str) -> Path:
+    log = tmpdir / f"{generation_id}_oplog.log"
+    _write_file(
+        log,
+        "\n".join(
+            [
+                f"2025-12-21 12:00:00,000 | INFO | Run started for generation {generation_id}",
+                f"2025-12-21 12:00:01,000 | INFO | Run completed successfully for generation {generation_id}",
+            ]
+        )
+        + "\n",
+    )
+    return log
 
 
 def test_parse_oplog_pipe_format_parses_events(tmp_path: Path):
@@ -259,6 +280,98 @@ def test_cli_writes_reports(tmp_path: Path):
     assert exit_code == 0
     assert (tmp_path / "run123_run_report.json").exists()
     assert (tmp_path / "run123_run_report.html").exists()
+
+
+def test_run_review_parses_experiment_and_prompt_pipeline_metadata(tmp_path: Path):
+    generation_id = "run_meta_a"
+    oplog = _sample_oplog_for_id(tmp_path, generation_id)
+    transcript = tmp_path / f"{generation_id}_transcript.json"
+    transcript.write_text(
+        json.dumps(
+            {
+                "generation_id": generation_id,
+                "created_at": "2025-12-21T12:00:00Z",
+                "seed": 123,
+                "steps": [],
+                "experiment": {"id": "exp1", "variant": "A", "notes": None, "tags": ["ab"]},
+                "outputs": {
+                    "prompt_pipeline": {
+                        "requested_plan": "auto",
+                        "plan": "standard",
+                        "capture_stage": "standard.image_prompt_creation",
+                        "resolved_stages": ["standard.initial_prompt", "standard.image_prompt_creation"],
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report = build_report(
+        RunInputs(generation_id, oplog_path=str(oplog), transcript_path=str(transcript))
+    )
+    payload = report_to_dict(report)
+    assert payload["metadata"]["experiment"]["id"] == "exp1"
+    assert payload["metadata"]["prompt_pipeline"]["plan"] == "standard"
+    assert payload["metadata"]["prompt_pipeline"]["capture_stage"] == "standard.image_prompt_creation"
+
+
+def test_compare_highlights_experiment_and_plan_changes(tmp_path: Path):
+    gen_a = "run_meta_b"
+    gen_b = "run_meta_c"
+    oplog_a = _sample_oplog_for_id(tmp_path, gen_a)
+    oplog_b = _sample_oplog_for_id(tmp_path, gen_b)
+
+    transcript_a = tmp_path / f"{gen_a}_transcript.json"
+    transcript_a.write_text(
+        json.dumps(
+            {
+                "generation_id": gen_a,
+                "steps": [],
+                "experiment": {"id": "exp1", "variant": "A", "notes": None, "tags": ["ab"]},
+                "outputs": {
+                    "prompt_pipeline": {
+                        "requested_plan": "auto",
+                        "plan": "standard",
+                        "capture_stage": "standard.image_prompt_creation",
+                        "resolved_stages": ["standard.initial_prompt", "standard.image_prompt_creation"],
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    transcript_b = tmp_path / f"{gen_b}_transcript.json"
+    transcript_b.write_text(
+        json.dumps(
+            {
+                "generation_id": gen_b,
+                "steps": [],
+                "experiment": {"id": "exp1", "variant": "B", "notes": None, "tags": ["ab", "cd"]},
+                "outputs": {
+                    "prompt_pipeline": {
+                        "requested_plan": "simple",
+                        "plan": "simple",
+                        "capture_stage": "standard.initial_prompt",
+                        "resolved_stages": ["standard.initial_prompt"],
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report_a = build_report(RunInputs(gen_a, oplog_path=str(oplog_a), transcript_path=str(transcript_a)))
+    report_b = build_report(RunInputs(gen_b, oplog_path=str(oplog_b), transcript_path=str(transcript_b)))
+
+    diff = diff_reports(report_a, report_b)
+    assert "experiment.variant" in diff.metadata_changes
+    assert "experiment.tags" in diff.metadata_changes
+    assert "prompt_pipeline.requested_plan" in diff.metadata_changes
+    assert "prompt_pipeline.plan" in diff.metadata_changes
+    assert "prompt_pipeline.capture_stage" in diff.metadata_changes
+    assert "prompt_pipeline.resolved_stages" in diff.metadata_changes
 
 
 def test_cli_defaults_to_config_and_most_recent(tmp_path: Path):
@@ -463,9 +576,9 @@ from pathlib import Path
 
 import pytest
 
-from run_review.cli import main as cli_main
-from run_review.report_builder import build_report, diff_reports, report_to_dict
-from run_review.report_model import RunInputs
+from image_project.run_review.cli import main as cli_main
+from image_project.run_review.report_builder import build_report, diff_reports, report_to_dict
+from image_project.run_review.report_model import RunInputs
 
 
 def _write_file(path: Path, content: str):

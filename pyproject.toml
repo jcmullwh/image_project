@@ -28,6 +28,9 @@ dev = [
 ]
 
 [tool.pdm.scripts]
-generate = "main.py"
+generate = "python -m image_project generate"
 test = "pytest"
-manual-upscale = "python scripts/manual_upscale.py"
+manual-upscale = "python tools/manual_upscale.py"
+list-plans = "python -m image_project list-plans"
+list-stages = "python -m image_project list-stages"
+run-review = "python -m image_project run-review"

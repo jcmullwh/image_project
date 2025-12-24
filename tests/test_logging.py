@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from logging_utils import write_messages_log
+from image_project.foundation.logging_utils import write_messages_log
 
 
 def test_writes_unicode_text_with_utf8_encoding(tmp_path: Path):

@@ -3,10 +3,10 @@ from pathlib import Path
 
 import pytest
 
-from run_review.evolution import analyze_evolution, thresholds_from_overrides
-from run_review.report_builder import build_report, report_to_dict
-from run_review.render_html import render_html
-from run_review.report_model import RunInputs, StepReport, StepTiming
+from image_project.run_review.evolution import analyze_evolution, thresholds_from_overrides
+from image_project.run_review.report_builder import build_report, report_to_dict
+from image_project.run_review.render_html import render_html
+from image_project.run_review.report_model import RunInputs, StepReport, StepTiming
 
 
 def _step(*, idx: int, path: str, response: str) -> StepReport:

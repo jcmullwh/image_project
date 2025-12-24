@@ -6,16 +6,31 @@ Personal project exploring prompting and "art" generation. Takes randomly-select
 
 Uses tree-of-thought prompting, experiments with iterative improvement and identities to help guide prompt development.
 
+## Quickstart
+
+- Default config is `config/config.yaml` (`run.mode: prompt_only`) and writes artifacts under `./_artifacts/`.
+- Run: `pdm run generate`
+- Customize: create `config/config.local.yaml` (deep-merged over the base). Reference: `config/config.full_example.yaml`.
+
 ## Step-Driven Prompt Pipeline
 
 The generation workflow is implemented as a small, declarative chat pipeline built from **Steps** (`ChatStep`) and nested **Blocks** (`Block`). Each step records `{name, path, prompt, response, params, created_at}` into a JSON transcript for later inspection.
 
 See `docs/pipeline.md` for the execution model, merge modes, and the ToT/enclave wrapping pattern.
 
-### Add a new prompt step
+### Prompt Plans + Stage Modifiers
 
-1. Add a new prompt function (or inline prompt factory) in `prompts.py`.
-2. Add a new `ChatStep(...)` and include it in the `pipeline_root` construction in `main.run_generation()` (optionally wrap it as a `merge="last_response"` stage block and/or use `capture_key` to store the final output in `ctx.outputs`).
+The prompt pipeline is selected by `prompt.plan` and then modified by stage selectors/overrides (include/exclude/temperature/refinement/capture stage). This enables quick experiments without editing orchestration code.
+
+- Docs + examples: `docs/experiments.md`
+- Built-in plans live in `image_project/impl/current/plans.py`.
+- Stage wiring + prompt builders live in `image_project/impl/current/prompting.py`. See `docs/stages.md`.
+- New plans can be added by dropping a module under `image_project/impl/current/plan_plugins/` (no changes to `image_project/app/generate.py` required).
+
+Discoverability helpers:
+
+- List stages: `python -m image_project list-stages` (or `pdm run list-stages`)
+- List plans: `python -m image_project list-plans` (or `pdm run list-plans`)
 
 ### Hardening behavior (fail-fast + reliable artifacts)
 
@@ -28,35 +43,75 @@ See `docs/pipeline.md` for the execution model, merge modes, and the ToT/enclave
 
 ### Legacy code
 
-- `main.py` contains the canonical implementation (`run_generation()`).
-- `main_legacy.py` and `legacy_main.py` contain older experimental orchestration/helpers kept for reference.
+- Canonical entrypoint: `python -m image_project generate`.
+- Canonical orchestration: `image_project/app/generate.py` (`run_generation()`).
+- Root `main.py` is a deprecated compatibility shim; older experiments are under `legacy/`.
 
 ## Configuration
 
-Required keys (fail-fast if missing/empty):
+Config loading:
 
-- `prompt.categories_path`
-- `prompt.profile_path`
-- `prompt.generations_path`
-- `image.generation_path` (preferred) or `image.save_path` (deprecated alias)
-- `image.upscale_path`
-- `image.log_path`
+- Base config: `config/config.yaml`
+- Optional local overlay: `config/config.local.yaml` (deep-merged on top; ignored by git)
+- Optional env override: set `IMAGE_PROJECT_CONFIG=/abs/path/to/config.yaml` to load a single file (no local overlay)
 
-Optional keys:
+### Required keys (conditional)
+
+`run.mode: prompt_only` (default):
+
+- Required:
+  - `image.log_path`
+  - `prompt.categories_path`
+  - `prompt.profile_path`
+- Optional (validated if present):
+  - `image.generation_path`
+  - `image.upscale_path`
+  - `prompt.generations_path`
+  - `prompt.titles_manifest_path`
+
+`run.mode: full`:
+
+- Required:
+  - `image.generation_path` (preferred) or `image.save_path` (deprecated alias)
+  - `image.log_path`
+  - `prompt.categories_path`
+  - `prompt.profile_path`
+  - `prompt.generations_path`
+- Required only when enabled:
+  - `upscale.enabled: true` → `image.upscale_path`
+  - `rclone.enabled: true` → `rclone.remote` + `rclone.album`
+
+### Optional keys
 
 - `prompt.random_seed` (int): makes concept selection deterministic; if omitted, a seed is generated and logged.
-- `prompt.titles_manifest_path`: defaults to `<image.generation_path>/titles_manifest.csv` (logged at WARNING when defaulted).
+- Prompt plan selection:
+  - `prompt.plan: auto|standard|blackbox|refine_only|baseline|simple|profile_only|profile_only_simple`
+  - `prompt.refinement.policy: tot|none`
+  - `prompt.stages.include` / `prompt.stages.exclude` / `prompt.stages.overrides`
+  - `prompt.output.capture_stage`
+  - `prompt.refine_only.draft` / `prompt.refine_only.draft_path`
+- Concept selection + filtering (preprompt stages):
+  - `prompt.concepts.selection.strategy: random|fixed|file`
+  - `prompt.concepts.selection.fixed` / `prompt.concepts.selection.file_path`
+  - `prompt.concepts.filters.enabled` / `prompt.concepts.filters.order`
+  - `prompt.concepts.filters.dislike_rewrite.temperature`
+- `prompt.titles_manifest_path` (full mode): defaults to `<image.generation_path>/titles_manifest.csv` (logged at WARNING when defaulted).
 - Black-box scoring + selection (default off):
   - Enable with `prompt.scoring.enabled: true`.
   - Generates multiple "idea cards", scores them with a separate LLM judge (numeric JSON only), selects one (epsilon-greedy with optional novelty), and then generates the final prompt.
   - Scoring details are recorded in the transcript under `blackbox_scoring` but are not merged into downstream prompt context.
   - Details: `docs/scoring.md`
+- Run labeling (optional):
+  - `experiment.id` / `experiment.variant` / `experiment.notes` / `experiment.tags`
+  - Recorded in the transcript, `run_review` HTML/JSON, and the run index JSONL.
 - `image.caption_font_path`: optional `.ttf` for the caption overlay.
   - If explicitly set and the font cannot be loaded, the run fails loudly (no silent fallback).
 - Boolean flags (e.g. `rclone.enabled`, `upscale.enabled`) accept booleans, `0`/`1`, and strings `"true"`/`"false"`/`"1"`/`"0"`/`"yes"`/`"no"` (case-insensitive); other values raise.
+- Unknown keys under `prompt.*`, `context.*`, `image.*`, `rclone.*`, `upscale.*`, `experiment.*` produce warnings by default. Set top-level `strict: true` to turn these into errors.
 - Context injectors (default off):
   - `context.enabled` (bool): enable/disable context injection (default `false`).
   - `context.injectors` (list[str]): ordered injector names; if omitted while enabled, defaults to `["season", "holiday"]` with a WARNING.
+  - `context.injection_location` (string): `system|prompt|both` (default `system`).
   - `context.holiday.lookahead_days` (int), `context.holiday.base_probability` (float), `context.holiday.max_probability` (float).
   - `context.calendar.enabled` (bool): not implemented yet; if set `true`, the run fails fast with a clear `ValueError`.
 
@@ -87,16 +142,20 @@ Optional: set `image.caption_font_path` to a `.ttf` file to control the caption 
 
 ## Run Artifacts
 
-- Image: `<image.generation_path>/<generation_id>_image.jpg` (and optionally `<generation_id>_image_4k.jpg` when upscaling is enabled).
-- Generation CSV: `prompt.generations_path` with schema `generation_id`, `selected_concepts` (JSON string), `final_image_prompt`, `image_path`, `created_at`, `seed`.
+- Prompt-only: `<image.log_path>/<generation_id>_final_prompt.txt`
+- Image (full mode): `<image.generation_path>/<generation_id>_image.jpg` (and optionally `<generation_id>_image_4k.jpg` when upscaling is enabled).
+- Generation CSV (full mode): `prompt.generations_path` with schema `generation_id`, `selected_concepts` (JSON string), `final_image_prompt`, `image_path`, `created_at`, `seed`.
 - Transcript JSON: `<image.log_path>/<generation_id>_transcript.json` with keys:
   - `generation_id`, `seed`, `selected_concepts`, `steps`, `image_path`, `created_at`
   - When context injection is enabled, the transcript also includes a `context` object (structured metadata keyed by injector name).
   - The transcript includes a `blackbox_scoring` object (when enabled, includes score/selection metadata).
+  - When configured, the transcript includes `experiment: {id, variant, notes, tags}`.
+  - The transcript includes `outputs.prompt_pipeline` (requested/resolved plan and resolved stage ids).
+- Run index (JSONL): `<image.log_path>/runs_index.jsonl` (one line per run; includes experiment + prompt_pipeline + artifact paths).
 
 ## How to run
 
-- Generate: `pdm run generate`
+- Generate (uses `config/config.yaml` + optional `config/config.local.yaml`): `pdm run generate`
 - Tests: `pdm run test` (or `pytest`)
 
 ## Examples:
