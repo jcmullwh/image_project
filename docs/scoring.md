@@ -27,11 +27,12 @@ prompt:
 
 ## Flow
 
-1. Generate a generator-safe profile summary (`profile_abstraction`) when enabled.
-2. Generate N idea cards (`idea_cards_generate`) as strict JSON.
-3. Score idea cards with a separate judge (`idea_cards_judge_score`) as strict JSON `{ "scores": [{"id","score"}] }`.
-4. Select a winner in code (epsilon-greedy; optional novelty penalty from recent `prompt.generations_path` history).
-5. Generate the final prompt from the selected idea card.
+1. Prepare scoring context (`blackbox.prepare`) including novelty summary and default generator hints.
+2. Generate a generator-safe profile summary (`blackbox.profile_abstraction`) when enabled.
+3. Generate N idea cards (`blackbox.idea_cards_generate`) as strict JSON.
+4. Score idea cards with a separate judge (`blackbox.idea_cards_judge_score`) as strict JSON `{ "scores": [{"id","score"}] }`.
+5. Select a winner in code (`blackbox.select_idea_card`) using epsilon-greedy and optional novelty penalty from recent `prompt.generations_path` history.
+6. Generate the final prompt from the selected idea card (`blackbox.image_prompt_creation`).
 
 ## Selection algorithm
 
@@ -49,6 +50,8 @@ Transcripts include a top-level `blackbox_scoring` object containing:
 - novelty summary used (if enabled)
 
 The judge prompt/response is still recorded as normal steps for audit, but scoring text is **not** merged into the downstream prompt context.
+
+Selection is represented explicitly as an `action` step in the transcript (`pipeline/blackbox.select_idea_card/action`), making it easy to see where parsing/selection happened.
 
 ## Troubleshooting
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import random
+import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable, Literal, Protocol, TypeAlias
@@ -28,6 +29,7 @@ class ChatStep:
     allow_empty_response: bool = False
     capture_key: str | None = None
     params: dict[str, Any] = field(default_factory=dict)
+    meta: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.name is not None:
@@ -55,6 +57,8 @@ class ChatStep:
             raise ValueError(
                 f"Step {label} sets params['temperature']; use the ChatStep.temperature field instead"
             )
+        if not isinstance(self.meta, dict):
+            raise TypeError(f"Step meta must be a dict (type={type(self.meta).__name__})")
 
     def render_prompt(self, ctx: "RunContext", *, step_name: str | None = None) -> str:
         label = step_name or self.name or "<unnamed>"
@@ -80,6 +84,7 @@ class Block:
     nodes: list["Node"] = field(default_factory=list)
     merge: MergeMode = "all_messages"
     capture_key: str | None = None
+    meta: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.name is not None:
@@ -102,9 +107,54 @@ class Block:
             if not capture_key:
                 raise ValueError("Block capture_key cannot be empty")
             object.__setattr__(self, "capture_key", capture_key)
+        if not isinstance(self.meta, dict):
+            raise TypeError(f"Block meta must be a dict (type={type(self.meta).__name__})")
 
 
-Node: TypeAlias = ChatStep | Block
+@dataclass(frozen=True)
+class ActionStep:
+    """Pure-Python glue execution node (non-LLM)."""
+
+    name: str | None
+    fn: Callable[["RunContext"], Any]
+    merge: MergeMode = "none"
+    capture_key: str | None = None
+    meta: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if self.name is not None:
+            if not isinstance(self.name, str):
+                raise TypeError(
+                    f"Action name must be a string or None (type={type(self.name).__name__})"
+                )
+            name = self.name.strip()
+            if not name:
+                raise ValueError("Action name cannot be empty")
+            object.__setattr__(self, "name", name)
+
+        if not callable(self.fn):
+            raise TypeError(f"Action fn must be callable (type={type(self.fn).__name__})")
+
+        if self.merge not in ALLOWED_MERGE_MODES:
+            raise ValueError(f"Invalid action merge mode: {self.merge}")
+        if self.merge == "last_response":
+            raise ValueError("ActionStep does not support merge='last_response'")
+
+        if self.capture_key is not None:
+            if not isinstance(self.capture_key, str):
+                raise TypeError(
+                    f"Action capture_key must be a string or None (type={type(self.capture_key).__name__})"
+                )
+            capture_key = self.capture_key.strip()
+            if not capture_key:
+                raise ValueError("Action capture_key cannot be empty")
+            object.__setattr__(self, "capture_key", capture_key)
+
+        if not isinstance(self.meta, dict):
+            raise TypeError(f"Action meta must be a dict (type={type(self.meta).__name__})")
+
+
+Node: TypeAlias = ChatStep | Block | ActionStep
 
 
 @dataclass
@@ -152,25 +202,61 @@ class DefaultStepRecorder:
         path: str,
         **metrics: Any,
     ) -> None:
-        ctx.logger.info(
-            "Step: %s (context_chars=%d, prompt_chars=%d, input_chars=%d)",
-            path,
-            metrics.get("context_chars", 0),
-            metrics.get("prompt_chars", 0),
-            metrics.get("input_chars", 0),
+        tokens: list[str] = []
+        node_type = metrics.get("node_type")
+        if isinstance(node_type, str) and node_type.strip():
+            tokens.append(f"type={node_type.strip()}")
+
+        stage_id = metrics.get("stage_id")
+        if isinstance(stage_id, str) and stage_id.strip():
+            tokens.append(f"stage_id={stage_id.strip()}")
+
+        source = metrics.get("source")
+        if isinstance(source, str) and source.strip():
+            tokens.append(f"source={source.strip()}")
+
+        doc = metrics.get("doc")
+        if isinstance(doc, str) and doc.strip():
+            tokens.append(f"doc={json.dumps(doc.strip(), ensure_ascii=False)}")
+
+        tokens.extend(
+            [
+                f"context_chars={int(metrics.get('context_chars', 0) or 0)}",
+                f"prompt_chars={int(metrics.get('prompt_chars', 0) or 0)}",
+                f"input_chars={int(metrics.get('input_chars', 0) or 0)}",
+            ]
         )
+
+        ctx.logger.info("Step: %s (%s)", path, ", ".join(tokens))
 
     def on_step_end(self, ctx: RunContext, record: dict[str, Any]) -> None:
         ctx.steps.append(record)
         path = record.get("path", "<unknown>")
+        record_type = record.get("type") or "chat"
+        meta = record.get("meta") if isinstance(record.get("meta"), dict) else {}
+        stage_id = meta.get("stage_id") if isinstance(meta, dict) else None
+        source = meta.get("source") if isinstance(meta, dict) else None
+        suffix_tokens: list[str] = []
+        if isinstance(stage_id, str) and stage_id.strip():
+            suffix_tokens.append(f"stage_id={stage_id.strip()}")
+        if isinstance(source, str) and source.strip():
+            suffix_tokens.append(f"source={source.strip()}")
+
+        if record_type == "action":
+            if suffix_tokens:
+                ctx.logger.info("Completed action %s (%s)", path, ", ".join(suffix_tokens))
+            else:
+                ctx.logger.info("Completed action %s", path)
+            return
+
         input_chars = record.get("input_chars", 0)
         response_chars = record.get("response_chars", len(str(record.get("response", ""))))
-        ctx.logger.info(
-            "Received response for %s (input_chars=%d, chars=%d)",
-            path,
-            input_chars,
-            response_chars,
-        )
+        metrics_tokens: list[str] = [
+            f"input_chars={int(input_chars or 0)}",
+            f"chars={int(response_chars or 0)}",
+            *suffix_tokens,
+        ]
+        ctx.logger.info("Received response for %s (%s)", path, ", ".join(metrics_tokens))
 
     def on_step_error(self, ctx: RunContext, path: str, step_name: str, exc: Exception) -> None:
         ctx.logger.error("Step failed: %s (%s)", path, exc)
@@ -203,7 +289,7 @@ class ChatRunner:
         root_path = [root_name]
 
         produced_messages, last_assistant = self._execute_node(
-            ctx, node, parent_messages=ctx.messages, path_segments=root_path
+            ctx, node, parent_messages=ctx.messages, path_segments=root_path, inherited_meta=None
         )
         merge_mode: MergeMode = node.merge
         try:
@@ -218,7 +304,7 @@ class ChatRunner:
             self._attach_pipeline_error(
                 exc,
                 pipeline_path="/".join(root_path),
-                pipeline_node_type="block" if isinstance(node, Block) else "step",
+                pipeline_node_type=self._node_type(node),
                 pipeline_node_name=root_name,
             )
             raise
@@ -230,7 +316,7 @@ class ChatRunner:
     def run_step(self, ctx: RunContext, step: ChatStep) -> str:
         step_name = step.name or "step_01"
         produced, last_assistant = self._execute_node(
-            ctx, step, parent_messages=ctx.messages, path_segments=[step_name]
+            ctx, step, parent_messages=ctx.messages, path_segments=[step_name], inherited_meta=None
         )
         self._apply_merge(
             ctx,
@@ -246,12 +332,85 @@ class ChatRunner:
     def _effective_root_name(self, node: Node) -> str:
         if isinstance(node, Block):
             return node.name or "pipeline"
+        if isinstance(node, ActionStep):
+            return node.name or "action_01"
         return node.name or "step_01"
 
     def _effective_child_name(self, node: Node, *, index: int) -> str:
         if isinstance(node, ChatStep):
             return node.name or f"step_{index + 1:02d}"
+        if isinstance(node, ActionStep):
+            return node.name or f"action_{index + 1:02d}"
         return node.name or f"block_{index + 1:02d}"
+
+    def _node_type(self, node: Node) -> str:
+        if isinstance(node, Block):
+            return "block"
+        if isinstance(node, ActionStep):
+            return "action"
+        return "step"
+
+    def _merge_meta(
+        self, inherited_meta: dict[str, Any] | None, node_meta: dict[str, Any] | None
+    ) -> dict[str, Any]:
+        if not inherited_meta and not node_meta:
+            return {}
+        merged: dict[str, Any] = {}
+        if inherited_meta:
+            merged.update(inherited_meta)
+        if node_meta:
+            merged.update(node_meta)
+        return merged
+
+    def _infer_stage_id(self, path_segments: list[str]) -> str | None:
+        if len(path_segments) >= 2 and path_segments[0] == "pipeline":
+            candidate = str(path_segments[1] or "").strip()
+            return candidate or None
+        return None
+
+    def _prompt_source(self, prompt: str | Callable[["RunContext"], str]) -> str | None:
+        if not callable(prompt):
+            return None
+        return self._callable_source(prompt)
+
+    def _action_source(self, fn: Callable[["RunContext"], Any]) -> str | None:
+        return self._callable_source(fn)
+
+    def _callable_source(self, fn: Any) -> str | None:
+        if not callable(fn):
+            return None
+        module = getattr(fn, "__module__", None) or "<unknown_module>"
+        qualname = (
+            getattr(fn, "__qualname__", None)
+            or getattr(fn, "__name__", None)
+            or "<callable>"
+        )
+        return f"{module}.{qualname}"
+
+    def _json_safe(self, value: Any, *, max_depth: int = 4, max_items: int = 25) -> Any:
+        if max_depth <= 0:
+            return "<max_depth>"
+        if value is None or isinstance(value, (bool, int, float, str)):
+            return value
+        if isinstance(value, (list, tuple)):
+            items = list(value)
+            trimmed = items[:max_items]
+            out = [
+                self._json_safe(item, max_depth=max_depth - 1, max_items=max_items)
+                for item in trimmed
+            ]
+            if len(items) > max_items:
+                out.append(f"<{len(items) - max_items} more>")
+            return out
+        if isinstance(value, dict):
+            out: dict[str, Any] = {}
+            for idx, (k, v) in enumerate(value.items()):
+                if idx >= max_items:
+                    out["<more>"] = f"<{len(value) - max_items} more>"
+                    break
+                out[str(k)] = self._json_safe(v, max_depth=max_depth - 1, max_items=max_items)
+            return out
+        return repr(value)
 
     def _validate_recorder(self, recorder: StepRecorder) -> None:
         required = ("on_step_start", "on_step_end", "on_step_error")
@@ -310,6 +469,7 @@ class ChatRunner:
         *,
         parent_messages: MessageHandler,
         path_segments: list[str],
+        inherited_meta: dict[str, Any] | None,
     ) -> tuple[list[dict[str, Any]], str | None]:
         if isinstance(node, ChatStep):
             return self._execute_step(
@@ -317,12 +477,22 @@ class ChatRunner:
                 node,
                 parent_messages=parent_messages,
                 path_segments=path_segments,
+                inherited_meta=inherited_meta,
+            )
+        if isinstance(node, ActionStep):
+            return self._execute_action(
+                ctx,
+                node,
+                parent_messages=parent_messages,
+                path_segments=path_segments,
+                inherited_meta=inherited_meta,
             )
         return self._execute_block(
             ctx,
             node,
             parent_messages=parent_messages,
             path_segments=path_segments,
+            inherited_meta=inherited_meta,
         )
 
     def _execute_step(
@@ -332,10 +502,21 @@ class ChatRunner:
         *,
         parent_messages: MessageHandler,
         path_segments: list[str],
+        inherited_meta: dict[str, Any] | None,
     ) -> tuple[list[dict[str, Any]], str]:
         pipeline_path = "/".join(path_segments)
         step_name = path_segments[-1] if path_segments else (step.name or "<unnamed>")
         try:
+            record_meta = self._merge_meta(inherited_meta, step.meta)
+            if "stage_id" not in record_meta:
+                stage_id = self._infer_stage_id(path_segments)
+                if stage_id:
+                    record_meta["stage_id"] = stage_id
+            if "source" not in record_meta:
+                source = self._prompt_source(step.prompt)
+                if source:
+                    record_meta["source"] = source
+
             working = parent_messages.copy()
             prompt_text = step.render_prompt(ctx, step_name=step_name)
 
@@ -352,6 +533,10 @@ class ChatRunner:
             self._recorder.on_step_start(
                 ctx,
                 pipeline_path,
+                node_type="chat",
+                stage_id=record_meta.get("stage_id"),
+                source=record_meta.get("source"),
+                doc=record_meta.get("doc"),
                 context_chars=context_chars,
                 prompt_chars=prompt_chars,
                 input_chars=input_chars,
@@ -399,6 +584,7 @@ class ChatRunner:
             produced_messages = working.messages[len(parent_messages.messages) :]
 
             record = {
+                "type": "chat",
                 "name": step_name,
                 "path": pipeline_path,
                 "prompt": prompt_text,
@@ -412,6 +598,8 @@ class ChatRunner:
                 "input_messages": input_messages,
                 "created_at": utc_now_iso8601(),
             }
+            if record_meta:
+                record["meta"] = self._json_safe(record_meta)
 
             self._recorder.on_step_end(ctx, record)
 
@@ -432,6 +620,69 @@ class ChatRunner:
             )
             raise
 
+    def _execute_action(
+        self,
+        ctx: RunContext,
+        action: ActionStep,
+        *,
+        parent_messages: MessageHandler,
+        path_segments: list[str],
+        inherited_meta: dict[str, Any] | None,
+    ) -> tuple[list[dict[str, Any]], str | None]:
+        pipeline_path = "/".join(path_segments)
+        action_name = path_segments[-1] if path_segments else (action.name or "<unnamed>")
+        try:
+            record_meta = self._merge_meta(inherited_meta, action.meta)
+            if "stage_id" not in record_meta:
+                stage_id = self._infer_stage_id(path_segments)
+                if stage_id:
+                    record_meta["stage_id"] = stage_id
+            if "source" not in record_meta:
+                source = self._action_source(action.fn)
+                if source:
+                    record_meta["source"] = source
+
+            self._recorder.on_step_start(
+                ctx,
+                pipeline_path,
+                node_type="action",
+                stage_id=record_meta.get("stage_id"),
+                source=record_meta.get("source"),
+                doc=record_meta.get("doc"),
+            )
+
+            result = action.fn(ctx)
+            if action.capture_key is not None:
+                ctx.outputs[action.capture_key] = result
+
+            record: dict[str, Any] = {
+                "type": "action",
+                "name": action_name,
+                "path": pipeline_path,
+                "created_at": utc_now_iso8601(),
+            }
+            if record_meta:
+                record["meta"] = self._json_safe(record_meta)
+            if result is not None:
+                record["result"] = self._json_safe(result)
+
+            self._recorder.on_step_end(ctx, record)
+            return [], None
+        except Exception as exc:
+            try:
+                self._recorder.on_step_error(ctx, pipeline_path, action_name, exc)
+            except Exception:
+                ctx.logger.exception(
+                    "Step recorder failed during error handling for %s", pipeline_path
+                )
+            self._attach_pipeline_error(
+                exc,
+                pipeline_path=pipeline_path,
+                pipeline_node_type="action",
+                pipeline_node_name=action_name,
+            )
+            raise
+
     def _execute_block(
         self,
         ctx: RunContext,
@@ -439,10 +690,12 @@ class ChatRunner:
         *,
         parent_messages: MessageHandler,
         path_segments: list[str],
+        inherited_meta: dict[str, Any] | None,
     ) -> tuple[list[dict[str, Any]], str | None]:
         block_name = path_segments[-1] if path_segments else (block.name or "<unnamed>")
         pipeline_path = "/".join(path_segments)
         try:
+            block_meta = self._merge_meta(inherited_meta, block.meta)
             working = parent_messages.copy()
 
             effective_children: list[str] = [
@@ -461,6 +714,7 @@ class ChatRunner:
                     child,
                     parent_messages=working,
                     path_segments=child_path,
+                    inherited_meta=block_meta,
                 )
 
                 merge_mode: MergeMode = child.merge
@@ -476,7 +730,7 @@ class ChatRunner:
                     self._attach_pipeline_error(
                         exc,
                         pipeline_path="/".join(child_path),
-                        pipeline_node_type="block" if isinstance(child, Block) else "step",
+                        pipeline_node_type=self._node_type(child),
                         pipeline_node_name=child_name,
                     )
                     raise

@@ -31,3 +31,5 @@ dev = [
 generate = "main.py"
 test = "pytest"
 manual-upscale = "python scripts/manual_upscale.py"
+list-plans = "python scripts/list_prompt_catalog.py plans"
+list-stages = "python scripts/list_prompt_catalog.py stages"

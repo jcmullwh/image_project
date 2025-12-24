@@ -8,6 +8,7 @@ import sys
 import time
 from dataclasses import asdict
 from datetime import datetime
+from typing import Any
 
 import pandas as pd
 
@@ -17,14 +18,16 @@ except ModuleNotFoundError:  # pragma: no cover
     ImageAI = None  # type: ignore[assignment]
     TextAI = None  # type: ignore[assignment]
 from message_handling import MessageHandler
-from pipeline import Block, ChatRunner, ChatStep, RunContext
+from pipeline import ChatRunner, RunContext
+from prompt_plans import PlanInputs, PromptPlanManager, resolve_stage_specs
+from prompt_inputs import resolve_prompt_inputs
 from records import append_generation_row
 from run_config import RunConfig
+from run_index import append_run_index_entry
 from transcript import write_transcript
 from upscaling import UpscaleConfig, upscale_image_to_4k
 from context_injectors import ContextManager
-from concept_filters import apply_concept_filters, extract_dislikes, make_dislike_rewrite_filter
-from refinement import TotEnclaveRefinement
+from concept_filters import extract_dislikes
 from titles import (
     append_manifest_row,
     generate_title,
@@ -40,24 +43,7 @@ from utils import (
     save_image,
 )
 
-from prompts import (
-    DEFAULT_SYSTEM_PROMPT,
-    build_preferences_guidance,
-    final_prompt_from_selected_idea_prompt,
-    generate_image_prompt,
-    generate_first_prompt,
-    generate_fourth_prompt,
-    generate_secondB_prompt,
-    generate_second_prompt,
-    generate_third_prompt,
-    idea_cards_generate_prompt,
-    idea_cards_judge_prompt,
-    load_prompt_data,
-    profile_abstraction_prompt,
-    select_random_concepts,
-)
-
-import blackbox_scoring
+from prompts import DEFAULT_SYSTEM_PROMPT, build_preferences_guidance, load_prompt_data
 
 def configure_stdio_utf8():
     """Force stdout/stderr to UTF-8 so Unicode responses never crash on Windows consoles."""
@@ -139,11 +125,32 @@ GENERATION_CSV_FIELDNAMES: list[str] = [
 ]
 
 
-def run_generation(cfg_dict, *, generation_id: str | None = None) -> RunContext:
+def run_generation(cfg_dict, *, generation_id: str | None = None, config_meta: dict[str, Any] | None = None) -> RunContext:
     cfg, cfg_warnings = RunConfig.from_dict(cfg_dict)
 
     generation_id = generation_id or generate_unique_id()
     logger, operational_log_path = setup_operational_logger(cfg.log_dir, generation_id)
+    run_index_path = os.path.join(cfg.log_dir, "runs_index.jsonl")
+
+    if config_meta:
+        mode = config_meta.get("mode")
+        paths = config_meta.get("paths") or []
+        env_var = config_meta.get("env_var") or "IMAGE_PROJECT_CONFIG"
+        if mode in {"env", "explicit"} and paths:
+            label = f"env {env_var}" if mode == "env" else "explicit path"
+            logger.info("Loaded config from %s=%s", label, paths[0])
+        elif paths:
+            base = paths[0]
+            local = paths[1] if len(paths) > 1 else None
+            if local:
+                logger.info("Loaded config base=%s local=%s", base, local)
+            else:
+                logger.info("Loaded config base=%s", base)
+
+    if getattr(cfg, "experiment", None) is not None:
+        exp = cfg.experiment
+        if exp.id or exp.variant:
+            logger.info("Experiment: id=%s variant=%s", exp.id, exp.variant)
     logger.info("Run started for generation %s", generation_id)
 
     for warning in cfg_warnings:
@@ -151,6 +158,9 @@ def run_generation(cfg_dict, *, generation_id: str | None = None) -> RunContext:
 
     ctx: RunContext | None = None
     transcript_path: str | None = None
+    final_prompt_path: str | None = None
+    image_path: str | None = None
+    upscaled_image_path: str | None = None
     phase = "init"
 
     try:
@@ -175,9 +185,16 @@ def run_generation(cfg_dict, *, generation_id: str | None = None) -> RunContext:
         preferences_guidance = build_preferences_guidance(user_profile)
         user_dislikes = extract_dislikes(user_profile)
 
+        phase = "plan_resolution"
+        resolved_plan = PromptPlanManager.resolve(cfg)
+        requested_plan = resolved_plan.requested_plan
+        plan = resolved_plan.plan
+        context_injection_mode = resolved_plan.metadata.context_injection
+        effective_context_enabled = resolved_plan.effective_context_enabled
+
         phase = "context_injection"
         context_guidance_text, context_metadata = ContextManager.build(
-            enabled=cfg.context_enabled,
+            enabled=effective_context_enabled,
             injectors=cfg.context_injectors,
             context_cfg=cfg.context_cfg,
             seed=seed,
@@ -195,7 +212,7 @@ def run_generation(cfg_dict, *, generation_id: str | None = None) -> RunContext:
         logger.info("Initialized TextAI with model gpt-5.2")
 
         system_prompt = DEFAULT_SYSTEM_PROMPT
-        if context_guidance_text:
+        if context_guidance_text and cfg.context_injection_location in ("system", "both"):
             system_prompt = DEFAULT_SYSTEM_PROMPT + "\n\n" + context_guidance_text
 
         phase = "context"
@@ -215,29 +232,6 @@ def run_generation(cfg_dict, *, generation_id: str | None = None) -> RunContext:
         if context_metadata:
             ctx.outputs["context"] = context_metadata
 
-        phase = "concept_selection"
-        selected_concepts_raw = select_random_concepts(prompt_data, rng)
-        logger.info("Random concepts selected (raw): %s", selected_concepts_raw)
-
-        phase = "concept_filter"
-        filtered_concepts, filter_outcomes = apply_concept_filters(
-            selected_concepts_raw,
-            filters=[
-                make_dislike_rewrite_filter(dislikes=user_dislikes, ai_text=ai_text),
-            ],
-            logger=logger,
-        )
-        ctx.outputs["concept_filter_log"] = {
-            "input": selected_concepts_raw,
-            "output": filtered_concepts,
-            "filters": filter_outcomes,
-        }
-        if filtered_concepts != selected_concepts_raw:
-            logger.info("Concepts adjusted after filtering: %s", filtered_concepts)
-        else:
-            logger.info("Concepts unchanged after filtering.")
-        ctx.selected_concepts = list(filtered_concepts)
-
         transcript_path = generate_file_location(cfg.log_dir, generation_id + "_transcript", ".json")
 
         scoring_cfg = cfg.prompt_scoring
@@ -248,251 +242,123 @@ def run_generation(cfg_dict, *, generation_id: str | None = None) -> RunContext:
 
         runner = ChatRunner(ai_text=ai_text)
 
-        if scoring_cfg.enabled:
-            novelty_enabled = bool(scoring_cfg.novelty.enabled and scoring_cfg.novelty.window > 0)
-            logger.info(
-                "Blackbox scoring enabled: num_ideas=%d, exploration_rate=%.3g, novelty=%s",
-                scoring_cfg.num_ideas,
-                scoring_cfg.exploration_rate,
-                novelty_enabled,
-            )
+        phase = "pipeline"
 
-            novelty_summary: dict[str, object] | None = None
-            if novelty_enabled:
-                try:
-                    novelty_summary = blackbox_scoring.extract_recent_motif_summary(
-                        generations_csv_path=cfg.generations_csv_path,
-                        window=scoring_cfg.novelty.window,
-                    )
-                except Exception as exc:
-                    logger.warning(
-                        "Novelty enabled but history unavailable; disabling novelty for this run: %s %s",
-                        cfg.generations_csv_path,
-                        exc,
-                    )
-                    novelty_enabled = False
-                    novelty_summary = {
-                        "enabled": False,
-                        "window": scoring_cfg.novelty.window,
-                        "rows_considered": 0,
-                        "top_tokens": [],
-                    }
-            else:
-                novelty_summary = {
-                    "enabled": False,
-                    "window": scoring_cfg.novelty.window,
-                    "rows_considered": 0,
-                    "top_tokens": [],
-                }
+        draft_prompt: str | None = None
+        if resolved_plan.metadata.required_inputs:
+            resolved_inputs = resolve_prompt_inputs(cfg, required=resolved_plan.metadata.required_inputs)
+            draft_prompt = resolved_inputs.draft_prompt
 
-            ctx.blackbox_scoring["novelty_summary"] = novelty_summary
+        inputs = PlanInputs(
+            cfg=cfg,
+            ai_text=ai_text,
+            prompt_data=prompt_data,
+            user_profile=user_profile,
+            preferences_guidance=preferences_guidance,
+            context_guidance=(
+                (context_guidance_text or None)
+                if context_guidance_text and cfg.context_injection_location in ("prompt", "both")
+                else None
+            ),
+            rng=rng,
+            draft_prompt=draft_prompt,
+        )
 
-            blackbox_nodes: list[ChatStep] = []
-            if scoring_cfg.generator_profile_abstraction:
-                blackbox_nodes.append(
-                    ChatStep(
-                        name="profile_abstraction",
-                        prompt=lambda _ctx: profile_abstraction_prompt(
-                            preferences_guidance=preferences_guidance
-                        ),
-                        temperature=0.0,
-                        merge="none",
-                        capture_key="generator_profile_hints",
-                    )
-                )
-            else:
-                ctx.outputs["generator_profile_hints"] = preferences_guidance
+        stage_specs = plan.stage_specs(inputs)
+        resolved_stages = resolve_stage_specs(
+            stage_specs,
+            plan_name=plan.name,
+            include=cfg.prompt_stages_include,
+            exclude=cfg.prompt_stages_exclude,
+            overrides=cfg.prompt_stages_overrides,
+            capture_stage=cfg.prompt_output_capture_stage,
+        )
 
-            def _idea_cards_prompt(inner_ctx: RunContext) -> str:
-                hints = inner_ctx.outputs.get("generator_profile_hints", "")
-                return idea_cards_generate_prompt(
-                    concepts=list(inner_ctx.selected_concepts),
-                    generator_profile_hints=str(hints or ""),
-                    num_ideas=scoring_cfg.num_ideas,
-                )
+        prompt_pipeline = dict(resolved_stages.metadata)
+        prompt_pipeline["requested_plan"] = requested_plan
+        prompt_pipeline["refinement_policy"] = cfg.prompt_refinement_policy
+        prompt_pipeline["context_injection"] = context_injection_mode
+        prompt_pipeline["context_injection_location"] = cfg.context_injection_location
+        prompt_pipeline["context_enabled"] = bool(effective_context_enabled)
+        if {
+            "blackbox.idea_cards_judge_score",
+            "blackbox.image_prompt_creation",
+        }.intersection(resolved_stages.stage_ids):
+            prompt_pipeline["blackbox_profile_sources"] = {
+                "judge_profile_source": cfg.prompt_scoring.judge_profile_source,
+                "final_profile_source": cfg.prompt_scoring.final_profile_source,
+            }
+        ctx.outputs["prompt_pipeline"] = prompt_pipeline
 
-            blackbox_nodes.append(
-                ChatStep(
-                    name="idea_cards_generate",
-                    prompt=_idea_cards_prompt,
-                    temperature=0.8,
-                    merge="none",
-                    capture_key="idea_cards_json",
-                )
-            )
+        logger.info(
+            "Prompt plan requested=%s resolved=%s stages=%s refinement=%s capture=%s context=%s",
+            requested_plan,
+            plan.name,
+            list(resolved_stages.stage_ids),
+            cfg.prompt_refinement_policy,
+            resolved_stages.capture_stage,
+            context_injection_mode,
+        )
 
-            def _judge_prompt(inner_ctx: RunContext) -> str:
-                idea_cards_json = inner_ctx.outputs.get("idea_cards_json")
-                if not isinstance(idea_cards_json, str) or not idea_cards_json.strip():
-                    raise ValueError("Missing required output: idea_cards_json")
-                return idea_cards_judge_prompt(
-                    concepts=list(inner_ctx.selected_concepts),
-                    raw_profile=preferences_guidance,
-                    idea_cards_json=idea_cards_json,
-                    recent_motif_summary=json.dumps(novelty_summary, ensure_ascii=False, indent=2)
-                    if novelty_enabled
-                    else None,
-                )
-
-            judge_params: dict[str, object] = {}
-            if scoring_cfg.judge_model:
-                judge_params["model"] = scoring_cfg.judge_model
-
-            blackbox_nodes.append(
-                ChatStep(
-                    name="idea_cards_judge_score",
-                    prompt=_judge_prompt,
-                    temperature=scoring_cfg.judge_temperature,
-                    merge="none",
-                    params=judge_params,
-                    capture_key="idea_scores_json",
-                )
-            )
-
-            phase = "prompt_pipeline"
-            blackbox_block = Block(name="blackbox_scoring", merge="none", nodes=blackbox_nodes)
-            runner.run(ctx, blackbox_block)
-
-            idea_cards_json = ctx.outputs.get("idea_cards_json")
-            if not isinstance(idea_cards_json, str) or not idea_cards_json.strip():
-                raise ValueError("Missing required output: idea_cards_json")
-            idea_scores_json = ctx.outputs.get("idea_scores_json")
-            if not isinstance(idea_scores_json, str) or not idea_scores_json.strip():
-                raise ValueError("Missing required output: idea_scores_json")
-
-            try:
-                idea_cards = blackbox_scoring.parse_idea_cards_json(
-                    idea_cards_json, expected_num_ideas=scoring_cfg.num_ideas
-                )
-            except Exception as exc:
-                setattr(exc, "pipeline_step", "idea_cards_generate")
-                setattr(exc, "pipeline_path", "blackbox_scoring/idea_cards_generate")
-                raise
-
-            expected_ids = [card.get("id") for card in idea_cards if isinstance(card, dict)]
-
-            try:
-                scores = blackbox_scoring.parse_judge_scores_json(
-                    idea_scores_json, expected_ids=expected_ids
-                )
-            except Exception as exc:
-                setattr(exc, "pipeline_step", "idea_cards_judge_score")
-                setattr(exc, "pipeline_path", "blackbox_scoring/idea_cards_judge_score")
-                raise
-
-            scoring_seed = seed ^ 0xB10C5C0F
-            selection = blackbox_scoring.select_candidate(
-                scores=scores,
-                idea_cards=idea_cards,
-                exploration_rate=scoring_cfg.exploration_rate,
-                rng=random.Random(scoring_seed),
-                novelty_summary=novelty_summary if novelty_enabled else None,
-            )
-
-            selected_card = next((card for card in idea_cards if card.get("id") == selection.selected_id), None)
-            if not isinstance(selected_card, dict):
-                raise ValueError(f"selection inconsistency: selected id not found: {selection.selected_id}")
-
-            ctx.outputs["selected_idea_card"] = selected_card
-            ctx.blackbox_scoring.update(
-                {
-                    "scoring_seed": scoring_seed,
-                    "exploration_rate": scoring_cfg.exploration_rate,
-                    "exploration_roll": selection.exploration_roll,
-                    "selection_mode": selection.selection_mode,
-                    "selected_id": selection.selected_id,
-                    "selected_score": selection.selected_score,
-                    "selected_effective_score": selection.selected_effective_score,
-                    "score_table": selection.score_table,
-                }
-            )
-
-            logger.info(
-                "Selected candidate: id=%s, score=%d, selection_mode=%s",
-                selection.selected_id,
-                selection.selected_score,
-                selection.selection_mode,
-            )
-
-            refinement_policy = TotEnclaveRefinement()
-            pipeline_root = Block(
-                name="pipeline",
-                merge="all_messages",
-                nodes=[
-                    refinement_policy.stage(
-                        "image_prompt_creation",
-                        prompt=lambda inner_ctx: final_prompt_from_selected_idea_prompt(
-                            concepts=list(inner_ctx.selected_concepts),
-                            raw_profile=preferences_guidance,
-                            selected_idea_card=selected_card,
-                        ),
-                        temperature=0.8,
-                        capture_key="image_prompt",
-                    ),
-                ],
-            )
-            runner.run(ctx, pipeline_root)
-        else:
-            phase = "prompt_generation"
-            prompt_1, selected_concepts = generate_first_prompt(
-                prompt_data,
-                user_profile,
-                rng,
-                context_guidance=(context_guidance_text or None),
-                selected_concepts=filtered_concepts,
-            )
-            ctx.selected_concepts = selected_concepts
-            logger.info("Generated first prompt (selected_concepts=%d)", len(selected_concepts))
-
-            phase = "pipeline"
-            # Prompt pipeline (text-only): a sequence of named stages that build toward the final image prompt.
-            # Refinement is pluggable via a RefinementPolicy; default remains the Tree-of-Thought enclave.
-            refinement_policy = TotEnclaveRefinement()
-
-            # Stages run in order; each stage sees the refined outputs of earlier stages as compact context.
-            pipeline_root = Block(
-                name="pipeline",
-                merge="all_messages",
-                nodes=[
-                    refinement_policy.stage("initial_prompt", prompt=prompt_1, temperature=0.8),
-                    refinement_policy.stage(
-                        "section_2_choice",
-                        prompt=lambda _ctx: generate_second_prompt(),
-                        temperature=0.8,
-                    ),
-                    refinement_policy.stage(
-                        "section_2b_title_and_story",
-                        prompt=lambda _ctx: generate_secondB_prompt(),
-                        temperature=0.8,
-                    ),
-                    refinement_policy.stage(
-                        "section_3_message_focus",
-                        prompt=lambda _ctx: generate_third_prompt(),
-                        temperature=0.8,
-                    ),
-                    refinement_policy.stage(
-                        "section_4_concise_description",
-                        prompt=lambda _ctx: generate_fourth_prompt(),
-                        temperature=0.8,
-                    ),
-                    refinement_policy.stage(
-                        "image_prompt_creation",
-                        prompt=lambda _ctx: generate_image_prompt(),
-                        temperature=0.8,
-                        # Capture the final refined image prompt for the downstream image generation step.
-                        capture_key="image_prompt",
-                    ),
-                ],
-            )
-
-            # Execute the pipeline. Full per-step prompts/responses are recorded in `ctx.steps`, while selected
-            # stage outputs can be captured into `ctx.outputs` via `capture_key`.
-            runner.run(ctx, pipeline_root)
+        plan.execute(ctx, runner, resolved_stages, inputs)
 
         phase = "capture"
         image_prompt = ctx.outputs.get("image_prompt")
         if not image_prompt:
             raise ValueError("Pipeline did not produce required output: image_prompt")
+
+        if cfg.run_mode == "prompt_only":
+            logger.info(
+                "run.mode=prompt_only; skipping media pipeline (image/upscale/upload/csv)"
+            )
+            final_prompt_path = generate_file_location(
+                cfg.log_dir, generation_id + "_final_prompt", ".txt"
+            )
+            with open(final_prompt_path, "w", encoding="utf-8") as handle:
+                handle.write(str(image_prompt).rstrip() + "\n")
+            logger.info("Wrote final prompt text artifact to %s", final_prompt_path)
+
+            phase = "transcript"
+            write_transcript(transcript_path, ctx)
+            logger.info("Wrote transcript JSON to %s", transcript_path)
+
+            entry = {
+                "schema_version": 1,
+                "generation_id": generation_id,
+                "created_at": ctx.created_at,
+                "seed": ctx.seed,
+                "status": "success",
+                "phase": "complete",
+                "run_mode": cfg.run_mode,
+                "experiment": {
+                    "id": cfg.experiment.id,
+                    "variant": cfg.experiment.variant,
+                    "notes": cfg.experiment.notes,
+                    "tags": list(cfg.experiment.tags),
+                },
+                "prompt_pipeline": ctx.outputs.get("prompt_pipeline"),
+                "artifacts": {
+                    "transcript": transcript_path,
+                    "oplog": operational_log_path,
+                    "final_prompt": final_prompt_path,
+                    "image": None,
+                    "upscaled_image": None,
+                },
+            }
+            if ctx.error is not None:
+                entry["error"] = ctx.error
+            try:
+                append_run_index_entry(run_index_path, entry)
+                logger.info(
+                    "Appended run index entry to %s (status=%s)", run_index_path, entry["status"]
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("Run index append failed: %s", exc)
+                ctx.outputs["run_index_error"] = str(exc)
+
+            logger.info("Operational log stored at %s", operational_log_path)
+            logger.info("Run completed successfully for generation %s", generation_id)
+            return ctx
 
         phase = "init_image_ai"
         image_ai_cls = ImageAI
@@ -506,9 +372,16 @@ def run_generation(cfg_dict, *, generation_id: str | None = None) -> RunContext:
         image_size = "1536x1024"
         image_quality = "high"
 
+        if not cfg.generation_dir:
+            raise ValueError("Missing required config: image.generation_path")
         os.makedirs(cfg.generation_dir, exist_ok=True)
         os.makedirs(cfg.log_dir, exist_ok=True)
-        os.makedirs(cfg.upscale_dir, exist_ok=True)
+        if cfg.upscale_enabled:
+            if not cfg.upscale_dir:
+                raise ValueError(
+                    "Missing required config: image.upscale_path (required when upscale.enabled=true)"
+                )
+            os.makedirs(cfg.upscale_dir, exist_ok=True)
 
         phase = "image_pipeline"
         upload_target_path = ""
@@ -566,9 +439,11 @@ def run_generation(cfg_dict, *, generation_id: str | None = None) -> RunContext:
             )
             logger.info("Saved image to %s", image_full_path_and_name)
             upload_target_path = image_full_path_and_name
+            image_path = image_full_path_and_name
             ctx.image_path = upload_target_path
 
             if cfg.upscale_enabled:
+                assert cfg.upscale_dir is not None
                 upscale_out_path = generate_file_location(
                     cfg.upscale_dir,
                     generation_id + "_image_4k",
@@ -614,6 +489,7 @@ def run_generation(cfg_dict, *, generation_id: str | None = None) -> RunContext:
                 )
                 logger.info("Saved 4K upscaled image to %s", upscale_out_path)
                 upload_target_path = upscale_out_path
+                upscaled_image_path = upscale_out_path
                 ctx.image_path = upload_target_path
 
             append_manifest_row(
@@ -674,6 +550,41 @@ def run_generation(cfg_dict, *, generation_id: str | None = None) -> RunContext:
         phase = "transcript"
         write_transcript(transcript_path, ctx)
         logger.info("Wrote transcript JSON to %s", transcript_path)
+
+        entry = {
+            "schema_version": 1,
+            "generation_id": generation_id,
+            "created_at": ctx.created_at,
+            "seed": ctx.seed,
+            "status": "success",
+            "phase": "complete",
+            "run_mode": cfg.run_mode,
+            "experiment": {
+                "id": cfg.experiment.id,
+                "variant": cfg.experiment.variant,
+                "notes": cfg.experiment.notes,
+                "tags": list(cfg.experiment.tags),
+            },
+            "prompt_pipeline": ctx.outputs.get("prompt_pipeline"),
+            "artifacts": {
+                "transcript": transcript_path,
+                "oplog": operational_log_path,
+                "final_prompt": None,
+                "image": image_path,
+                "upscaled_image": upscaled_image_path,
+            },
+        }
+        if ctx.error is not None:
+            entry["error"] = ctx.error
+        try:
+            append_run_index_entry(run_index_path, entry)
+            logger.info(
+                "Appended run index entry to %s (status=%s)", run_index_path, entry["status"]
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Run index append failed: %s", exc)
+            ctx.outputs["run_index_error"] = str(exc)
+
         logger.info("Operational log stored at %s", operational_log_path)
         logger.info("Run completed successfully for generation %s", generation_id)
 
@@ -700,6 +611,42 @@ def run_generation(cfg_dict, *, generation_id: str | None = None) -> RunContext:
                     )
                 write_transcript(transcript_path, ctx)
                 logger.info("Wrote transcript JSON to %s", transcript_path)
+
+                entry = {
+                    "schema_version": 1,
+                    "generation_id": generation_id,
+                    "created_at": ctx.created_at,
+                    "seed": ctx.seed,
+                    "status": "error",
+                    "phase": ctx.error.get("phase") if isinstance(ctx.error, dict) else phase,
+                    "run_mode": cfg.run_mode,
+                    "experiment": {
+                        "id": cfg.experiment.id,
+                        "variant": cfg.experiment.variant,
+                        "notes": cfg.experiment.notes,
+                        "tags": list(cfg.experiment.tags),
+                    },
+                    "prompt_pipeline": ctx.outputs.get("prompt_pipeline"),
+                    "artifacts": {
+                        "transcript": transcript_path,
+                        "oplog": operational_log_path,
+                        "final_prompt": final_prompt_path,
+                        "image": image_path,
+                        "upscaled_image": upscaled_image_path,
+                    },
+                }
+                if ctx.error is not None:
+                    entry["error"] = ctx.error
+                try:
+                    append_run_index_entry(run_index_path, entry)
+                    logger.info(
+                        "Appended run index entry to %s (status=%s)",
+                        run_index_path,
+                        entry["status"],
+                    )
+                except Exception as run_index_exc:  # noqa: BLE001
+                    logger.exception("Run index append failed: %s", run_index_exc)
+                    ctx.outputs["run_index_error"] = str(run_index_exc)
             except Exception:
                 logger.exception("Failed to write transcript during error handling")
         raise
@@ -721,7 +668,7 @@ def main() -> None:
     generation_id = generate_unique_id()
 
     try:
-        cfg_dict = load_config()
+        cfg_dict, cfg_meta = load_config()
     except Exception:
         # This is a rare exeception to the "no fallbacks" rule. Fallbacks are ONLY acceptable here to prevent loss of logging data
         fallback_logger, fallback_log_path = setup_operational_logger(os.getcwd(), generation_id)
@@ -730,7 +677,7 @@ def main() -> None:
         )
         raise
 
-    run_generation(cfg_dict, generation_id=generation_id)
+    run_generation(cfg_dict, generation_id=generation_id, config_meta=cfg_meta)
 
 
 if __name__ == "__main__":

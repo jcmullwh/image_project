@@ -197,6 +197,71 @@ def test_tot_refinement_pipeline_runs_and_writes_transcript(tmp_path):
     assert any("tot_enclave" in step["path"] for step in transcript["steps"])
 
 
+def test_tot_refinement_enclave_steps_have_own_provenance(tmp_path):
+    class FakeTextAI:
+        def text_chat(self, messages, **kwargs):
+            return "resp"
+
+    ctx = _make_ctx(tmp_path, "test.tot_provenance")
+    refinement = TotEnclaveRefinement()
+    pipeline_root = Block(
+        name="pipeline",
+        merge="all_messages",
+        nodes=[
+            refinement.stage(
+                "tot_stage",
+                prompt="draft prompt",
+                temperature=0.1,
+                meta={"source": "parent.source", "doc": "Parent doc"},
+                capture_key="final_output",
+            )
+        ],
+    )
+
+    runner = ChatRunner(ai_text=FakeTextAI())
+    runner.run(ctx, pipeline_root)
+
+    hemingway = next(
+        step for step in ctx.steps if step.get("path") == "pipeline/tot_stage/tot_enclave/hemingway"
+    )
+    meta = hemingway.get("meta") or {}
+    assert meta.get("source") == "refinement_enclave.enclave_thread_prompt"
+    assert meta.get("doc") == "ToT enclave thread (Hemingway): critique + edits."
+
+
+def test_tot_refinement_stage_params_propagate_to_enclave_steps(tmp_path):
+    class RecordingTextAI:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+
+        def text_chat(self, messages, **kwargs):
+            self.calls.append(dict(kwargs))
+            return "resp"
+
+    fake_ai = RecordingTextAI()
+    ctx = _make_ctx(tmp_path, "test.tot_params")
+    refinement = TotEnclaveRefinement()
+    pipeline_root = Block(
+        name="pipeline",
+        merge="all_messages",
+        nodes=[
+            refinement.stage(
+                "tot_stage",
+                prompt="draft prompt",
+                temperature=0.1,
+                params={"model": "model-x"},
+                capture_key="final_output",
+            )
+        ],
+    )
+
+    runner = ChatRunner(ai_text=fake_ai)
+    runner.run(ctx, pipeline_root)
+
+    assert fake_ai.calls
+    assert all(call.get("model") == "model-x" for call in fake_ai.calls)
+
+
 def test_recorder_exception_preserves_pipeline_path(tmp_path):
     class FakeTextAI:
         def text_chat(self, messages, **kwargs):

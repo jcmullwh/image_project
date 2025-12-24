@@ -64,7 +64,7 @@ RCLONE_FAILED_RE = re.compile(r"^Rclone upload failed\b(?P<detail>.*)$", re.IGNO
 FILE_WRITE_TO_RE = re.compile(r"^(?P<verb>Saved|Wrote)\s+(?P<what>.+?)\s+to\s+(?P<path>.+)\s*$", re.IGNORECASE)
 OPLOG_STORED_RE = re.compile(r"^Operational log stored at\s+(?P<path>.+)\s*$", re.IGNORECASE)
 
-KV_TOKEN_RE = re.compile(r"(?P<key>[\w.]+)=(?P<value>[^\s,]+)")
+KV_TOKEN_RE = re.compile(r"(?P<key>[\w.]+)=(?P<value>\"[^\"]*\"|'[^']*'|[^\s,]+)")
 
 OPLOG_INIT_RE = re.compile(r"^Operational logging initialized for generation\s+(?P<id>\S+)\s*$", re.IGNORECASE)
 OPLOG_FILE_RE = re.compile(r"^Operational log file:\s*(?P<path>.+)\s*$", re.IGNORECASE)
@@ -117,7 +117,12 @@ def _parse_kv_metrics(text: str) -> Dict[str, Any]:
     for match in KV_TOKEN_RE.finditer(text):
         key = match.group("key")
         raw_value = match.group("value")
-        if re.fullmatch(r"[-+]?\d+", raw_value):
+        if len(raw_value) >= 2 and raw_value[0] == raw_value[-1] and raw_value[0] in {"'", '"'}:
+            try:
+                value = json.loads(raw_value) if raw_value[0] == '"' else ast.literal_eval(raw_value)
+            except Exception:
+                value = raw_value[1:-1]
+        elif re.fullmatch(r"[-+]?\d+", raw_value):
             value: Any = int(raw_value)
         elif re.fullmatch(r"[-+]?\d+\.\d+", raw_value):
             value = float(raw_value)

@@ -72,6 +72,8 @@ class RunMetadata:
     created_at: Optional[str] = None
     selected_concepts: Optional[List[str]] = None
     image_path: Optional[str] = None
+    experiment: Optional[Dict[str, Any]] = None
+    prompt_pipeline: Optional[Dict[str, Any]] = None
     context: Optional[Dict[str, Any]] = None
     title_generation: Optional[Any] = None
     concept_filter_log: Optional[Any] = None

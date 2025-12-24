@@ -43,6 +43,20 @@ def _format_meta_table(report: RunReport) -> str:
         rows.append(("Seed", html.escape(str(meta.seed))))
     if meta.created_at:
         rows.append(("Created at", html.escape(meta.created_at)))
+    if meta.experiment:
+        rows.append(("Experiment", _escape_json(meta.experiment)))
+    if meta.prompt_pipeline:
+        requested = meta.prompt_pipeline.get("requested_plan") if isinstance(meta.prompt_pipeline, dict) else None
+        resolved = meta.prompt_pipeline.get("plan") if isinstance(meta.prompt_pipeline, dict) else None
+        capture = meta.prompt_pipeline.get("capture_stage") if isinstance(meta.prompt_pipeline, dict) else None
+        stages = meta.prompt_pipeline.get("resolved_stages") if isinstance(meta.prompt_pipeline, dict) else None
+        if requested or resolved:
+            rows.append(("Prompt plan", html.escape(f"{requested or 'n/a'} -> {resolved or 'n/a'}")))
+        if isinstance(stages, list) and stages:
+            rows.append(("Resolved stages", html.escape(", ".join(str(s) for s in stages))))
+        if capture:
+            rows.append(("Capture stage", html.escape(str(capture))))
+        rows.append(("Prompt pipeline", _escape_json(meta.prompt_pipeline)))
     if meta.selected_concepts:
         rows.append(("Selected concepts", html.escape(", ".join(meta.selected_concepts))))
     if meta.context:

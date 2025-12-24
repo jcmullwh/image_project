@@ -25,11 +25,12 @@ The tool writes `<generation_id>_run_report.json` and `<generation_id>_run_repor
 - **Oplog formats:** Both `YYYY-mm-dd HH:MM:SS,mmm LEVEL message` and `YYYY-mm-dd HH:MM:SS,mmm | LEVEL | message` headers are supported.
 - **Parsing:** The oplog parser extracts run boundaries, config defaults, seed selection, context injection, step start/end markers, image generation, upscaling, manifest appends, uploads, and file writes. Unrecognized lines are retained under `unknown_events`.
 - **Transcript:** The transcript parser tolerates older schemas and surfaces optional fields like `context`, `title_generation`, and `concept_filter_log` when present.
+- **Experiment + plan metadata:** When present in the transcript, `experiment` and `outputs.prompt_pipeline` are included in both the JSON and HTML reports.
 - **Joining & ordering:** Step ordering is driven by transcript order (when present). Oplog timing is merged onto steps by path and occurrence.
 - **Parser health:** `metadata.oplog_stats` includes coverage stats and detected oplog framing format. When coverage is low or semantic parsing yields no events, `issues[]` includes `oplog_parse_failed` / `oplog_low_coverage`, and the HTML shows a prominent banner.
 - **Issues:** The JSON report includes structured `issues[]` for missing artifacts, unmatched steps, missing start/end markers, empty responses, large contexts, config defaults, concept filter no-ops, and other anomalies.
 - **Side effects:** Image generation, upscaling, manifest, and upload events are surfaced in both HTML and JSON outputs.
-- **Comparison:** `--compare` produces a schema-tolerant diff that highlights added/removed steps, shifts in metadata presence (e.g., `concept_filter_log`), injector messaging changes, and post-processing log format changes (e.g., upscaling).
+- **Comparison:** `--compare` produces a schema-tolerant diff that highlights added/removed steps, shifts in metadata presence (e.g., `concept_filter_log`), experiment label changes, plan/stage metadata changes (requested/resolved plan, resolved stages, capture stage), injector messaging changes, and post-processing log format changes (e.g., upscaling).
 
 ## Files produced
 

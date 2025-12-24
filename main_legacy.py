@@ -55,7 +55,7 @@ def main_legacy() -> None:
     configure_stdio_utf8()
     generation_id = generate_unique_id()
     try:
-        config = load_config()
+        config, _cfg_meta = load_config()
     except Exception:
         fallback_logger, fallback_log_path = setup_operational_logger(os.getcwd(), generation_id)
         fallback_logger.exception(

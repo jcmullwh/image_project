@@ -92,7 +92,7 @@ def main() -> int:
     # Load config defaults if available.
     config = {}
     try:
-        config = load_config()
+        config, _cfg_meta = load_config()
     except Exception:
         config = {}
 

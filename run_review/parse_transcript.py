@@ -18,12 +18,26 @@ def parse_transcript(path: str) -> Tuple[RunMetadata, List[TranscriptStep]]:
         raise TranscriptParseError(f"Invalid JSON transcript: {exc}") from exc
 
     generation_id = payload.get("generation_id") or payload.get("id")
+
+    experiment = payload.get("experiment")
+    if not isinstance(experiment, dict):
+        experiment = None
+
+    prompt_pipeline = None
+    outputs = payload.get("outputs")
+    if isinstance(outputs, dict):
+        candidate = outputs.get("prompt_pipeline")
+        if isinstance(candidate, dict):
+            prompt_pipeline = candidate
+
     metadata = RunMetadata(
         generation_id=generation_id or "unknown",
         seed=payload.get("seed"),
         created_at=payload.get("created_at"),
         selected_concepts=payload.get("selected_concepts"),
         image_path=payload.get("image_path"),
+        experiment=experiment,
+        prompt_pipeline=prompt_pipeline,
         context=payload.get("context"),
         title_generation=payload.get("title_generation"),
         concept_filter_log=payload.get("concept_filter_log"),

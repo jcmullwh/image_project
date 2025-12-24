@@ -1,0 +1,97 @@
+# Full reference configuration for image_project.
+#
+# This file is not used automatically. Recommended workflow:
+# - Keep `config/config.yaml` as the minimal, cross-platform default.
+# - Put machine-specific settings (paths, API keys, rclone remote, etc) in `config/config.local.yaml`.
+#   That file is ignored by git and overlays on top of the base config.
+
+run:
+  mode: full  # full|prompt_only
+
+image:
+  generation_path: "./_artifacts/generated"
+  upscale_path: "./_artifacts/upscaled"
+  log_path: "./_artifacts/logs"
+  caption_font_path: null  # optional .ttf for caption overlay
+
+prompt:
+  categories_path: "./prompt_files/category_list_v1.csv"
+  profile_path: "./prompt_files/user_profile_v4.csv"
+  generations_path: "./_artifacts/logs/generations_v2.csv"
+  titles_manifest_path: "./_artifacts/generated/titles_manifest.csv"
+  random_seed: null
+
+  # Prompt Plans + Stage Modifiers (config-driven experimentation)
+  plan: auto  # auto -> blackbox when scoring.enabled=true; otherwise standard
+  refinement:
+    policy: tot  # tot|none
+  stages:
+    include: []
+    exclude: []
+    sequence: []
+    overrides: {}
+  output:
+    capture_stage: null
+
+  concepts:
+    selection:
+      strategy: random  # random|fixed|file
+      # fixed: ["Baroque", "Portrait", "Moody", "Wide"]
+      # file_path: "./prompt_files/fixed_concepts.txt"
+    filters:
+      enabled: true
+      order: ["dislike_rewrite"]
+      dislike_rewrite:
+        enabled: true
+        temperature: 0.25
+
+  scoring:
+    enabled: true
+    num_ideas: 6
+    exploration_rate: 0.15
+    judge_temperature: 0.0
+    judge_model: null
+    judge_profile_source: raw  # raw|generator_hints
+    final_profile_source: raw  # raw|generator_hints
+    generator_profile_abstraction: true
+    novelty:
+      enabled: true
+      window: 25
+
+context:
+  enabled: true
+  injection_location: system  # system|prompt|both
+  injectors: ["season", "holiday"]
+  holiday:
+    lookahead_days: 14
+    base_probability: 0.15
+    max_probability: 0.55
+  calendar:
+    enabled: false
+
+rclone:
+  enabled: true
+  # Setup guide: docs/rclone-google-photos.md
+  remote: "gphotos_personal"
+  album: "The Day's Art"
+
+upscale:
+  enabled: true
+  target_long_edge_px: 3840
+  target_aspect_ratio: "16:9"
+  engine: realesrgan-ncnn-vulkan
+  # Optional. If omitted, PATH + REALESRGAN_NCNN_VULKAN_PATH are checked.
+  realesrgan_binary: null
+  # Optional. Directory containing the *.param/*.bin model files.
+  model_path: null
+  model_name: realesrgan-x4plus
+  tile_size: 0
+  tta: false
+  allow_fallback_resize: false
+
+experiment:
+  id: null          # string | null
+  variant: null     # string | null
+  notes: null       # string | null
+  tags: []          # list[string]
+

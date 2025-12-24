@@ -3,6 +3,7 @@
 This project models the prompt workflow as a nested execution tree:
 
 - **Step**: one LLM chat call (`ChatStep`).
+- **Action**: a pure-Python execution node (`ActionStep`) for glue logic.
 - **Block**: a named group of nodes (`Block`), where nodes can be steps or other blocks.
 - **Merge**: controls what (if anything) is persisted back to the parent conversation.
 - **Transcript**: always records *every* step that ran (even when `merge="none"`). The transcript is not used as model context.
@@ -45,7 +46,7 @@ You can simulate independent "parallel" threads (without real parallelism) by ru
 
 To keep the model context small while still logging full internal reasoning, wrap each stage in a `merge="last_response"` stage block, and run a refinement sub-block inside it.
 
-Use the stable inner name `draft` for the stage's main step so transcript paths stay readable (e.g. `pipeline/section_2_choice/draft`).
+Use the stable inner name `draft` for the stage's main step so transcript paths stay readable (e.g. `pipeline/standard.section_2_choice/draft`).
 
 ```python
 tot_enclave = Block(
@@ -56,14 +57,14 @@ tot_enclave = Block(
         ChatStep(
             name="thread_1",
             merge="none",
-            capture_key="enclave.section_2_choice.thread_1",
+            capture_key="enclave.standard.section_2_choice.thread_1",
             prompt=...,
             temperature=0.8,
         ),
         ChatStep(
             name="thread_2",
             merge="none",
-            capture_key="enclave.section_2_choice.thread_2",
+            capture_key="enclave.standard.section_2_choice.thread_2",
             prompt=...,
             temperature=0.8,
         ),
@@ -73,7 +74,7 @@ tot_enclave = Block(
 )
 
 stage = Block(
-    name="section_2_choice",
+    name="standard.section_2_choice",
     merge="last_response",
     nodes=[
         ChatStep(name="draft", prompt=..., temperature=0.8),
@@ -110,7 +111,9 @@ pipeline = Block(
 )
 ```
 
-Policies always name the draft step `draft` and wrap the stage block with `merge="last_response"`. Only the final assistant message from each stage is merged into the parent conversation; the transcript still records every internal step.
+Policies always name the draft step `draft` and wrap the stage block with the provided stage merge mode (default `merge="last_response"`). Only the final assistant message from each stage is merged into the parent conversation; the transcript still records every internal step.
+
+Stages can also be marked as internal-only by setting the stage merge mode to `merge="none"` (useful for scoring/judging steps that should not contaminate downstream context).
 
 Flows should only call `refinement.stage(...)`; do not import the ToT/enclave block builder directly. The enclave pipeline construction lives in the refinement module, keeping prompt text helpers (`prompts.py`) focused on strings.
 
@@ -126,13 +129,14 @@ Flows should only call `refinement.stage(...)`; do not import the ToT/enclave bl
   - unnamed blocks: `block_01`, `block_02`, ...
 - Sibling name collisions are errors (no silent disambiguation).
 
-The transcript includes a `path` for every step (e.g. `pipeline/section_2_choice/tot_enclave/consensus`) so repeated sub-blocks remain uniquely identifiable.
+The transcript includes a `path` for every step (e.g. `pipeline/standard.section_2_choice/tot_enclave/consensus`) so repeated sub-blocks remain uniquely identifiable.
 
 ## Step recording
 
 Step telemetry is injected via a `StepRecorder`:
 
 - `DefaultStepRecorder` (production): emits `Step:`/`Received response` logs and appends the per-step dicts to `ctx.steps` (transcript schema unchanged).
+- `DefaultStepRecorder` (production): emits `Step:`/`Received response` logs and appends the per-step dicts to `ctx.steps` (schema is append-only; new optional fields may appear).
 - `NullStepRecorder`: disables logging and transcript appends (useful for benchmarks/tests).
 - Custom recorders must implement `on_step_start`, `on_step_end`, and `on_step_error`; misconfiguration raises at construction time. `on_step_start` receives `path` plus `**metrics` so new fields can be added without breaking callers.
 
@@ -144,4 +148,9 @@ from pipeline import ChatRunner, NullStepRecorder
 runner = ChatRunner(ai_text=fake_ai)  # default recorder
 # runner = ChatRunner(ai_text=fake_ai, recorder=NullStepRecorder())
 ```
+
+Transcript step records include:
+
+- `type`: `chat` or `action`
+- `meta` (optional): metadata such as `stage_id` and a `source` identifier for traceability
 

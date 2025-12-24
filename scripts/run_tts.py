@@ -15,7 +15,7 @@ Here, in this fleeting sanctuary, the writer and the wild find a shared solace, 
 
 file_name = "The Whispering Wilderness"
 
-config = load_config()
+config, _cfg_meta = load_config()
 client = OpenAI(api_key=config['openai']['key'])
 save_location_and_name = generate_file_location(config['image']['save_path'], file_name, '.mp3')
 print(save_location_and_name)

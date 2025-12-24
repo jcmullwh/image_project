@@ -158,3 +158,9 @@ config.yaml
 *.html
 *.json
 .pdm-python
+
+# Local config overlay (machine-specific; do not commit)
+config/config.local.yaml
+
+# Repo-local artifacts (logs, generated images, etc.)
+_artifacts/

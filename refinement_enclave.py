@@ -80,11 +80,13 @@ def enclave_thread_prompt(
     )
 
 
-def make_tot_enclave_block(stage_name: str) -> Block:
+def make_tot_enclave_block(stage_name: str, *, params: dict[str, Any] | None = None) -> Block:
     nodes: list[Any] = []
+    shared_params = dict(params) if params else {}
 
     for artist_key, label, persona in ENCLAVE_ARTISTS:
         capture_key = f"enclave.{stage_name}.{artist_key}"
+        doc = f"ToT enclave thread ({label}): critique + edits."
 
         nodes.append(
             ChatStep(
@@ -102,6 +104,11 @@ def make_tot_enclave_block(stage_name: str) -> Block:
                     ),
                 ),
                 temperature=0.8,
+                params=dict(shared_params),
+                meta={
+                    "source": "refinement_enclave.enclave_thread_prompt",
+                    "doc": doc,
+                },
             )
         )
 
@@ -147,6 +154,7 @@ def make_tot_enclave_block(stage_name: str) -> Block:
         )
 
     for idx in range(1, 4):
+        consensus_doc = f"ToT enclave consensus draft {idx}/3."
         nodes.append(
             ChatStep(
                 name=f"consensus_{idx}",
@@ -156,6 +164,11 @@ def make_tot_enclave_block(stage_name: str) -> Block:
                     ctx, stage_name, f"#{idx}"
                 ),
                 temperature=0.8,
+                params=dict(shared_params),
+                meta={
+                    "source": "refinement_enclave.consensus_prompt",
+                    "doc": consensus_doc,
+                },
             )
         )
 
@@ -164,6 +177,11 @@ def make_tot_enclave_block(stage_name: str) -> Block:
             name="final_consensus",
             prompt=final_consensus_prompt,
             temperature=0.8,
+            params=dict(shared_params),
+            meta={
+                "source": "refinement_enclave.final_consensus_prompt",
+                "doc": "ToT enclave final consensus synthesis.",
+            },
         )
     )
 

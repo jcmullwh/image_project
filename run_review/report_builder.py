@@ -559,13 +559,54 @@ def diff_reports(run_a: RunReport, run_b: RunReport) -> CompareResult:
     added = sorted(paths_b - paths_a)
     removed = sorted(paths_a - paths_b)
 
-    metadata_changes: Dict[str, Dict[str, Optional[str]]] = {}
+    metadata_changes: Dict[str, Dict[str, Any]] = {}
+
+    def record_change(key: str, value_a: Any, value_b: Any) -> None:
+        if value_a != value_b:
+            metadata_changes[key] = {"run_a": value_a, "run_b": value_b}
+
+    # Legacy "presence change" checks.
     interesting_keys = ["context", "title_generation", "concept_filter_log"]
     for key in interesting_keys:
         val_a = getattr(run_a.metadata, key)
         val_b = getattr(run_b.metadata, key)
         if bool(val_a) != bool(val_b):
-            metadata_changes[key] = {"run_a": val_a, "run_b": val_b}
+            record_change(key, val_a, val_b)
+
+    exp_a = run_a.metadata.experiment
+    exp_b = run_b.metadata.experiment
+    if bool(exp_a) != bool(exp_b):
+        record_change("experiment", exp_a, exp_b)
+
+    def exp_field(exp: Any, field: str) -> Any:
+        return exp.get(field) if isinstance(exp, dict) else None
+
+    record_change("experiment.id", exp_field(exp_a, "id"), exp_field(exp_b, "id"))
+    record_change("experiment.variant", exp_field(exp_a, "variant"), exp_field(exp_b, "variant"))
+    record_change("experiment.notes", exp_field(exp_a, "notes"), exp_field(exp_b, "notes"))
+
+    def exp_tags(exp: Any) -> list[str]:
+        tags = exp_field(exp, "tags")
+        if not tags:
+            return []
+        if isinstance(tags, list):
+            return sorted(str(t) for t in tags if str(t).strip())
+        return [str(tags)]
+
+    record_change("experiment.tags", exp_tags(exp_a), exp_tags(exp_b))
+
+    pp_a = run_a.metadata.prompt_pipeline
+    pp_b = run_b.metadata.prompt_pipeline
+    if bool(pp_a) != bool(pp_b):
+        record_change("prompt_pipeline", pp_a, pp_b)
+
+    def pp_field(pp: Any, field: str) -> Any:
+        return pp.get(field) if isinstance(pp, dict) else None
+
+    record_change("prompt_pipeline.requested_plan", pp_field(pp_a, "requested_plan"), pp_field(pp_b, "requested_plan"))
+    record_change("prompt_pipeline.plan", pp_field(pp_a, "plan"), pp_field(pp_b, "plan"))
+    record_change("prompt_pipeline.capture_stage", pp_field(pp_a, "capture_stage"), pp_field(pp_b, "capture_stage"))
+    record_change("prompt_pipeline.resolved_stages", pp_field(pp_a, "resolved_stages"), pp_field(pp_b, "resolved_stages"))
 
     injector_diffs: List[str] = []
 

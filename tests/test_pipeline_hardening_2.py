@@ -110,3 +110,80 @@ def test_logs_contain_full_pipeline_path(tmp_path, caplog):
         runner.run(ctx, root)
 
     assert any("Step: pipeline/inner/s1" in record.getMessage() for record in caplog.records)
+
+
+def test_logs_include_stage_provenance_tokens(tmp_path, caplog):
+    cfg_dict = {
+        "prompt": {
+            "categories_path": str(tmp_path / "categories.csv"),
+            "profile_path": str(tmp_path / "profile.csv"),
+            "generations_path": str(tmp_path / "generations.csv"),
+        },
+        "image": {
+            "generation_path": str(tmp_path / "generated"),
+            "upscale_path": str(tmp_path / "upscaled"),
+            "log_path": str(tmp_path / "logs"),
+        },
+        "rclone": {"enabled": False},
+        "upscale": {"enabled": False},
+    }
+    cfg, _warnings = RunConfig.from_dict(cfg_dict)
+
+    logger = logging.getLogger("test.logs.provenance")
+    logger.handlers.clear()
+    logger.setLevel(logging.INFO)
+    logger.propagate = True
+
+    ctx = RunContext(
+        generation_id="gen",
+        cfg=cfg,
+        logger=logger,
+        rng=random.Random(0),
+        seed=0,
+        created_at="2025-01-01T00:00:00Z",
+        messages=MessageHandler("system"),
+    )
+
+    class FakeTextAI:
+        def text_chat(self, messages, **kwargs):
+            return "resp"
+
+    runner = ChatRunner(ai_text=FakeTextAI())
+    root = Block(
+        name="pipeline",
+        merge="all_messages",
+        nodes=[
+            Block(
+                name="inner",
+                merge="all_messages",
+                nodes=[
+                    ChatStep(
+                        name="s1",
+                        prompt="p1",
+                        temperature=0.0,
+                        meta={"source": "test.source", "doc": "Test doc"},
+                    )
+                ],
+            )
+        ],
+    )
+
+    with caplog.at_level(logging.INFO):
+        runner.run(ctx, root)
+
+    start_line = next(
+        record.getMessage()
+        for record in caplog.records
+        if record.getMessage().startswith("Step: pipeline/inner/s1")
+    )
+    assert "stage_id=inner" in start_line
+    assert "source=test.source" in start_line
+    assert 'doc="Test doc"' in start_line
+
+    end_line = next(
+        record.getMessage()
+        for record in caplog.records
+        if record.getMessage().startswith("Received response for pipeline/inner/s1")
+    )
+    assert "stage_id=inner" in end_line
+    assert "source=test.source" in end_line

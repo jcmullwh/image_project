@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
-from pipeline import Block, ChatStep, RunContext
+from pipeline import Block, ChatStep, MergeMode, RunContext
 
 
 class RefinementPolicy:
@@ -12,9 +12,11 @@ class RefinementPolicy:
         *,
         prompt: str | Callable[[RunContext], str],
         temperature: float,
+        merge: MergeMode = "last_response",
         allow_empty_prompt: bool = False,
         allow_empty_response: bool = False,
         params: dict[str, Any] | None = None,
+        meta: dict[str, Any] | None = None,
         capture_key: str | None = None,
     ) -> Block:
         raise NotImplementedError
@@ -51,14 +53,17 @@ class NoRefinement(RefinementPolicy):
         *,
         prompt: str | Callable[[RunContext], str],
         temperature: float,
+        merge: MergeMode = "last_response",
         allow_empty_prompt: bool = False,
         allow_empty_response: bool = False,
         params: dict[str, Any] | None = None,
+        meta: dict[str, Any] | None = None,
         capture_key: str | None = None,
     ) -> Block:
         stage_name = self._validated_stage_name(stage_name)
         prompt = self._validated_prompt(prompt)
         params = self._validated_params(params)
+        stage_meta = dict(meta) if meta else {}
 
         draft_step = ChatStep(
             name="draft",
@@ -70,9 +75,10 @@ class NoRefinement(RefinementPolicy):
         )
         return Block(
             name=stage_name,
-            merge="last_response",
+            merge=merge,
             nodes=[draft_step],
             capture_key=capture_key,
+            meta=stage_meta,
         )
 
 
@@ -83,14 +89,17 @@ class TotEnclaveRefinement(RefinementPolicy):
         *,
         prompt: str | Callable[[RunContext], str],
         temperature: float,
+        merge: MergeMode = "last_response",
         allow_empty_prompt: bool = False,
         allow_empty_response: bool = False,
         params: dict[str, Any] | None = None,
+        meta: dict[str, Any] | None = None,
         capture_key: str | None = None,
     ) -> Block:
         stage_name = self._validated_stage_name(stage_name)
         prompt = self._validated_prompt(prompt)
         params = self._validated_params(params)
+        stage_meta = dict(meta) if meta else {}
 
         # Local import to avoid circular dependency.
         from refinement_enclave import make_tot_enclave_block
@@ -103,10 +112,11 @@ class TotEnclaveRefinement(RefinementPolicy):
             allow_empty_response=allow_empty_response,
             params=params,
         )
-        enclave_block = make_tot_enclave_block(stage_name)
+        enclave_block = make_tot_enclave_block(stage_name, params=params)
         return Block(
             name=stage_name,
-            merge="last_response",
+            merge=merge,
             nodes=[draft_step, enclave_block],
             capture_key=capture_key,
+            meta=stage_meta,
         )

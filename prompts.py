@@ -268,6 +268,31 @@ This time, provide only the final prompt to the AI. Do not include anything exce
     return seventh_prompt
 
 
+def refine_image_prompt_prompt(draft: str) -> str:
+    draft_text = (draft or "").strip()
+    if not draft_text:
+        raise ValueError("Draft image prompt cannot be empty")
+
+    return textwrap.dedent(
+        f"""\
+        Refine the following draft into a high-quality GPT Image 1.5 prompt.
+
+        Goals:
+        - Preserve the original intent and key details.
+        - Remove contradictions, redundancies, and vague phrasing.
+        - Make the prompt concrete and visually grounded.
+        - Keep it under 3500 characters.
+
+        Output rules:
+        - Output ONLY the final image prompt (no analysis, no commentary).
+        - Use short labeled sections with line breaks (omit sections that don't apply).
+
+        Draft:
+        {draft_text}
+        """
+    ).strip()
+
+
 def profile_abstraction_prompt(*, preferences_guidance: str) -> str:
     guidance = (preferences_guidance or "").strip()
     return textwrap.dedent(
