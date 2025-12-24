@@ -9,9 +9,9 @@ import pandas as pd
 import pytest
 from PIL import Image
 
-import blackbox_scoring
-import main
-import prompts
+from image_project.app import generate as app_generate
+from image_project.framework import scoring as blackbox_scoring
+from image_project.impl.current import prompting as prompts
 
 
 def test_parse_idea_cards_json_valid():
@@ -270,8 +270,8 @@ def test_integration_scoring_enabled_isolated_from_downstream(tmp_path, monkeypa
     generation_id = "unit_test_scoring"
 
     fake_text = FakeTextAI()
-    monkeypatch.setattr(main, "TextAI", lambda *args, **kwargs: fake_text)
-    monkeypatch.setattr(main, "ImageAI", FakeImageAI)
+    monkeypatch.setattr(app_generate, "TextAI", lambda *args, **kwargs: fake_text)
+    monkeypatch.setattr(app_generate, "ImageAI", FakeImageAI)
     monkeypatch.setattr(prompts, "profile_abstraction_prompt", fake_profile_abstraction_prompt)
     monkeypatch.setattr(prompts, "idea_cards_generate_prompt", fake_idea_cards_generate_prompt)
     monkeypatch.setattr(prompts, "idea_cards_judge_prompt", fake_idea_cards_judge_prompt)
@@ -281,14 +281,14 @@ def test_integration_scoring_enabled_isolated_from_downstream(tmp_path, monkeypa
         fake_final_prompt_from_selected_idea_prompt,
     )
     monkeypatch.setattr(
-        main,
+        app_generate,
         "generate_title",
         lambda **_kwargs: types.SimpleNamespace(
             title="Test Title", title_source="test", title_raw="Test Title"
         ),
     )
 
-    main.run_generation(cfg_dict, generation_id=generation_id)
+    app_generate.run_generation(cfg_dict, generation_id=generation_id)
 
     transcript_path = log_dir / f"{generation_id}_transcript.json"
     assert transcript_path.exists()

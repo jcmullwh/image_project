@@ -5,11 +5,13 @@ import random
 import pandas as pd
 import pytest
 
-import main
-from message_handling import MessageHandler
-from pipeline import ChatRunner, RunContext
-from prompt_plans import PlanInputs, PromptPlanManager, resolve_stage_specs
-from run_config import RunConfig
+from image_project.app import generate as app_generate
+from image_project.foundation.messages import MessageHandler
+from image_project.foundation.pipeline import ChatRunner
+from image_project.framework.config import RunConfig
+from image_project.framework.prompting import PlanInputs, resolve_stage_specs
+from image_project.framework.runtime import RunContext
+from image_project.impl.current.plans import PromptPlanManager
 
 
 def _base_cfg_dict(tmp_path) -> dict:
@@ -76,7 +78,7 @@ def test_unknown_plan_fails_fast(tmp_path, monkeypatch):
     cfg_dict["prompt"]["plan"] = "does_not_exist"
 
     # Avoid importing a real backend in tests.
-    monkeypatch.setattr(main, "TextAI", FakeTextAI)
+    monkeypatch.setattr(app_generate, "TextAI", FakeTextAI)
 
     # Minimal CSV inputs (dislikes are empty so no concept rewrite call is attempted).
     pd.DataFrame(
@@ -94,7 +96,7 @@ def test_unknown_plan_fails_fast(tmp_path, monkeypatch):
     pd.DataFrame({"Likes": ["x"], "Dislikes": [None]}).to_csv(cfg_dict["prompt"]["profile_path"], index=False)
 
     with pytest.raises(ValueError, match="Unknown prompt plan: does_not_exist"):
-        main.run_generation(cfg_dict, generation_id="unit_test_unknown_plan")
+        app_generate.run_generation(cfg_dict, generation_id="unit_test_unknown_plan")
 
 
 def test_unknown_stage_id_in_include_fails_fast(tmp_path):

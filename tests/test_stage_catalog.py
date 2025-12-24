@@ -4,12 +4,13 @@ import random
 import pandas as pd
 import pytest
 
-import prompts
-from message_handling import MessageHandler
-from pipeline import RunContext
-from prompt_plans import PlanInputs, StageSpec, StandardPromptPlan
-from run_config import RunConfig
-from stage_catalog import StageCatalog
+from image_project.foundation.messages import MessageHandler
+from image_project.framework.config import RunConfig
+from image_project.framework.prompting import PlanInputs, StageSpec
+from image_project.framework.runtime import RunContext
+from image_project.impl.current import prompting as prompts
+from image_project.impl.current.plans import StandardPromptPlan
+from image_project.impl.current.prompting import StageCatalog
 
 
 def _base_cfg_dict(tmp_path) -> dict:

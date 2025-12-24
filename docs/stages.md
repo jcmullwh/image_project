@@ -1,11 +1,11 @@
 # Prompt Stage Catalog
 
-`stage_catalog.py` is the single source of truth for prompt-stage wiring (prompt builder, temperature, merge/capture behavior, default refinement policy, and provenance metadata).
+`image_project/impl/current/prompting.py` is the single source of truth for prompt-stage wiring (prompt builder, temperature, merge/capture behavior, default refinement policy, and provenance metadata).
 
 To print the live catalog from code:
 
 ```bash
-.\.venv\Scripts\python scripts/list_prompt_catalog.py stages
+python -m image_project list-stages
 ```
 
 ## Stages

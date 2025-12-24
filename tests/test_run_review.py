@@ -5,11 +5,17 @@ from pathlib import Path
 
 import pytest
 
-from run_review.cli import main as cli_main
-from run_review.parse_oplog import parse_oplog
-from run_review.report_builder import build_report, diff_reports, report_to_dict
-from run_review.render_html import render_html
-from run_review.report_model import RunInputs, RunMetadata, RunReport, SideEffect, StepReport
+from image_project.run_review.cli import main as cli_main
+from image_project.run_review.parse_oplog import parse_oplog
+from image_project.run_review.report_builder import build_report, diff_reports, report_to_dict
+from image_project.run_review.render_html import render_html
+from image_project.run_review.report_model import (
+    RunInputs,
+    RunMetadata,
+    RunReport,
+    SideEffect,
+    StepReport,
+)
 
 
 def _write_file(path: Path, content: str):
@@ -570,9 +576,9 @@ from pathlib import Path
 
 import pytest
 
-from run_review.cli import main as cli_main
-from run_review.report_builder import build_report, diff_reports, report_to_dict
-from run_review.report_model import RunInputs
+from image_project.run_review.cli import main as cli_main
+from image_project.run_review.report_builder import build_report, diff_reports, report_to_dict
+from image_project.run_review.report_model import RunInputs
 
 
 def _write_file(path: Path, content: str):

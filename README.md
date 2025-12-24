@@ -23,16 +23,14 @@ See `docs/pipeline.md` for the execution model, merge modes, and the ToT/enclave
 The prompt pipeline is selected by `prompt.plan` and then modified by stage selectors/overrides (include/exclude/temperature/refinement/capture stage). This enables quick experiments without editing orchestration code.
 
 - Docs + examples: `docs/experiments.md`
-- Built-in plans live in `prompt_plans.py`.
-- Stage wiring (prompt builders + metadata) lives in `stage_catalog.py`. See `docs/stages.md`.
-- New plans can be added by dropping a module under `plan_plugins/` that registers a plan (no changes to `main.run_generation()` required).
+- Built-in plans live in `image_project/impl/current/plans.py`.
+- Stage wiring + prompt builders live in `image_project/impl/current/prompting.py`. See `docs/stages.md`.
+- New plans can be added by dropping a module under `image_project/impl/current/plan_plugins/` (no changes to `image_project/app/generate.py` required).
 
 Discoverability helpers:
 
-- List stages: `.\.venv\Scripts\python scripts/list_prompt_catalog.py stages`
-- List plans: `.\.venv\Scripts\python scripts/list_prompt_catalog.py plans`
-- List stages (pdm): `pdm run list-stages`
-- List plans (pdm): `pdm run list-plans`
+- List stages: `python -m image_project list-stages` (or `pdm run list-stages`)
+- List plans: `python -m image_project list-plans` (or `pdm run list-plans`)
 
 ### Hardening behavior (fail-fast + reliable artifacts)
 
@@ -45,8 +43,9 @@ Discoverability helpers:
 
 ### Legacy code
 
-- `main.py` contains the canonical implementation (`run_generation()`).
-- `main_legacy.py` and `legacy_main.py` contain older experimental orchestration/helpers kept for reference.
+- Canonical entrypoint: `python -m image_project generate`.
+- Canonical orchestration: `image_project/app/generate.py` (`run_generation()`).
+- Root `main.py` is a deprecated compatibility shim; older experiments are under `legacy/`.
 
 ## Configuration
 

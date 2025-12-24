@@ -151,16 +151,11 @@ cython_debug/
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
 
-prompt_files/
-config.yaml
-*.csv
-.pdm-python
-*.html
-*.json
-.pdm-python
-
 # Local config overlay (machine-specific; do not commit)
 config/config.local.yaml
 
 # Repo-local artifacts (logs, generated images, etc.)
 _artifacts/
+
+# Private/local implementation data (do not commit)
+image_project/impl/**/data/local/

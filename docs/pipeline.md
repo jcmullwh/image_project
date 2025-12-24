@@ -96,7 +96,7 @@ Result:
 Stage wrapping is handled by a `RefinementPolicy`. Pick a policy when building the stage list:
 
 ```python
-from refinement import NoRefinement, TotEnclaveRefinement
+from image_project.framework.refinement import NoRefinement, TotEnclaveRefinement
 
 refinement = TotEnclaveRefinement()  # default Tree-of-Thought enclave
 # refinement = NoRefinement()        # draft-only, merge last response
@@ -115,7 +115,7 @@ Policies always name the draft step `draft` and wrap the stage block with the pr
 
 Stages can also be marked as internal-only by setting the stage merge mode to `merge="none"` (useful for scoring/judging steps that should not contaminate downstream context).
 
-Flows should only call `refinement.stage(...)`; do not import the ToT/enclave block builder directly. The enclave pipeline construction lives in the refinement module, keeping prompt text helpers (`prompts.py`) focused on strings.
+Flows should only call `refinement.stage(...)`; do not import the ToT/enclave block builder directly. The enclave pipeline construction lives in the refinement module; the current implementation's stage + prompt content lives in `image_project/impl/current/prompting.py`.
 
 ## Step Parameters
 
@@ -143,7 +143,7 @@ Step telemetry is injected via a `StepRecorder`:
 Provide a recorder when constructing `ChatRunner`:
 
 ```python
-from pipeline import ChatRunner, NullStepRecorder
+from image_project.foundation.pipeline import ChatRunner, NullStepRecorder
 
 runner = ChatRunner(ai_text=fake_ai)  # default recorder
 # runner = ChatRunner(ai_text=fake_ai, recorder=NullStepRecorder())

@@ -2,10 +2,10 @@ import json
 import logging
 import random
 
-from message_handling import MessageHandler
-from pipeline import RunContext
-from run_config import RunConfig
-from transcript import write_transcript
+from image_project.foundation.messages import MessageHandler
+from image_project.framework.config import RunConfig
+from image_project.framework.runtime import RunContext
+from image_project.framework.transcript import write_transcript
 
 
 def test_write_transcript_includes_experiment_metadata(tmp_path):
@@ -46,4 +46,3 @@ def test_write_transcript_includes_experiment_metadata(tmp_path):
     assert payload["experiment"]["id"] == "exp_unit"
     assert payload["experiment"]["variant"] == "A"
     assert payload["experiment"]["tags"] == ["tag1"]
-

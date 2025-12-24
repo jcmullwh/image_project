@@ -4,17 +4,12 @@ import random
 
 import pytest
 
-from message_handling import MessageHandler
-from pipeline import (
-    Block,
-    ChatRunner,
-    ChatStep,
-    RunContext,
-    NullStepRecorder,
-)
-from refinement import NoRefinement, TotEnclaveRefinement
-from run_config import RunConfig
-from transcript import write_transcript
+from image_project.foundation.messages import MessageHandler
+from image_project.foundation.pipeline import Block, ChatRunner, ChatStep, NullStepRecorder
+from image_project.framework.config import RunConfig
+from image_project.framework.refinement import NoRefinement, TotEnclaveRefinement
+from image_project.framework.runtime import RunContext
+from image_project.framework.transcript import write_transcript
 
 
 def _make_ctx(tmp_path, logger_name: str = "test.step_recorder") -> RunContext:
@@ -132,8 +127,8 @@ def test_custom_recorder_receives_paths_and_metrics(tmp_path):
 
 
 def test_api_surface_exports_expected_symbols():
-    import pipeline  # noqa: PLC0415
-    import refinement  # noqa: PLC0415
+    from image_project.foundation import pipeline  # noqa: PLC0415
+    from image_project.framework import refinement  # noqa: PLC0415
 
     assert hasattr(pipeline, "ChatRunner")
     assert hasattr(pipeline, "NullStepRecorder")

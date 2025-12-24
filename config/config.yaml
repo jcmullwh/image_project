@@ -1,0 +1,40 @@
+run:
+  mode: prompt_only  # full|prompt_only
+
+# Prompt-only mode needs only a logs directory; image output paths are optional.
+image:
+  log_path: "./_artifacts/logs"
+  # generation_path: "./_artifacts/generated"  # required for run.mode=full
+  # upscale_path: "./_artifacts/upscaled"      # required when upscale.enabled=true
+
+prompt:
+  categories_path: "./image_project/impl/current/data/sample/category_list_v1.csv"
+  profile_path: "./image_project/impl/current/data/sample/user_profile_v4.csv"
+  # generations_path: "./_artifacts/logs/generations_v2.csv"  # required for run.mode=full
+
+  # Prompt Plans + Stage Modifiers (config-driven experimentation)
+  # See docs/experiments.md for examples and available plans (including plan_plugins/*).
+  plan: auto  # auto -> blackbox when scoring.enabled=true; otherwise standard
+  refinement:
+    policy: none  # tot|none
+  stages:
+    include: []
+    exclude: []
+    overrides: {}
+  output:
+    capture_stage: null
+  scoring:
+    enabled: false
+
+# Optional: label runs for lightweight A/B testing and discovery.
+experiment:
+  id: null          # string | null
+  variant: null     # string | null
+  notes: null       # string | null
+  tags: []          # list[string]
+
+rclone:
+  enabled: false
+
+upscale:
+  enabled: false

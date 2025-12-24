@@ -1,8 +1,8 @@
 # Prompt Plans + Stage Modifiers
 
-The prompt pipeline is selected via `prompt.plan` and then modified via a single, explicit set of stage selectors/overrides. This enables fast experimentation (baseline, blackbox, refine-only, no-ToT, partial stage runs) without editing `main.run_generation()`.
+The prompt pipeline is selected via `prompt.plan` and then modified via a single, explicit set of stage selectors/overrides. This enables fast experimentation (baseline, blackbox, refine-only, no-ToT, partial stage runs) without editing `image_project/app/generate.py`.
 
-Stage wiring (prompt builder, temperatures, merge/capture behavior, default refinement policy, provenance) is defined once in `stage_catalog.py`.
+Stage wiring (prompt builder, temperatures, merge/capture behavior, default refinement policy, provenance) is defined once in `image_project/impl/current/prompting.py`.
 
 ## Run Mode (Prompt-Only)
 
@@ -63,7 +63,7 @@ Set `prompt.refinement.policy`:
 
 ## Stage Modifiers
 
-Stage ids are stable strings defined in the Stage Catalog (`stage_catalog.py`). Canonical ids are namespaced (e.g. `standard.initial_prompt`, `blackbox.idea_cards_generate`).
+Stage ids are stable strings defined in the Stage Catalog (`image_project/impl/current/prompting.py`). Canonical ids are namespaced (e.g. `standard.initial_prompt`, `blackbox.idea_cards_generate`).
 
 For convenience, `prompt.stages.include/exclude/overrides` and `prompt.output.capture_stage` also accept an unambiguous suffix (e.g. `initial_prompt` will resolve to `standard.initial_prompt` when running the standard plan). If a suffix is ambiguous, resolution fails fast.
 
@@ -166,8 +166,8 @@ Operational logs include the same provenance fields on each step start/end line.
 Discoverability helpers:
 
 ```bash
-.\.venv\Scripts\python scripts/list_prompt_catalog.py stages
-.\.venv\Scripts\python scripts/list_prompt_catalog.py plans
+python -m image_project list-stages
+python -m image_project list-plans
 pdm run list-stages
 pdm run list-plans
 ```
@@ -224,7 +224,7 @@ prompt:
 Run twice with different configs (or config overrides) and compare with:
 
 ```bash
-python -m run_review.cli --compare <runA> <runB> --logs-dir <log_dir>
+python -m image_project run-review --compare <runA> <runB> --logs-dir <log_dir>
 ```
 
 Refine-only

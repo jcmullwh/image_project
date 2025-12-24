@@ -3,10 +3,11 @@ import random
 
 import pytest
 
-from message_handling import MessageHandler
-from pipeline import ActionStep, Block, ChatRunner, RunContext
-from prompt_plans import ResolvedStages, StageSpec, build_pipeline_block
-from run_config import RunConfig
+from image_project.foundation.messages import MessageHandler
+from image_project.foundation.pipeline import ActionStep, Block, ChatRunner
+from image_project.framework.config import RunConfig
+from image_project.framework.prompting import ResolvedStages, StageSpec, build_pipeline_block
+from image_project.framework.runtime import RunContext
 
 
 def _make_ctx(tmp_path) -> RunContext:
@@ -132,4 +133,3 @@ def test_capture_stage_output_key_conflict_fails_fast(tmp_path):
 
     with pytest.raises(ValueError, match="Capture stage output_key conflict"):
         build_pipeline_block(resolved, refinement_policy="none", capture_key="image_prompt")
-

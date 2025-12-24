@@ -1,6 +1,6 @@
 import pytest
 
-from run_config import RunConfig
+from image_project.framework.config import RunConfig
 
 
 def test_prompt_only_allows_omitting_media_paths(tmp_path):
@@ -86,4 +86,3 @@ def test_upscale_enabled_requires_image_upscale_path(tmp_path):
     msg = str(excinfo.value)
     assert "image.upscale_path" in msg
     assert "upscale.enabled" in msg
-

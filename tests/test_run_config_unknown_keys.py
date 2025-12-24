@@ -1,6 +1,6 @@
 import pytest
 
-from run_config import RunConfig
+from image_project.framework.config import RunConfig
 
 
 def _base_cfg_dict(tmp_path) -> dict:
@@ -43,4 +43,3 @@ def test_unknown_config_keys_strict_mode_raises(tmp_path):
 
     with pytest.raises(ValueError, match=r"Unknown config keys: prompt\.unknown_prompt_key"):
         RunConfig.from_dict(cfg_dict)
-

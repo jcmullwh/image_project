@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
-from titles import (
+from image_project.framework.artifacts import (
     TITLE_SOURCE_FALLBACK,
     append_manifest_row,
     generate_title,
@@ -13,7 +13,7 @@ from titles import (
     sanitize_title,
     validate_title,
 )
-from utils import save_image
+from image_project.framework.media import save_image
 
 
 class _FakeTextAI:

@@ -5,12 +5,12 @@
 ## Usage
 
 ```bash
-python -m run_review.cli --generation-id <id> [--logs-dir <artifact_dir>]
-python -m run_review.cli --most-recent
-python -m run_review.cli  # defaults to --most-recent (prints what it's doing)
-python -m run_review.cli --oplog /path/to/oplog.log --transcript /path/to/transcript.json [--generation-id <id>]
-python -m run_review.cli --best-effort --generation-id <id> --logs-dir <artifact_dir>
-python -m run_review.cli --compare <runA> <runB> --logs-dir <artifact_dir>
+python -m image_project run-review --generation-id <id> [--logs-dir <artifact_dir>]
+python -m image_project run-review --most-recent
+python -m image_project run-review  # defaults to --most-recent (prints what it's doing)
+python -m image_project run-review --oplog /path/to/oplog.log --transcript /path/to/transcript.json [--generation-id <id>]
+python -m image_project run-review --best-effort --generation-id <id> --logs-dir <artifact_dir>
+python -m image_project run-review --compare <runA> <runB> --logs-dir <artifact_dir>
 ```
 
 When `--logs-dir` (and `--images-dir`) are omitted, the tool loads the pipeline config (`config/config.yaml` by default) and uses `image.log_path` (and `image.generation_path` / `image.upscale_path`) as defaults, printing the config path it used.

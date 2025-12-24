@@ -6,7 +6,7 @@ import types
 import pandas as pd
 from PIL import Image
 
-import main
+from image_project.app import generate as app_generate
 
 
 def _write_minimal_categories(path) -> None:
@@ -78,10 +78,10 @@ def _base_cfg_dict(tmp_path) -> dict:
 
 
 def _patch_common(monkeypatch):
-    monkeypatch.setattr(main, "TextAI", FakeTextAI)
-    monkeypatch.setattr(main, "ImageAI", FakeImageAI)
+    monkeypatch.setattr(app_generate, "TextAI", FakeTextAI)
+    monkeypatch.setattr(app_generate, "ImageAI", FakeImageAI)
     monkeypatch.setattr(
-        main,
+        app_generate,
         "generate_title",
         lambda **_kwargs: types.SimpleNamespace(
             title="Test Title", title_source="test", title_raw="Test Title"
@@ -96,7 +96,7 @@ def test_simple_plan_runs_two_stages(tmp_path, monkeypatch):
     _patch_common(monkeypatch)
 
     generation_id = "unit_test_simple_plan"
-    main.run_generation(cfg_dict, generation_id=generation_id)
+    app_generate.run_generation(cfg_dict, generation_id=generation_id)
 
     transcript_path = tmp_path / "logs" / f"{generation_id}_transcript.json"
     assert transcript_path.exists()
@@ -123,7 +123,7 @@ def test_simple_no_concepts_plan_skips_preprompt(tmp_path, monkeypatch):
     _patch_common(monkeypatch)
 
     generation_id = "unit_test_simple_no_concepts_plan"
-    main.run_generation(cfg_dict, generation_id=generation_id)
+    app_generate.run_generation(cfg_dict, generation_id=generation_id)
 
     transcript_path = tmp_path / "logs" / f"{generation_id}_transcript.json"
     assert transcript_path.exists()
@@ -151,7 +151,7 @@ def test_profile_only_forces_context_injection_off(tmp_path, monkeypatch):
     _patch_common(monkeypatch)
 
     generation_id = "unit_test_profile_only_plan"
-    main.run_generation(cfg_dict, generation_id=generation_id)
+    app_generate.run_generation(cfg_dict, generation_id=generation_id)
 
     transcript_path = tmp_path / "logs" / f"{generation_id}_transcript.json"
     assert transcript_path.exists()
@@ -171,7 +171,7 @@ def test_standard_honors_context_injection_when_enabled(tmp_path, monkeypatch):
     _patch_common(monkeypatch)
 
     generation_id = "unit_test_standard_context_enabled"
-    main.run_generation(cfg_dict, generation_id=generation_id)
+    app_generate.run_generation(cfg_dict, generation_id=generation_id)
 
     transcript_path = tmp_path / "logs" / f"{generation_id}_transcript.json"
     assert transcript_path.exists()

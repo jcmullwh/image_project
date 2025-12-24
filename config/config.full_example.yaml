@@ -15,8 +15,8 @@ image:
   caption_font_path: null  # optional .ttf for caption overlay
 
 prompt:
-  categories_path: "./prompt_files/category_list_v1.csv"
-  profile_path: "./prompt_files/user_profile_v4.csv"
+  categories_path: "./image_project/impl/current/data/sample/category_list_v1.csv"
+  profile_path: "./image_project/impl/current/data/sample/user_profile_v4.csv"
   generations_path: "./_artifacts/logs/generations_v2.csv"
   titles_manifest_path: "./_artifacts/generated/titles_manifest.csv"
   random_seed: null
@@ -37,7 +37,7 @@ prompt:
     selection:
       strategy: random  # random|fixed|file
       # fixed: ["Baroque", "Portrait", "Moody", "Wide"]
-      # file_path: "./prompt_files/fixed_concepts.txt"
+      # file_path: "./image_project/impl/current/data/local/fixed_concepts.txt"
     filters:
       enabled: true
       order: ["dislike_rewrite"]
@@ -94,4 +94,3 @@ experiment:
   variant: null     # string | null
   notes: null       # string | null
   tags: []          # list[string]
-

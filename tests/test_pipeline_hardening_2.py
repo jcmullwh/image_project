@@ -5,10 +5,11 @@ import random
 import pytest
 from PIL import Image
 
-from message_handling import MessageHandler
-from pipeline import Block, ChatRunner, ChatStep, RunContext
-from run_config import RunConfig, parse_bool
-from utils import save_image
+from image_project.foundation.messages import MessageHandler
+from image_project.foundation.pipeline import Block, ChatRunner, ChatStep
+from image_project.framework.config import RunConfig, parse_bool
+from image_project.framework.media import save_image
+from image_project.framework.runtime import RunContext
 
 
 def test_parse_bool_accepts_valid_values():

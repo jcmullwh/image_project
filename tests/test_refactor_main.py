@@ -11,13 +11,14 @@ import pandas as pd
 import pytest
 from PIL import Image
 
-import main
-import prompts
-from message_handling import MessageHandler
-from pipeline import ChatRunner, ChatStep, RunContext
-from records import append_generation_row
-from run_config import RunConfig
-from transcript import write_transcript
+from image_project.app import generate as app_generate
+from image_project.impl.current import prompting as prompts
+from image_project.foundation.messages import MessageHandler
+from image_project.foundation.pipeline import ChatRunner, ChatStep
+from image_project.framework.artifacts import append_generation_row
+from image_project.framework.config import RunConfig
+from image_project.framework.runtime import RunContext
+from image_project.framework.transcript import write_transcript
 
 
 def test_config_validation_missing_prompt_categories_path_raises():
@@ -618,18 +619,18 @@ def test_integration_offline_run_generation_writes_artifacts(tmp_path, monkeypat
 
     generation_id = "unit_test_generation"
 
-    monkeypatch.setattr(main, "TextAI", FakeTextAI)
-    monkeypatch.setattr(main, "ImageAI", FakeImageAI)
+    monkeypatch.setattr(app_generate, "TextAI", FakeTextAI)
+    monkeypatch.setattr(app_generate, "ImageAI", FakeImageAI)
     monkeypatch.setattr(prompts, "generate_image_prompt", lambda: image_prompt_request)
     monkeypatch.setattr(
-        main,
+        app_generate,
         "generate_title",
         lambda **_kwargs: types.SimpleNamespace(
             title="Test Title", title_source="test", title_raw="Test Title"
         ),
     )
 
-    main.run_generation(cfg_dict, generation_id=generation_id)
+    app_generate.run_generation(cfg_dict, generation_id=generation_id)
 
     image_path = generation_dir / f"{generation_id}_image.jpg"
     transcript_path = log_dir / f"{generation_id}_transcript.json"
@@ -715,11 +716,11 @@ def test_integration_prompt_only_mode_skips_media_pipeline(tmp_path, monkeypatch
 
     generation_id = "unit_test_prompt_only"
 
-    monkeypatch.setattr(main, "TextAI", FakeTextAI)
-    monkeypatch.setattr(main, "ImageAI", BoomImageAI)
+    monkeypatch.setattr(app_generate, "TextAI", FakeTextAI)
+    monkeypatch.setattr(app_generate, "ImageAI", BoomImageAI)
     monkeypatch.setattr(prompts, "generate_image_prompt", lambda: image_prompt_request)
 
-    main.run_generation(cfg_dict, generation_id=generation_id)
+    app_generate.run_generation(cfg_dict, generation_id=generation_id)
 
     image_path = generation_dir / f"{generation_id}_image.jpg"
     transcript_path = log_dir / f"{generation_id}_transcript.json"
@@ -802,11 +803,11 @@ def test_transcript_written_on_pipeline_failure(tmp_path, monkeypatch):
 
     generation_id = "unit_test_failure"
 
-    monkeypatch.setattr(main, "TextAI", FakeTextAI)
+    monkeypatch.setattr(app_generate, "TextAI", FakeTextAI)
     monkeypatch.setattr(prompts, "generate_second_prompt", lambda: fail_sentinel)
 
     with pytest.raises(RuntimeError, match="boom"):
-        main.run_generation(cfg_dict, generation_id=generation_id)
+        app_generate.run_generation(cfg_dict, generation_id=generation_id)
 
     transcript_path = log_dir / f"{generation_id}_transcript.json"
     assert transcript_path.exists()

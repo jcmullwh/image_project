@@ -2,7 +2,7 @@ import os
 
 import pytest
 
-from utils import load_config
+from image_project.foundation.config_io import load_config
 
 
 def test_load_config_base_only(tmp_path, monkeypatch):
@@ -90,4 +90,3 @@ def test_load_config_env_override_loads_single_file(tmp_path, monkeypatch):
     assert cfg == {"a": 999}
     assert meta["mode"] == "env"
     assert meta["paths"] == [os.path.abspath(str(env_path))]
-
