@@ -10,6 +10,7 @@ import pytest
 from PIL import Image
 
 from image_project.app import generate as app_generate
+from image_project.framework.config import PromptNoveltyConfig
 from image_project.framework import scoring as blackbox_scoring
 from image_project.impl.current import prompting as prompts
 
@@ -129,49 +130,130 @@ def test_extract_recent_motif_summary(tmp_path):
         writer.writerow({"generation_id": "g3", "final_image_prompt": "A calm sunrise (not sunset) scene"})
 
     summary = blackbox_scoring.extract_recent_motif_summary(
-        generations_csv_path=str(csv_path), window=25
+        generations_csv_path=str(csv_path),
+        novelty_cfg=PromptNoveltyConfig(enabled=True, window=25),
     )
     tokens = {item["token"] for item in summary["top_tokens"]}
     assert "sunset" in tokens
 
 
+def test_extract_recent_motif_summary_df_uses_document_frequency(tmp_path):
+    csv_path = tmp_path / "generations.csv"
+    with open(csv_path, "w", encoding="utf-8", newline="") as file:
+        writer = csv.DictWriter(file, fieldnames=["generation_id", "final_image_prompt"])
+        writer.writeheader()
+        writer.writerow({"generation_id": "g1", "final_image_prompt": "sunset " * 10})
+        writer.writerow({"generation_id": "g2", "final_image_prompt": "sunset"})
+
+    summary = blackbox_scoring.extract_recent_motif_summary(
+        generations_csv_path=str(csv_path),
+        novelty_cfg=PromptNoveltyConfig(
+            enabled=True,
+            window=25,
+            method="df_overlap_v1",  # type: ignore[arg-type]
+            df_min=1,
+        ),
+    )
+    motifs = {item["token"]: item for item in summary["motifs"]}
+    assert motifs["sunset"]["df"] == 2
+    assert motifs["sunset"]["w"] == 2
+
+
+def test_df_overlap_penalty_normalization_prevents_trivial_saturation():
+    tokens = ["alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel", "india", "juliet"]
+    motifs = [{"token": tok, "df": 10, "w": 10} for tok in tokens]
+    summary = {"enabled": True, "method": "df_overlap_v1", "motifs": motifs, "total_weight": 100}
+    cfg = PromptNoveltyConfig(enabled=True, window=25, method="df_overlap_v1")  # type: ignore[arg-type]
+
+    candidates = [
+        {"id": "A", "prompt": "alpha"},
+        {"id": "B", "prompt": "alpha bravo charlie delta echo"},
+    ]
+    penalties, _breakdown = blackbox_scoring.novelty_penalties(
+        candidates, cfg, summary, text_field="prompt"
+    )
+    assert penalties["A"] < cfg.max_penalty
+    assert penalties["B"] > penalties["A"]
+
+
+def test_df_overlap_scaffolding_stopwords_filtered(tmp_path):
+    csv_path = tmp_path / "generations.csv"
+    with open(csv_path, "w", encoding="utf-8", newline="") as file:
+        writer = csv.DictWriter(file, fieldnames=["generation_id", "final_image_prompt"])
+        writer.writeheader()
+        writer.writerow({"generation_id": "g1", "final_image_prompt": "PROMPT IMAGE lighting sunset"})
+        writer.writerow({"generation_id": "g2", "final_image_prompt": "prompt image Lighting sunset"})
+        writer.writerow({"generation_id": "g3", "final_image_prompt": "prompt image lighting sunrise"})
+
+    summary = blackbox_scoring.extract_recent_motif_summary(
+        generations_csv_path=str(csv_path),
+        novelty_cfg=PromptNoveltyConfig(
+            enabled=True,
+            window=25,
+            method="df_overlap_v1",  # type: ignore[arg-type]
+            df_min=2,
+        ),
+    )
+    motif_tokens = {item["token"] for item in summary["motifs"]}
+    assert "sunset" in motif_tokens
+    assert "prompt" not in motif_tokens
+    assert "image" not in motif_tokens
+    assert "lighting" not in motif_tokens
+
+
+def test_legacy_v0_penalties_unchanged():
+    candidates = [{"id": "A", "prompt": "sunset ocean"}, {"id": "B", "prompt": "ocean only"}]
+    summary = {
+        "enabled": True,
+        "top_tokens": [{"token": "sunset", "count": 3}, {"token": "ocean", "count": 10}],
+    }
+    cfg = PromptNoveltyConfig(enabled=True, window=25, method="legacy_v0")  # type: ignore[arg-type]
+    penalties, breakdown = blackbox_scoring.novelty_penalties(
+        candidates, cfg, summary, text_field="prompt"
+    )
+    assert penalties == {"A": 8, "B": 5}
+    assert breakdown["A"]["penalty"] == 8
+
+
 def test_integration_scoring_enabled_isolated_from_downstream(tmp_path, monkeypatch):
     profile_sentinel = "__TEST_PROFILE_ABSTRACT__"
-    ideas_sentinel = "__TEST_IDEA_CARDS__"
+    idea_sentinel_a = "__TEST_IDEA_CARD_A__"
+    idea_sentinel_b = "__TEST_IDEA_CARD_B__"
     judge_sentinel = "__TEST_JUDGE__"
     final_sentinel = "__TEST_FINAL_PROMPT__"
 
     num_ideas = 2
     expected_ids = blackbox_scoring.expected_idea_ids(num_ideas)
 
-    idea_cards_json = json.dumps(
-        {
-            "ideas": [
-                {
-                    "id": expected_ids[0],
-                    "hook": "Hook A.",
-                    "narrative": "Narrative A.",
-                    "options": {
-                        "composition": ["c1", "c2"],
-                        "palette": ["p1", "p2"],
-                        "medium": ["m1"],
-                        "mood": ["mo1"],
-                    },
+    idea_prompt_by_id = {expected_ids[0]: idea_sentinel_a, expected_ids[1]: idea_sentinel_b}
+    idea_output_by_prompt = {
+        idea_sentinel_a: json.dumps(
+            {
+                "id": expected_ids[0],
+                "hook": "Hook A.",
+                "narrative": "Narrative A.",
+                "options": {
+                    "composition": ["c1", "c2"],
+                    "palette": ["p1", "p2"],
+                    "medium": ["m1"],
+                    "mood": ["mo1"],
                 },
-                {
-                    "id": expected_ids[1],
-                    "hook": "Hook B.",
-                    "narrative": "Narrative B.",
-                    "options": {
-                        "composition": ["c1", "c2"],
-                        "palette": ["p1", "p2"],
-                        "medium": ["m1"],
-                        "mood": ["mo1"],
-                    },
+            }
+        ),
+        idea_sentinel_b: json.dumps(
+            {
+                "id": expected_ids[1],
+                "hook": "Hook B.",
+                "narrative": "Narrative B.",
+                "options": {
+                    "composition": ["c1", "c2"],
+                    "palette": ["p1", "p2"],
+                    "medium": ["m1"],
+                    "mood": ["mo1"],
                 },
-            ]
-        }
-    )
+            }
+        ),
+    }
     judge_output = json.dumps(
         {"scores": [{"id": expected_ids[0], "score": 10}, {"id": expected_ids[1], "score": 90}]}
     )
@@ -186,8 +268,8 @@ def test_integration_scoring_enabled_isolated_from_downstream(tmp_path, monkeypa
             last_user = (messages[-1].get("content", "") if messages else "") or ""
             if last_user == profile_sentinel:
                 return "- broad taste\n- avoid cliche"
-            if last_user == ideas_sentinel:
-                return idea_cards_json
+            if last_user in idea_output_by_prompt:
+                return idea_output_by_prompt[last_user]
             if last_user == judge_sentinel:
                 return judge_output
             if last_user == final_sentinel:
@@ -208,8 +290,8 @@ def test_integration_scoring_enabled_isolated_from_downstream(tmp_path, monkeypa
     def fake_profile_abstraction_prompt(**_kwargs):
         return profile_sentinel
 
-    def fake_idea_cards_generate_prompt(**_kwargs):
-        return ideas_sentinel
+    def fake_idea_card_generate_prompt(*, idea_id: str, **_kwargs):
+        return idea_prompt_by_id[idea_id]
 
     def fake_idea_cards_judge_prompt(**_kwargs):
         return judge_sentinel
@@ -273,7 +355,7 @@ def test_integration_scoring_enabled_isolated_from_downstream(tmp_path, monkeypa
     monkeypatch.setattr(app_generate, "TextAI", lambda *args, **kwargs: fake_text)
     monkeypatch.setattr(app_generate, "ImageAI", FakeImageAI)
     monkeypatch.setattr(prompts, "profile_abstraction_prompt", fake_profile_abstraction_prompt)
-    monkeypatch.setattr(prompts, "idea_cards_generate_prompt", fake_idea_cards_generate_prompt)
+    monkeypatch.setattr(prompts, "idea_card_generate_prompt", fake_idea_card_generate_prompt)
     monkeypatch.setattr(prompts, "idea_cards_judge_prompt", fake_idea_cards_judge_prompt)
     monkeypatch.setattr(
         prompts,
@@ -307,29 +389,38 @@ def test_integration_scoring_enabled_isolated_from_downstream(tmp_path, monkeypa
         "preprompt.filter_concepts",
         "blackbox.prepare",
         "blackbox.profile_abstraction",
-        "blackbox.idea_cards_generate",
+        "blackbox.idea_card_generate.A",
+        "blackbox.idea_card_generate.B",
+        "blackbox.idea_cards_assemble",
         "blackbox.idea_cards_judge_score",
         "blackbox.select_idea_card",
         "blackbox.image_prompt_creation",
     ]
     assert transcript["blackbox_scoring"]["selected_id"] == expected_ids[1]
-    assert any(
-        step["path"] == "pipeline/blackbox.idea_cards_generate/draft" for step in transcript["steps"]
-    )
+    assert any(step["path"] == "pipeline/blackbox.idea_card_generate.A/draft" for step in transcript["steps"])
+    assert any(step["path"] == "pipeline/blackbox.idea_card_generate.B/draft" for step in transcript["steps"])
     assert any(
         step["path"] == "pipeline/blackbox.idea_cards_judge_score/draft"
         for step in transcript["steps"]
     )
 
-    idea_call = next(
+    idea_calls = [
         call["messages"]
         for call in fake_text.calls
         if isinstance(call.get("messages"), list)
         and call["messages"]
-        and call["messages"][-1].get("content") == ideas_sentinel
-    )
-    assert all(profile_sentinel not in (msg.get("content") or "") for msg in idea_call)
-    assert all("- broad taste" not in (msg.get("content") or "") for msg in idea_call)
+        and (call["messages"][-1].get("content") or "") in idea_output_by_prompt
+    ]
+    assert len(idea_calls) == num_ideas
+    for call_messages in idea_calls:
+        last_user = (call_messages[-1].get("content") or "")
+        other_sentinels = {s for s in idea_output_by_prompt.keys() if s != last_user}
+        assert all(profile_sentinel not in (msg.get("content") or "") for msg in call_messages)
+        assert all("- broad taste" not in (msg.get("content") or "") for msg in call_messages)
+        assert all(
+            all(other not in (msg.get("content") or "") for other in other_sentinels)
+            for msg in call_messages
+        )
 
     judge_call = next(
         call

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import math
 import random
@@ -8,6 +9,8 @@ import re
 from collections import Counter, deque
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping
+
+from image_project.framework.config import PromptNoveltyConfig
 
 
 @dataclass(frozen=True)
@@ -150,6 +153,101 @@ def parse_idea_cards_json(text: str, *, expected_num_ideas: int) -> list[dict[st
     return ideas
 
 
+def parse_idea_card_json(text: str, *, expected_id: str) -> dict[str, Any]:
+    try:
+        payload = json.loads(text)
+    except Exception as exc:  # noqa: BLE001
+        raise ValueError(f"invalid_idea_card_json: JSON parse error: {exc}") from exc
+
+    idea_raw: Any = payload
+    if isinstance(payload, Mapping) and "idea" in payload:
+        idea_raw = payload.get("idea")
+    elif isinstance(payload, Mapping) and "ideas" in payload:
+        ideas = payload.get("ideas")
+        if not isinstance(ideas, list) or len(ideas) != 1:
+            raise ValueError("invalid_idea_card_json: ideas must be a list with exactly 1 item")
+        idea_raw = ideas[0]
+
+    if not isinstance(idea_raw, Mapping):
+        raise ValueError("invalid_idea_card_json: expected an object")
+
+    raw_id = idea_raw.get("id")
+    if not isinstance(raw_id, str) or not raw_id.strip():
+        raise ValueError("invalid_idea_card_json: id must be a non-empty string")
+    idea_id = raw_id.strip()
+    if idea_id != expected_id:
+        raise ValueError(
+            "invalid_idea_card_json: wrong id "
+            f"(expected={expected_id!r} got={idea_id!r})"
+        )
+
+    hook = idea_raw.get("hook")
+    if not isinstance(hook, str) or not hook.strip():
+        raise ValueError("invalid_idea_card_json: hook must be a non-empty string")
+    narrative = idea_raw.get("narrative")
+    if not isinstance(narrative, str) or not narrative.strip():
+        raise ValueError("invalid_idea_card_json: narrative must be a non-empty string")
+
+    options = idea_raw.get("options")
+    if not isinstance(options, Mapping):
+        raise ValueError("invalid_idea_card_json: options must be an object")
+
+    composition = options.get("composition")
+    if not isinstance(composition, list):
+        raise ValueError("invalid_idea_card_json: options.composition must be a list[str]")
+    composition_list = [str(item).strip() for item in composition if isinstance(item, str) and item.strip()]
+    if len(composition_list) < 2:
+        raise ValueError("invalid_idea_card_json: options.composition must have >= 2 items")
+
+    palette = options.get("palette")
+    if not isinstance(palette, list):
+        raise ValueError("invalid_idea_card_json: options.palette must be a list[str]")
+    palette_list = [str(item).strip() for item in palette if isinstance(item, str) and item.strip()]
+    if len(palette_list) < 2:
+        raise ValueError("invalid_idea_card_json: options.palette must have >= 2 items")
+
+    medium = options.get("medium")
+    if not isinstance(medium, list):
+        raise ValueError("invalid_idea_card_json: options.medium must be a list[str]")
+    medium_list = [str(item).strip() for item in medium if isinstance(item, str) and item.strip()]
+    if len(medium_list) < 1:
+        raise ValueError("invalid_idea_card_json: options.medium must have >= 1 items")
+
+    mood = options.get("mood")
+    if not isinstance(mood, list):
+        raise ValueError("invalid_idea_card_json: options.mood must be a list[str]")
+    mood_list = [str(item).strip() for item in mood if isinstance(item, str) and item.strip()]
+    if len(mood_list) < 1:
+        raise ValueError("invalid_idea_card_json: options.mood must have >= 1 items")
+
+    avoid_raw = idea_raw.get("avoid")
+    avoid: list[str] = []
+    if avoid_raw is None:
+        avoid = []
+    elif isinstance(avoid_raw, list):
+        for idx, item in enumerate(avoid_raw):
+            if not isinstance(item, str):
+                raise ValueError(f"invalid_idea_card_json: avoid[{idx}] must be a string")
+            text_item = item.strip()
+            if text_item:
+                avoid.append(text_item)
+    else:
+        raise ValueError("invalid_idea_card_json: avoid must be a list[str] if provided")
+
+    return {
+        "id": idea_id,
+        "hook": hook.strip(),
+        "narrative": narrative.strip(),
+        "options": {
+            "composition": composition_list,
+            "palette": palette_list,
+            "medium": medium_list,
+            "mood": mood_list,
+        },
+        "avoid": avoid,
+    }
+
+
 def parse_judge_scores_json(text: str, *, expected_ids: Iterable[str]) -> dict[str, int]:
     try:
         payload = json.loads(text)
@@ -249,10 +347,7 @@ def tokenize(text: str) -> list[str]:
     return [t for t in tokens if len(t) >= 3 and t not in _STOPWORDS]
 
 
-def extract_recent_motif_summary(*, generations_csv_path: str, window: int) -> dict[str, Any]:
-    if window <= 0:
-        return {"enabled": False, "window": window, "rows_considered": 0, "top_tokens": []}
-
+def _load_recent_final_prompts(*, generations_csv_path: str, window: int) -> deque[str]:
     if not generations_csv_path:
         raise ValueError("generations_csv_path is empty")
 
@@ -265,6 +360,17 @@ def extract_recent_motif_summary(*, generations_csv_path: str, window: int) -> d
             raise ValueError("generations csv missing required column: final_image_prompt")
         for row in reader:
             prompts.append(str(row.get("final_image_prompt", "") or ""))
+
+    return prompts
+
+
+def _extract_recent_motif_summary_legacy_v0(
+    *, generations_csv_path: str, window: int
+) -> dict[str, Any]:
+    if window <= 0:
+        return {"enabled": False, "window": window, "rows_considered": 0, "top_tokens": []}
+
+    prompts = _load_recent_final_prompts(generations_csv_path=generations_csv_path, window=window)
 
     counts: Counter[str] = Counter()
     for prompt in prompts:
@@ -285,15 +391,179 @@ def extract_recent_motif_summary(*, generations_csv_path: str, window: int) -> d
     }
 
 
-def novelty_penalties(
+_TOKEN_ALPHA_RE_V1 = re.compile(r"[a-zA-Z]+")
+_TOKEN_ALNUM_RE_V1 = re.compile(r"[a-zA-Z0-9]+")
+
+_PROMPT_SCAFFOLDING_STOPWORDS_V1: frozenset[str] = frozenset(
+    {
+        "prompt",
+        "image",
+        "scene",
+        "style",
+        "composition",
+        "lighting",
+        "camera",
+        "lens",
+        "shot",
+        "subject",
+        "background",
+        "foreground",
+        "render",
+        "rendered",
+        "rendering",
+        "rules",
+        "rule",
+        "constraints",
+        "constraint",
+        "requirements",
+        "requirement",
+        "instructions",
+        "instruction",
+        "must",
+        "avoid",
+        "include",
+        "including",
+        "exclude",
+        "excluding",
+        "output",
+        "section",
+        "format",
+        "json",
+        "strict",
+        "highly",
+        "detailed",
+        "detail",
+        "photorealistic",
+        "hyperrealistic",
+        "realistic",
+    }
+)
+
+_STOPWORDS_V1_BASE: frozenset[str] = frozenset(set(_STOPWORDS) | set(_PROMPT_SCAFFOLDING_STOPWORDS_V1))
+
+
+def tokenize_v1(
+    text: str,
+    *,
+    min_len: int,
+    stopwords: frozenset[str],
+    alpha_only: bool = True,
+) -> list[str]:
+    if not text:
+        return []
+    pattern = _TOKEN_ALPHA_RE_V1 if alpha_only else _TOKEN_ALNUM_RE_V1
+    tokens = [t.lower() for t in pattern.findall(text)]
+    out: list[str] = []
+    for token in tokens:
+        if len(token) < int(min_len):
+            continue
+        if token in stopwords:
+            continue
+        if not alpha_only and token.isdigit():
+            continue
+        out.append(token)
+    return out
+
+
+def _stopwords_fingerprint(stopwords: Iterable[str]) -> tuple[int, str]:
+    items = sorted({str(s) for s in stopwords if str(s)})
+    payload = "\n".join(items).encode("utf-8")
+    return len(items), hashlib.sha256(payload).hexdigest()
+
+
+def _extract_recent_motif_summary_df_overlap_v1(
+    *,
+    generations_csv_path: str,
+    cfg: PromptNoveltyConfig,
+) -> dict[str, Any]:
+    window = int(cfg.window)
+    if window <= 0:
+        return {"enabled": False, "window": window, "rows_considered": 0, "top_tokens": []}
+
+    prompts = _load_recent_final_prompts(generations_csv_path=generations_csv_path, window=window)
+
+    extra_stopwords = sorted({s.strip().lower() for s in cfg.stopwords_extra if s.strip()})
+    stopwords = frozenset(set(_STOPWORDS_V1_BASE) | set(extra_stopwords))
+    stopwords_count, stopwords_hash = _stopwords_fingerprint(stopwords)
+
+    df_counts: Counter[str] = Counter()
+    for prompt in prompts:
+        df_counts.update(
+            set(
+                tokenize_v1(
+                    prompt,
+                    min_len=int(cfg.min_token_len),
+                    stopwords=stopwords,
+                    alpha_only=bool(cfg.alpha_only),
+                )
+            )
+        )
+
+    df_min = int(cfg.df_min)
+    items = [(token, int(df)) for token, df in df_counts.items() if int(df) >= df_min]
+    items.sort(key=lambda kv: (-kv[1], kv[0]))
+    items = items[: int(cfg.max_motifs)]
+
+    df_cap = int(cfg.df_cap)
+    motifs = [
+        {"token": token, "df": int(df), "w": int(min(int(df), df_cap))} for token, df in items
+    ]
+    total_weight = sum(int(item["w"]) for item in motifs)
+
+    top_tokens = [{"token": item["token"], "count": int(item["df"])} for item in motifs[:30]]
+
+    motif_watchlist = ("sunset", "sunrise", "tree", "trees", "ocean", "moon")
+    motif_counts = {m: int(df_counts.get(m, 0)) for m in motif_watchlist if int(df_counts.get(m, 0)) > 0}
+
+    return {
+        "enabled": True,
+        "method": "df_overlap_v1",
+        "window": window,
+        "rows_considered": len(prompts),
+        "doc_count": len(prompts),
+        "df_min": df_min,
+        "df_cap": df_cap,
+        "max_motifs": int(cfg.max_motifs),
+        "min_token_len": int(cfg.min_token_len),
+        "alpha_only": bool(cfg.alpha_only),
+        "stopwords_extra": extra_stopwords,
+        "stopwords_count": int(stopwords_count),
+        "stopwords_hash": str(stopwords_hash),
+        "motifs": motifs,
+        "motif_counts": motif_counts,
+        "total_weight": int(total_weight),
+        "top_tokens": top_tokens,
+    }
+
+
+def extract_recent_motif_summary(
+    *, generations_csv_path: str, novelty_cfg: PromptNoveltyConfig
+) -> dict[str, Any]:
+    method = str(getattr(novelty_cfg, "method", "") or "").strip().lower()
+    if method == "legacy_v0":
+        return _extract_recent_motif_summary_legacy_v0(
+            generations_csv_path=generations_csv_path, window=int(novelty_cfg.window)
+        )
+    if method == "df_overlap_v1":
+        return _extract_recent_motif_summary_df_overlap_v1(
+            generations_csv_path=generations_csv_path, cfg=novelty_cfg
+        )
+    raise ValueError(f"Unknown novelty method: {method!r}")
+
+
+def _novelty_penalties_legacy_v0(
     idea_cards: list[Mapping[str, Any]], novelty_summary: Mapping[str, Any]
-) -> dict[str, int]:
+) -> tuple[dict[str, int], dict[str, dict[str, Any]]]:
     if not novelty_summary or not novelty_summary.get("enabled"):
-        return {str(card.get("id")): 0 for card in idea_cards}
+        penalties = {str(card.get("id")): 0 for card in idea_cards}
+        breakdown = {card_id: {"penalty": 0, "reason": "novelty_disabled"} for card_id in penalties}
+        return penalties, breakdown
 
     top_tokens = novelty_summary.get("top_tokens")
     if not isinstance(top_tokens, list):
-        return {str(card.get("id")): 0 for card in idea_cards}
+        penalties = {str(card.get("id")): 0 for card in idea_cards}
+        breakdown = {card_id: {"penalty": 0, "reason": "invalid_novelty_summary"} for card_id in penalties}
+        return penalties, breakdown
 
     repeated: dict[str, int] = {}
     for item in top_tokens:
@@ -305,17 +575,175 @@ def novelty_penalties(
             repeated[token] = count
 
     penalties: dict[str, int] = {}
+    breakdown: dict[str, dict[str, Any]] = {}
     for card in idea_cards:
         card_id = str(card.get("id"))
         blob = json.dumps(card, ensure_ascii=False)
         card_tokens = set(tokenize(blob))
         points = 0
+        contributing: list[dict[str, Any]] = []
         for token, count in repeated.items():
             if token in card_tokens:
-                points += min(count, 5)
-        penalties[card_id] = min(20, points)
+                add = min(count, 5)
+                points += add
+                contributing.append({"token": token, "count": int(count), "points": int(add)})
+        penalty = min(20, points)
+        penalties[card_id] = penalty
+        contributing.sort(key=lambda row: (-int(row["points"]), str(row["token"])))
+        breakdown[card_id] = {
+            "penalty": int(penalty),
+            "points": int(points),
+            "max_penalty": 20,
+            "top_tokens": contributing[:10],
+        }
 
-    return penalties
+    return penalties, breakdown
+
+
+def _novelty_penalties_df_overlap_v1(
+    candidates: list[Mapping[str, Any]],
+    novelty_summary: Mapping[str, Any],
+    *,
+    text_field: str,
+    cfg: PromptNoveltyConfig,
+) -> tuple[dict[str, int], dict[str, dict[str, Any]]]:
+    penalties: dict[str, int] = {str(card.get("id")): 0 for card in candidates}
+    breakdown: dict[str, dict[str, Any]] = {
+        cid: {"penalty": 0, "reason": "novelty_disabled"} for cid in penalties
+    }
+
+    if not novelty_summary or not novelty_summary.get("enabled"):
+        return penalties, breakdown
+
+    motifs_raw = novelty_summary.get("motifs")
+    if not isinstance(motifs_raw, list):
+        breakdown = {cid: {"penalty": 0, "reason": "invalid_novelty_summary"} for cid in penalties}
+        return penalties, breakdown
+
+    weight_by_token: dict[str, int] = {}
+    df_by_token: dict[str, int] = {}
+    for item in motifs_raw:
+        if not isinstance(item, Mapping):
+            continue
+        token = item.get("token")
+        df = item.get("df")
+        if not isinstance(token, str) or not token:
+            continue
+        if not isinstance(df, int) or df < 1:
+            continue
+        w_raw = item.get("w")
+        w = int(w_raw) if isinstance(w_raw, int) and w_raw >= 0 else int(min(int(df), int(cfg.df_cap)))
+        weight_by_token[token] = w
+        df_by_token[token] = int(df)
+
+    motif_tokens = set(weight_by_token.keys())
+    total_weight_raw = novelty_summary.get("total_weight")
+    total_weight = int(total_weight_raw) if isinstance(total_weight_raw, int) and total_weight_raw >= 0 else sum(weight_by_token.values())
+
+    if total_weight <= 0 or not motif_tokens:
+        breakdown = {cid: {"penalty": 0, "reason": "no_motifs"} for cid in penalties}
+        return penalties, breakdown
+
+    extra_stopwords = sorted({s.strip().lower() for s in cfg.stopwords_extra if s.strip()})
+    stopwords = frozenset(set(_STOPWORDS_V1_BASE) | set(extra_stopwords))
+
+    max_penalty = int(cfg.max_penalty)
+    scaling = str(cfg.scaling or "linear").strip().lower()
+    for card in candidates:
+        cid = str(card.get("id"))
+        text = card.get(text_field)
+        text_value = text if isinstance(text, str) else ""
+        cand_tokens = set(
+            tokenize_v1(
+                text_value,
+                min_len=int(cfg.min_token_len),
+                stopwords=stopwords,
+                alpha_only=bool(cfg.alpha_only),
+            )
+        )
+        overlap = cand_tokens.intersection(motif_tokens)
+        overlap_weight = sum(int(weight_by_token.get(tok, 0)) for tok in overlap)
+        frac = float(overlap_weight) / float(total_weight) if total_weight else 0.0
+        frac = min(1.0, max(0.0, frac))
+
+        if scaling == "sqrt":
+            scaled = math.sqrt(frac)
+        elif scaling == "quadratic":
+            scaled = frac * frac
+        else:
+            scaled = frac
+
+        raw_penalty = int(round(float(max_penalty) * float(scaled)))
+        penalty = max(0, min(int(max_penalty), int(raw_penalty)))
+
+        overlap_items = sorted(
+            overlap, key=lambda tok: (-int(weight_by_token.get(tok, 0)), str(tok))
+        )[:10]
+        top_motifs = [
+            {"token": tok, "w": int(weight_by_token.get(tok, 0)), "df": int(df_by_token.get(tok, 0))}
+            for tok in overlap_items
+        ]
+
+        penalties[cid] = penalty
+        breakdown[cid] = {
+            "penalty": int(penalty),
+            "max_penalty": int(max_penalty),
+            "overlap_weight": int(overlap_weight),
+            "total_weight": int(total_weight),
+            "overlap_fraction": float(frac),
+            "top_motifs": top_motifs,
+        }
+
+    return penalties, breakdown
+
+
+def novelty_penalties(
+    candidates: list[Mapping[str, Any]],
+    novelty_cfg: PromptNoveltyConfig,
+    novelty_summary: Mapping[str, Any] | None,
+    *,
+    text_field: str,
+) -> tuple[dict[str, int], dict[str, dict[str, Any]]]:
+    method = str(getattr(novelty_cfg, "method", "") or "").strip().lower()
+    if method == "legacy_v0":
+        return _novelty_penalties_legacy_v0(candidates, novelty_summary or {})
+    if method == "df_overlap_v1":
+        return _novelty_penalties_df_overlap_v1(
+            candidates,
+            novelty_summary or {},
+            text_field=text_field,
+            cfg=novelty_cfg,
+        )
+    raise ValueError(f"Unknown novelty method: {method!r}")
+
+
+def _idea_card_text_for_novelty(card: Mapping[str, Any]) -> str:
+    parts: list[str] = []
+
+    hook = card.get("hook")
+    if isinstance(hook, str) and hook.strip():
+        parts.append(hook.strip())
+
+    narrative = card.get("narrative")
+    if isinstance(narrative, str) and narrative.strip():
+        parts.append(narrative.strip())
+
+    avoid_raw = card.get("avoid")
+    if isinstance(avoid_raw, list):
+        avoids = [str(item).strip() for item in avoid_raw if str(item).strip()]
+        if avoids:
+            parts.append("\n".join(avoids))
+
+    options = card.get("options")
+    if isinstance(options, Mapping):
+        for key in ("composition", "palette", "medium", "mood"):
+            raw = options.get(key)
+            if isinstance(raw, list):
+                items = [str(item).strip() for item in raw if str(item).strip()]
+                if items:
+                    parts.append("\n".join(items))
+
+    return "\n".join(parts)
 
 
 def select_candidate(
@@ -324,6 +752,7 @@ def select_candidate(
     idea_cards: list[Mapping[str, Any]],
     exploration_rate: float,
     rng: random.Random,
+    novelty_cfg: PromptNoveltyConfig | None = None,
     novelty_summary: Mapping[str, Any] | None = None,
 ) -> SelectionResult:
     if not scores:
@@ -334,7 +763,33 @@ def select_candidate(
     if missing_cards:
         raise ValueError(f"selection inconsistency: missing idea cards for ids={missing_cards}")
 
-    penalties = novelty_penalties(idea_cards, novelty_summary or {})
+    effective_novelty_cfg = novelty_cfg or PromptNoveltyConfig(enabled=False, window=0)
+    novelty_enabled = bool(effective_novelty_cfg.enabled and effective_novelty_cfg.window > 0)
+    novelty_method = str(getattr(effective_novelty_cfg, "method", "") or "").strip().lower()
+
+    penalties: dict[str, int] = {str(card.get("id")): 0 for card in idea_cards}
+    novelty_breakdown: dict[str, dict[str, Any]] = {
+        card_id: {"penalty": 0, "reason": "novelty_disabled"} for card_id in penalties
+    }
+    if novelty_enabled:
+        if novelty_method == "df_overlap_v1":
+            novelty_cards = [
+                {"id": str(card.get("id")), "text": _idea_card_text_for_novelty(card)}
+                for card in idea_cards
+            ]
+            penalties, novelty_breakdown = novelty_penalties(
+                novelty_cards,
+                effective_novelty_cfg,
+                novelty_summary,
+                text_field="text",
+            )
+        else:
+            penalties, novelty_breakdown = novelty_penalties(
+                idea_cards,
+                effective_novelty_cfg,
+                novelty_summary,
+                text_field="prompt",
+            )
 
     table: list[dict[str, Any]] = []
     for idea_id, raw_score in scores.items():
@@ -345,6 +800,7 @@ def select_candidate(
                 "id": idea_id,
                 "score": int(raw_score),
                 "novelty_penalty": penalty,
+                "novelty_detail": novelty_breakdown.get(idea_id),
                 "effective_score": effective,
             }
         )

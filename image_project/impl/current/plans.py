@@ -13,7 +13,7 @@ from image_project.framework.prompting import (
     ResolvedPlan,
     StageNodeSpec,
 )
-from image_project.impl.current.prompting import StageCatalog
+from image_project.impl.current.prompting import StageCatalog, build_blackbox_isolated_idea_card_specs
 
 
 class SequencePromptPlan(LinearStagePlan):
@@ -215,28 +215,30 @@ class StandardPromptPlan(SequencePromptPlan):
 
 
 @register_plan
-class BlackboxPromptPlan(SequencePromptPlan):
+class BlackboxPromptPlan(LinearStagePlan):
     name = "blackbox"
     requires_scoring = True
 
-    def stage_sequence(self, inputs: PlanInputs) -> tuple[str, ...]:
+    def stage_specs(self, inputs: PlanInputs) -> list[StageNodeSpec]:
         scoring_cfg = inputs.cfg.prompt_scoring
-        sequence: list[str] = [
-            "preprompt.select_concepts",
-            "preprompt.filter_concepts",
-            "blackbox.prepare",
+        sequence: list[StageNodeSpec] = [
+            StageCatalog.build("preprompt.select_concepts", inputs),
+            StageCatalog.build("preprompt.filter_concepts", inputs),
+            StageCatalog.build("blackbox.prepare", inputs),
         ]
         if scoring_cfg.generator_profile_abstraction:
-            sequence.append("blackbox.profile_abstraction")
+            sequence.append(StageCatalog.build("blackbox.profile_abstraction", inputs))
+
+        sequence.extend(build_blackbox_isolated_idea_card_specs(inputs))
+
         sequence.extend(
-            (
-                "blackbox.idea_cards_generate",
-                "blackbox.idea_cards_judge_score",
-                "blackbox.select_idea_card",
-                "blackbox.image_prompt_creation",
-            )
+            [
+                StageCatalog.build("blackbox.idea_cards_judge_score", inputs),
+                StageCatalog.build("blackbox.select_idea_card", inputs),
+                StageCatalog.build("blackbox.image_prompt_creation", inputs),
+            ]
         )
-        return tuple(sequence)
+        return sequence
 
 
 @register_plan
@@ -253,4 +255,3 @@ class RefineOnlyPromptPlan(SequencePromptPlan):
                 "prompt.plan=refine_only requires prompt.refine_only.draft or draft_path"
             )
         return super().stage_specs(inputs)
-
