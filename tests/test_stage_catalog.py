@@ -102,7 +102,14 @@ def _make_ctx(cfg: RunConfig, logger_name: str) -> RunContext:
 
 @pytest.mark.parametrize(
     ("source", "expected"),
-    [("raw", "RAW"), ("generator_hints", "HINTS")],
+    [
+        ("raw", "RAW"),
+        ("generator_hints", "HINTS"),
+        (
+            "generator_hints_plus_dislikes",
+            "Profile extraction (generator-safe hints):\nHINTS\n\nDislikes:\n- gore",
+        ),
+    ],
 )
 def test_blackbox_judge_profile_source_routing(tmp_path, monkeypatch, source, expected):
     def fake_prompt(*, raw_profile: str, **_kwargs) -> str:
@@ -122,6 +129,7 @@ def test_blackbox_judge_profile_source_routing(tmp_path, monkeypatch, source, ex
     ctx.outputs["preferences_guidance"] = "RAW"
     ctx.outputs["generator_profile_hints"] = "HINTS"
     ctx.outputs["idea_cards_json"] = "{}"
+    ctx.outputs["dislikes"] = ["gore"]
 
     assert spec.prompt(ctx) == f"PROFILE={expected}"
 
@@ -146,6 +154,31 @@ def test_blackbox_judge_profile_source_requires_generator_hints(tmp_path, monkey
 
     with pytest.raises(ValueError, match=r"blackbox\.idea_cards_judge_score requires generator_profile_hints"):
         spec.prompt(ctx)
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [("raw", "RAW"), ("generator_hints", "HINTS"), ("none", "")],
+)
+def test_blackbox_idea_profile_source_routing(tmp_path, monkeypatch, source, expected):
+    def fake_prompt(*, generator_profile_hints: str, **_kwargs) -> str:
+        return f"HINTS={generator_profile_hints}"
+
+    monkeypatch.setattr(prompts, "idea_cards_generate_prompt", fake_prompt)
+
+    cfg_dict = _base_cfg_dict(tmp_path)
+    cfg_dict["prompt"]["scoring"] = {"idea_profile_source": source}
+    cfg, _warnings = RunConfig.from_dict(cfg_dict)
+    inputs = _make_inputs(cfg)
+
+    spec = StageCatalog.build("blackbox.idea_cards_generate", inputs)
+    assert isinstance(spec, StageSpec)
+
+    ctx = _make_ctx(cfg, "test.blackbox.idea_profile_source")
+    ctx.outputs["preferences_guidance"] = "RAW"
+    ctx.outputs["generator_profile_hints"] = "HINTS"
+
+    assert spec.prompt(ctx) == f"HINTS={expected}"
 
 
 @pytest.mark.parametrize(

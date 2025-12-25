@@ -85,7 +85,7 @@ Config loading:
 
 - `prompt.random_seed` (int): makes concept selection deterministic; if omitted, a seed is generated and logged.
 - Prompt plan selection:
-  - `prompt.plan: auto|standard|blackbox|refine_only|baseline|simple|profile_only|profile_only_simple`
+  - `prompt.plan: auto|standard|blackbox|blackbox_refine|blackbox_refine_only|refine_only|baseline|simple|profile_only|profile_only_simple`
   - `prompt.refinement.policy: tot|none`
   - `prompt.stages.include` / `prompt.stages.exclude` / `prompt.stages.overrides`
   - `prompt.output.capture_stage`
@@ -99,6 +99,7 @@ Config loading:
 - Black-box scoring + selection (default off):
   - Enable with `prompt.scoring.enabled: true`.
   - Generates multiple "idea cards", scores them with a separate LLM judge (numeric JSON only), selects one (epsilon-greedy with optional novelty), and then generates the final prompt.
+  - Optional refinement loop plans (`blackbox_refine`, `blackbox_refine_only`) iteratively generate+judge prompt variants and record history under `blackbox_scoring.prompt_refine` in the transcript.
   - Scoring details are recorded in the transcript under `blackbox_scoring` but are not merged into downstream prompt context.
   - Details: `docs/scoring.md`
 - Run labeling (optional):

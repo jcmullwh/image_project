@@ -116,6 +116,48 @@ def upload_to_photos_via_rclone(
     return True
 
 
+def _maybe_write_run_review_report(
+    cfg: RunConfig,
+    *,
+    generation_id: str,
+    oplog_path: str,
+    transcript_path: str,
+    logger: logging.Logger,
+) -> tuple[dict[str, str] | None, str | None]:
+    review_cfg = getattr(cfg, "run_review", None)
+    if review_cfg is None or not getattr(review_cfg, "enabled", False):
+        return None, None
+
+    output_dir = getattr(review_cfg, "review_path", None)
+    if not isinstance(output_dir, str) or not output_dir.strip():
+        return None, "run-review.enabled=true requires run-review.review_path"
+
+    try:
+        from image_project.run_review.report_builder import build_report, report_to_dict
+        from image_project.run_review.report_model import RunInputs
+        from image_project.run_review.render_html import render_html
+
+        os.makedirs(output_dir, exist_ok=True)
+        inputs = RunInputs(generation_id, oplog_path=oplog_path, transcript_path=transcript_path)
+        report = build_report(inputs, best_effort=False, enable_evolution=True)
+
+        json_out = os.path.join(output_dir, f"{generation_id}_run_report.json")
+        html_out = os.path.join(output_dir, f"{generation_id}_run_report.html")
+
+        with open(json_out, "w", encoding="utf-8") as handle:
+            json.dump(report_to_dict(report), handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+        with open(html_out, "w", encoding="utf-8") as handle:
+            handle.write(render_html(report))
+
+        logger.info("Wrote run_review report to %s", html_out)
+        logger.info("Wrote run_review report to %s", json_out)
+        return {"run_report_html": html_out, "run_report_json": json_out}, None
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("run_review failed: %s", exc)
+        return None, str(exc)
+
+
 
 GENERATION_CSV_FIELDNAMES: list[str] = [
     "generation_id",
@@ -328,6 +370,14 @@ def run_generation(cfg_dict, *, generation_id: str | None = None, config_meta: d
             write_transcript(transcript_path, ctx)
             logger.info("Wrote transcript JSON to %s", transcript_path)
 
+            run_review_artifacts, run_review_error = _maybe_write_run_review_report(
+                cfg,
+                generation_id=generation_id,
+                oplog_path=operational_log_path,
+                transcript_path=transcript_path,
+                logger=logger,
+            )
+
             entry = {
                 "schema_version": 1,
                 "generation_id": generation_id,
@@ -351,6 +401,10 @@ def run_generation(cfg_dict, *, generation_id: str | None = None, config_meta: d
                     "upscaled_image": None,
                 },
             }
+            if run_review_artifacts:
+                entry["artifacts"].update(run_review_artifacts)
+            if run_review_error:
+                entry["run_review_error"] = run_review_error
             if ctx.error is not None:
                 entry["error"] = ctx.error
             try:
@@ -557,6 +611,14 @@ def run_generation(cfg_dict, *, generation_id: str | None = None, config_meta: d
         write_transcript(transcript_path, ctx)
         logger.info("Wrote transcript JSON to %s", transcript_path)
 
+        run_review_artifacts, run_review_error = _maybe_write_run_review_report(
+            cfg,
+            generation_id=generation_id,
+            oplog_path=operational_log_path,
+            transcript_path=transcript_path,
+            logger=logger,
+        )
+
         entry = {
             "schema_version": 1,
             "generation_id": generation_id,
@@ -580,6 +642,10 @@ def run_generation(cfg_dict, *, generation_id: str | None = None, config_meta: d
                 "upscaled_image": upscaled_image_path,
             },
         }
+        if run_review_artifacts:
+            entry["artifacts"].update(run_review_artifacts)
+        if run_review_error:
+            entry["run_review_error"] = run_review_error
         if ctx.error is not None:
             entry["error"] = ctx.error
         try:
@@ -618,6 +684,14 @@ def run_generation(cfg_dict, *, generation_id: str | None = None, config_meta: d
                 write_transcript(transcript_path, ctx)
                 logger.info("Wrote transcript JSON to %s", transcript_path)
 
+                run_review_artifacts, run_review_error = _maybe_write_run_review_report(
+                    cfg,
+                    generation_id=generation_id,
+                    oplog_path=operational_log_path,
+                    transcript_path=transcript_path,
+                    logger=logger,
+                )
+
                 entry = {
                     "schema_version": 1,
                     "generation_id": generation_id,
@@ -641,6 +715,10 @@ def run_generation(cfg_dict, *, generation_id: str | None = None, config_meta: d
                         "upscaled_image": upscaled_image_path,
                     },
                 }
+                if run_review_artifacts:
+                    entry["artifacts"].update(run_review_artifacts)
+                if run_review_error:
+                    entry["run_review_error"] = run_review_error
                 if ctx.error is not None:
                     entry["error"] = ctx.error
                 try:

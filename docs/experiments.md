@@ -44,6 +44,8 @@ Set `prompt.plan` to one of:
 - `auto` (default): preserves the old behavior (`prompt.scoring.enabled: true` -> `blackbox`, otherwise `standard`)
 - `standard`: the multi-stage pipeline (final stage produces `image_prompt`)
 - `blackbox`: idea cards -> judge scoring -> selection -> final prompt stage (scoring sub-steps are regular stages)
+- `blackbox_refine`: runs the blackbox idea-card pipeline to get a seed prompt, then iteratively refines it via the blackbox refinement loop
+- `blackbox_refine_only`: iteratively refines a user-provided draft prompt via the blackbox refinement loop
 - `refine_only`: refine a provided draft prompt into the final image prompt
 - `baseline`: one-stage pipeline that captures `initial_prompt`
 - `simple`: two-stage pipeline: `standard.initial_prompt` -> `standard.image_prompt_creation`
@@ -108,6 +110,8 @@ For `prompt.plan: refine_only`, provide exactly one of:
 - `prompt.refine_only.draft_path: "./draft_prompt.txt"`
 
 Missing draft input fails fast.
+
+`prompt.plan: blackbox_refine_only` uses the same draft input keys (as the seed prompt).
 
 ## Custom Plan Stages
 
@@ -198,7 +202,8 @@ prompt:
     # Profile text routing for A/B experiments:
     # - raw: ctx.outputs["preferences_guidance"]
     # - generator_hints: ctx.outputs["generator_profile_hints"] (requires it to be present + non-empty)
-    judge_profile_source: raw  # raw|generator_hints
+    # - generator_hints_plus_dislikes: generator_hints + ctx.outputs["dislikes"] list (no likes)
+    judge_profile_source: raw  # raw|generator_hints|generator_hints_plus_dislikes
     final_profile_source: raw  # raw|generator_hints
   refinement:
     policy: tot

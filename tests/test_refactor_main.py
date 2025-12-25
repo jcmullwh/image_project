@@ -5,6 +5,7 @@ import json
 import logging
 import random
 import types
+from pathlib import Path
 from unittest.mock import Mock
 
 import pandas as pd
@@ -747,6 +748,84 @@ def test_integration_prompt_only_mode_skips_media_pipeline(tmp_path, monkeypatch
     assert last_entry["experiment"]["id"] == "exp_prompt_only"
 
 
+def test_run_review_runs_at_end_of_prompt_only_run(tmp_path, monkeypatch):
+    image_prompt_request = "__TEST_IMAGE_PROMPT_REQUEST__"
+    final_prompt_response = "A test image prompt"
+
+    class FakeTextAI:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def text_chat(self, messages, **kwargs):
+            last_user = (messages[-1].get("content", "") if messages else "") or ""
+            if last_user == image_prompt_request:
+                return final_prompt_response
+            return "resp"
+
+    categories_path = tmp_path / "categories.csv"
+    profile_path = tmp_path / "profile.csv"
+
+    categories = pd.DataFrame(
+        {
+            "Subject Matter": ["Cat", "Dog"],
+            "Narrative": ["Quest", "Heist"],
+            "Mood": ["Moody", "Joyful"],
+            "Composition": ["Wide", "Closeup"],
+            "Perspective": ["Top-down", "Eye-level"],
+            "Style": ["Baroque", "Minimalist"],
+            "Time Period_Context": ["Renaissance", "Futuristic"],
+            "Color Scheme": ["Vibrant", "Monochrome"],
+        }
+    )
+    categories.to_csv(categories_path, index=False)
+
+    profile = pd.DataFrame({"Likes": ["colorful"], "Dislikes": ["boring"]})
+    profile.to_csv(profile_path, index=False)
+
+    log_dir = tmp_path / "logs"
+    review_dir = tmp_path / "reviews"
+
+    cfg_dict = {
+        "run": {"mode": "prompt_only"},
+        "prompt": {
+            "categories_path": str(categories_path),
+            "profile_path": str(profile_path),
+            "random_seed": 123,
+            "plan": "simple",
+            "refinement": {"policy": "none"},
+        },
+        "image": {
+            "log_path": str(log_dir),
+        },
+        "run-review": {"enabled": True, "review_path": str(review_dir)},
+        "rclone": {"enabled": False},
+        "upscale": {"enabled": False},
+    }
+
+    generation_id = "unit_test_prompt_only_review"
+
+    monkeypatch.setattr(app_generate, "TextAI", FakeTextAI)
+    monkeypatch.setattr(prompts, "generate_image_prompt", lambda: image_prompt_request)
+
+    app_generate.run_generation(cfg_dict, generation_id=generation_id)
+
+    report_json = review_dir / f"{generation_id}_run_report.json"
+    report_html = review_dir / f"{generation_id}_run_report.html"
+    assert report_json.exists()
+    assert report_html.exists()
+
+    run_index_lines = (log_dir / "runs_index.jsonl").read_text(encoding="utf-8").splitlines()
+    assert run_index_lines
+    last_entry = json.loads(run_index_lines[-1])
+    assert last_entry["generation_id"] == generation_id
+    assert (review_dir / f"{generation_id}_run_report.json").resolve() == (
+        Path(last_entry["artifacts"]["run_report_json"]).resolve()
+    )
+    assert (review_dir / f"{generation_id}_run_report.html").resolve() == (
+        Path(last_entry["artifacts"]["run_report_html"]).resolve()
+    )
+
+
 def test_transcript_written_on_pipeline_failure(tmp_path, monkeypatch):
     fail_sentinel = "__TEST_FAIL_STEP__"
 
@@ -823,3 +902,71 @@ def test_transcript_written_on_pipeline_failure(tmp_path, monkeypatch):
     recorded_step_paths = [step.get("path") for step in transcript.get("steps", [])]
     assert "pipeline/standard.initial_prompt/draft" in recorded_step_paths
     assert "pipeline/standard.section_2_choice/draft" not in recorded_step_paths
+
+
+def test_run_review_runs_on_pipeline_failure(tmp_path, monkeypatch):
+    fail_sentinel = "__TEST_FAIL_STEP__"
+
+    class FakeTextAI:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def text_chat(self, messages, **kwargs):
+            last_user = (messages[-1].get("content", "") if messages else "") or ""
+            if last_user == fail_sentinel:
+                raise RuntimeError("boom")
+            return "resp"
+
+    categories_path = tmp_path / "categories.csv"
+    profile_path = tmp_path / "profile.csv"
+
+    categories = pd.DataFrame(
+        {
+            "Subject Matter": ["Cat", "Dog"],
+            "Narrative": ["Quest", "Heist"],
+            "Mood": ["Moody", "Joyful"],
+            "Composition": ["Wide", "Closeup"],
+            "Perspective": ["Top-down", "Eye-level"],
+            "Style": ["Baroque", "Minimalist"],
+            "Time Period_Context": ["Renaissance", "Futuristic"],
+            "Color Scheme": ["Vibrant", "Monochrome"],
+        }
+    )
+    categories.to_csv(categories_path, index=False)
+
+    profile = pd.DataFrame({"Likes": ["colorful"], "Dislikes": ["boring"]})
+    profile.to_csv(profile_path, index=False)
+
+    generation_dir = tmp_path / "generated"
+    upscale_dir = tmp_path / "upscaled"
+    log_dir = tmp_path / "logs"
+    review_dir = tmp_path / "reviews"
+    generations_csv = tmp_path / "generations.csv"
+
+    cfg_dict = {
+        "prompt": {
+            "categories_path": str(categories_path),
+            "profile_path": str(profile_path),
+            "generations_path": str(generations_csv),
+            "random_seed": 123,
+        },
+        "image": {
+            "generation_path": str(generation_dir),
+            "upscale_path": str(upscale_dir),
+            "log_path": str(log_dir),
+        },
+        "run-review": {"enabled": True, "review_path": str(review_dir)},
+        "rclone": {"enabled": False},
+        "upscale": {"enabled": False},
+    }
+
+    generation_id = "unit_test_failure_review"
+
+    monkeypatch.setattr(app_generate, "TextAI", FakeTextAI)
+    monkeypatch.setattr(prompts, "generate_second_prompt", lambda: fail_sentinel)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        app_generate.run_generation(cfg_dict, generation_id=generation_id)
+
+    assert (review_dir / f"{generation_id}_run_report.json").exists()
+    assert (review_dir / f"{generation_id}_run_report.html").exists()

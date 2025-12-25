@@ -10,6 +10,23 @@ from image_project.framework.context import ContextManager
 
 RunMode = Literal["full", "prompt_only"]
 ScoringProfileSource = Literal["raw", "generator_hints"]
+ScoringJudgeProfileSource = Literal["raw", "generator_hints", "generator_hints_plus_dislikes"]
+ScoringIdeaProfileSource = Literal["raw", "generator_hints", "none"]
+PromptNoveltyMethod = Literal["df_overlap_v1", "legacy_v0"]
+NoveltyPenaltyScaling = Literal["linear", "sqrt", "quadratic"]
+BlackboxRefineAlgorithm = Literal["hillclimb", "beam"]
+BlackboxRefineProfileSource = Literal[
+    "raw",
+    "generator_hints",
+    "likes_dislikes",
+    "dislikes_only",
+    "combined",
+]
+BlackboxRefineVariationTemplate = Literal["v1", "v2"]
+BlackboxRefineMutationMode = Literal["none", "random", "cycle", "fixed"]
+BlackboxRefineJudgeRubric = Literal["default", "strict", "novelty_heavy"]
+BlackboxRefineAggregation = Literal["mean", "median", "min", "max", "trimmed_mean"]
+BlackboxRefineTieBreaker = Literal["stable_id", "prefer_shorter", "prefer_novel"]
 
 
 @dataclass(frozen=True)
@@ -18,6 +35,12 @@ class ExperimentConfig:
     variant: str | None = None
     notes: str | None = None
     tags: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class RunReviewConfig:
+    enabled: bool = False
+    review_path: str | None = None
 
 
 def parse_bool(value: Any, path: str) -> bool:
@@ -139,6 +162,15 @@ def parse_aspect_ratio(value: Any, path: str) -> float:
 class PromptNoveltyConfig:
     enabled: bool
     window: int
+    method: PromptNoveltyMethod = "df_overlap_v1"
+    df_min: int = 3
+    max_motifs: int = 200
+    min_token_len: int = 3
+    stopwords_extra: tuple[str, ...] = ()
+    max_penalty: int = 20
+    df_cap: int = 10
+    alpha_only: bool = True
+    scaling: NoveltyPenaltyScaling = "linear"
 
 
 @dataclass(frozen=True)
@@ -148,10 +180,76 @@ class PromptScoringConfig:
     exploration_rate: float
     judge_temperature: float
     judge_model: str | None
-    judge_profile_source: ScoringProfileSource
+    judge_profile_source: ScoringJudgeProfileSource
+    idea_profile_source: ScoringIdeaProfileSource
     final_profile_source: ScoringProfileSource
     generator_profile_abstraction: bool
     novelty: PromptNoveltyConfig
+
+
+@dataclass(frozen=True)
+class PromptBlackboxRefineVariationPromptConfig:
+    template: BlackboxRefineVariationTemplate
+    include_concepts: bool
+    include_context_guidance: bool
+    include_profile: bool
+    profile_source: BlackboxRefineProfileSource
+    include_novelty_summary: bool
+    include_mutation_directive: bool
+    include_scoring_rubric: bool
+
+
+@dataclass(frozen=True)
+class PromptBlackboxRefineMutationPerAxisConfig:
+    enabled: bool
+    axes: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class PromptBlackboxRefineMutationDirectivesConfig:
+    mode: BlackboxRefineMutationMode
+    directives: tuple[str, ...]
+    per_axis: PromptBlackboxRefineMutationPerAxisConfig
+
+
+@dataclass(frozen=True)
+class PromptBlackboxRefineJudgeConfig:
+    id: str
+    model: str | None
+    temperature: float | None
+    weight: float
+    rubric: BlackboxRefineJudgeRubric
+
+
+@dataclass(frozen=True)
+class PromptBlackboxRefineJudgingConfig:
+    judges: tuple[PromptBlackboxRefineJudgeConfig, ...]
+    aggregation: BlackboxRefineAggregation
+    trimmed_mean_drop: int
+
+
+@dataclass(frozen=True)
+class PromptBlackboxRefineSelectionConfig:
+    exploration_rate_override: float | None
+    group_by_beam: bool
+    tie_breaker: BlackboxRefineTieBreaker
+
+
+@dataclass(frozen=True)
+class PromptBlackboxRefineConfig:
+    enabled: bool
+    iterations: int
+    algorithm: BlackboxRefineAlgorithm
+    beam_width: int
+    branching_factor: int
+    include_parents_as_candidates: bool
+    generator_model: str | None
+    generator_temperature: float
+    max_prompt_chars: int | None
+    variation_prompt: PromptBlackboxRefineVariationPromptConfig
+    mutation_directives: PromptBlackboxRefineMutationDirectivesConfig
+    judging: PromptBlackboxRefineJudgingConfig
+    selection: PromptBlackboxRefineSelectionConfig
 
 
 ConceptSelectionStrategy = Literal["random", "fixed", "file"]
@@ -199,6 +297,7 @@ class RunConfig:
 
     run_mode: RunMode
     experiment: ExperimentConfig
+    run_review: RunReviewConfig
 
     categories_path: str
     profile_path: str
@@ -209,6 +308,7 @@ class RunConfig:
 
     random_seed: int | None
     prompt_scoring: PromptScoringConfig
+    prompt_blackbox_refine: PromptBlackboxRefineConfig | None
     prompt_concepts: PromptConceptsConfig
 
     prompt_plan: str
@@ -334,9 +434,58 @@ class RunConfig:
                 "judge_temperature": None,
                 "judge_model": None,
                 "judge_profile_source": None,
+                "idea_profile_source": None,
                 "final_profile_source": None,
                 "generator_profile_abstraction": None,
-                "novelty": {"enabled": None, "window": None},
+                "novelty": {
+                    "enabled": None,
+                    "window": None,
+                    "method": None,
+                    "df_min": None,
+                    "max_motifs": None,
+                    "min_token_len": None,
+                    "stopwords_extra": None,
+                    "max_penalty": None,
+                    "df_cap": None,
+                    "alpha_only": None,
+                    "scaling": None,
+                },
+            },
+            "blackbox_refine": {
+                "enabled": None,
+                "iterations": None,
+                "algorithm": None,
+                "beam_width": None,
+                "branching_factor": None,
+                "include_parents_as_candidates": None,
+                "generator_model": None,
+                "generator_temperature": None,
+                "max_prompt_chars": None,
+                "variation_prompt": {
+                    "template": None,
+                    "include_concepts": None,
+                    "include_context_guidance": None,
+                    "include_profile": None,
+                    "profile_source": None,
+                    "include_novelty_summary": None,
+                    "include_mutation_directive": None,
+                    "include_scoring_rubric": None,
+                },
+                "mutation_directives": {
+                    "mode": None,
+                    "directives": None,
+                    "per_axis": {"enabled": None, "axes": None},
+                },
+                "judging": {
+                    "judges": None,
+                    "aggregation": None,
+                    "trimmed_mean_drop": None,
+                },
+                "selection": {
+                    "exploration_rate_override": None,
+                    "group_by_beam": None,
+                    "tie_breaker": None,
+                },
             },
             "extensions": ANY,
         }
@@ -382,6 +531,11 @@ class RunConfig:
             "tags": None,
         }
 
+        run_review_schema: Mapping[str, Any] = {
+            "enabled": None,
+            "review_path": None,
+        }
+
         unknown_keys: list[str] = []
         unknown_keys.extend(collect_unknown_keys(cfg.get("run"), run_schema, prefix="run"))
         unknown_keys.extend(collect_unknown_keys(cfg.get("prompt"), prompt_schema, prefix="prompt"))
@@ -389,6 +543,8 @@ class RunConfig:
         unknown_keys.extend(collect_unknown_keys(cfg.get("rclone"), rclone_schema, prefix="rclone"))
         unknown_keys.extend(collect_unknown_keys(cfg.get("upscale"), upscale_schema, prefix="upscale"))
         unknown_keys.extend(collect_unknown_keys(cfg.get("experiment"), experiment_schema, prefix="experiment"))
+        unknown_keys.extend(collect_unknown_keys(cfg.get("run-review"), run_review_schema, prefix="run-review"))
+        unknown_keys.extend(collect_unknown_keys(cfg.get("run_review"), run_review_schema, prefix="run_review"))
 
         context_payload = cfg.get("context")
         exempt_context_keys: set[str] = set()
@@ -609,6 +765,44 @@ class RunConfig:
             tags=tuple(tags),
         )
 
+        raw_run_review_cfg: Any = cfg.get("run-review")
+        raw_run_review_cfg_alt: Any = cfg.get("run_review")
+        if raw_run_review_cfg is not None and raw_run_review_cfg_alt is not None:
+            raise ValueError("Config cannot specify both run-review and run_review")
+
+        run_review_cfg: Any = raw_run_review_cfg if raw_run_review_cfg is not None else raw_run_review_cfg_alt
+        run_review_prefix = "run-review" if raw_run_review_cfg is not None else "run_review"
+
+        if run_review_cfg is None:
+            run_review = RunReviewConfig()
+        elif not isinstance(run_review_cfg, Mapping):
+            raise ValueError(f"Invalid config type for {run_review_prefix}: expected mapping")
+        else:
+            run_review_enabled = parse_bool(
+                run_review_cfg.get("enabled", False), f"{run_review_prefix}.enabled"
+            )
+
+            raw_review_path: Any = run_review_cfg.get("review_path")
+            if raw_review_path is None:
+                review_path_raw = None
+            elif not isinstance(raw_review_path, str):
+                raise ValueError(
+                    f"Invalid config type for {run_review_prefix}.review_path: expected string"
+                )
+            else:
+                review_path_raw = raw_review_path
+
+            if run_review_enabled and not (review_path_raw and review_path_raw.strip()):
+                raise ValueError(
+                    f"Missing required config: {run_review_prefix}.review_path "
+                    f"(required when {run_review_prefix}.enabled=true)"
+                )
+
+            run_review = RunReviewConfig(
+                enabled=run_review_enabled,
+                review_path=normalize_optional_path(review_path_raw),
+            )
+
         if "plan" not in prompt_cfg:
             prompt_plan = "auto"
         else:
@@ -814,10 +1008,10 @@ class RunConfig:
                 "Invalid config type for prompt.scoring.judge_profile_source: expected string"
             )
         judge_profile_source = raw_judge_profile_source.strip().lower()
-        if judge_profile_source not in ("raw", "generator_hints"):
+        if judge_profile_source not in ("raw", "generator_hints", "generator_hints_plus_dislikes"):
             raise ValueError(
                 "Unknown prompt.scoring.judge_profile_source: "
-                f"{raw_judge_profile_source!r} (expected: raw|generator_hints)"
+                f"{raw_judge_profile_source!r} (expected: raw|generator_hints|generator_hints_plus_dislikes)"
             )
 
         raw_final_profile_source: Any = scoring_cfg.get("final_profile_source", "raw")
@@ -839,6 +1033,32 @@ class RunConfig:
             "prompt.scoring.generator_profile_abstraction",
         )
 
+        if judge_profile_source in ("generator_hints", "generator_hints_plus_dislikes") and not generator_profile_abstraction:
+            warnings.append(
+                f"prompt.scoring.judge_profile_source={judge_profile_source} but "
+                "prompt.scoring.generator_profile_abstraction=false; generator_hints will equal raw profile in blackbox.prepare"
+            )
+
+        raw_idea_profile_source: Any = scoring_cfg.get("idea_profile_source", "generator_hints")
+        if raw_idea_profile_source is None:
+            raise ValueError("Invalid config value for prompt.scoring.idea_profile_source: None")
+        if not isinstance(raw_idea_profile_source, str):
+            raise ValueError(
+                "Invalid config type for prompt.scoring.idea_profile_source: expected string"
+            )
+        idea_profile_source = raw_idea_profile_source.strip().lower()
+        if idea_profile_source not in ("raw", "generator_hints", "none"):
+            raise ValueError(
+                "Unknown prompt.scoring.idea_profile_source: "
+                f"{raw_idea_profile_source!r} (expected: raw|generator_hints|none)"
+            )
+
+        if idea_profile_source == "generator_hints" and not generator_profile_abstraction:
+            warnings.append(
+                "prompt.scoring.idea_profile_source=generator_hints but "
+                "prompt.scoring.generator_profile_abstraction=false; generator_hints will equal raw profile in blackbox.prepare"
+            )
+
         raw_novelty: Any = scoring_cfg.get("novelty")
         novelty_cfg: Mapping[str, Any]
         if raw_novelty is None:
@@ -855,6 +1075,64 @@ class RunConfig:
         if novelty_window < 0:
             raise ValueError("Invalid config value for prompt.scoring.novelty.window: must be >= 0")
 
+        raw_novelty_method: Any = novelty_cfg.get("method", "df_overlap_v1")
+        if raw_novelty_method is None:
+            raise ValueError("Invalid config value for prompt.scoring.novelty.method: None")
+        if not isinstance(raw_novelty_method, str):
+            raise ValueError("Invalid config type for prompt.scoring.novelty.method: expected string")
+        novelty_method = raw_novelty_method.strip().lower()
+        if novelty_method not in ("df_overlap_v1", "legacy_v0"):
+            raise ValueError(
+                "Unknown prompt.scoring.novelty.method: "
+                f"{raw_novelty_method!r} (expected: df_overlap_v1|legacy_v0)"
+            )
+
+        df_min = parse_int(novelty_cfg.get("df_min", 3), "prompt.scoring.novelty.df_min")
+        if df_min < 1:
+            raise ValueError("Invalid config value for prompt.scoring.novelty.df_min: must be >= 1")
+
+        max_motifs = parse_int(novelty_cfg.get("max_motifs", 200), "prompt.scoring.novelty.max_motifs")
+        if max_motifs < 1:
+            raise ValueError("Invalid config value for prompt.scoring.novelty.max_motifs: must be >= 1")
+
+        min_token_len = parse_int(
+            novelty_cfg.get("min_token_len", 3), "prompt.scoring.novelty.min_token_len"
+        )
+        if min_token_len < 1:
+            raise ValueError(
+                "Invalid config value for prompt.scoring.novelty.min_token_len: must be >= 1"
+            )
+
+        stopwords_extra = parse_string_list(
+            novelty_cfg.get("stopwords_extra"), "prompt.scoring.novelty.stopwords_extra"
+        )
+
+        max_penalty = parse_int(novelty_cfg.get("max_penalty", 20), "prompt.scoring.novelty.max_penalty")
+        if max_penalty < 0 or max_penalty > 100:
+            raise ValueError(
+                "Invalid config value for prompt.scoring.novelty.max_penalty: must be in [0, 100]"
+            )
+
+        df_cap = parse_int(novelty_cfg.get("df_cap", 10), "prompt.scoring.novelty.df_cap")
+        if df_cap < 1:
+            raise ValueError("Invalid config value for prompt.scoring.novelty.df_cap: must be >= 1")
+
+        alpha_only = parse_bool(
+            novelty_cfg.get("alpha_only", True), "prompt.scoring.novelty.alpha_only"
+        )
+
+        raw_scaling: Any = novelty_cfg.get("scaling", "linear")
+        if raw_scaling is None:
+            raise ValueError("Invalid config value for prompt.scoring.novelty.scaling: None")
+        if not isinstance(raw_scaling, str):
+            raise ValueError("Invalid config type for prompt.scoring.novelty.scaling: expected string")
+        novelty_scaling = raw_scaling.strip().lower()
+        if novelty_scaling not in ("linear", "sqrt", "quadratic"):
+            raise ValueError(
+                "Unknown prompt.scoring.novelty.scaling: "
+                f"{raw_scaling!r} (expected: linear|sqrt|quadratic)"
+            )
+
         prompt_scoring = PromptScoringConfig(
             enabled=scoring_enabled,
             num_ideas=num_ideas,
@@ -862,10 +1140,529 @@ class RunConfig:
             judge_temperature=judge_temperature,
             judge_model=judge_model,
             judge_profile_source=judge_profile_source,  # type: ignore[arg-type]
+            idea_profile_source=idea_profile_source,  # type: ignore[arg-type]
             final_profile_source=final_profile_source,  # type: ignore[arg-type]
             generator_profile_abstraction=generator_profile_abstraction,
-            novelty=PromptNoveltyConfig(enabled=novelty_enabled, window=novelty_window),
+            novelty=PromptNoveltyConfig(
+                enabled=novelty_enabled,
+                window=novelty_window,
+                method=novelty_method,  # type: ignore[arg-type]
+                df_min=df_min,
+                max_motifs=max_motifs,
+                min_token_len=min_token_len,
+                stopwords_extra=stopwords_extra,
+                max_penalty=max_penalty,
+                df_cap=df_cap,
+                alpha_only=alpha_only,
+                scaling=novelty_scaling,  # type: ignore[arg-type]
+            ),
         )
+
+        raw_blackbox_refine: Any = prompt_cfg.get("blackbox_refine")
+        blackbox_refine_cfg: Mapping[str, Any]
+        blackbox_refine_present = raw_blackbox_refine is not None
+        if raw_blackbox_refine is None:
+            blackbox_refine_cfg = {}
+        elif not isinstance(raw_blackbox_refine, Mapping):
+            raise ValueError("Invalid config type for prompt.blackbox_refine: expected mapping")
+        else:
+            blackbox_refine_cfg = raw_blackbox_refine
+
+        plan_requires_blackbox_refine = prompt_plan in ("blackbox_refine", "blackbox_refine_only")
+        prompt_blackbox_refine: PromptBlackboxRefineConfig | None = None
+
+        if blackbox_refine_present or plan_requires_blackbox_refine:
+            enabled_default = True if plan_requires_blackbox_refine or blackbox_refine_present else False
+            blackbox_refine_enabled = parse_bool(
+                blackbox_refine_cfg.get("enabled", enabled_default),
+                "prompt.blackbox_refine.enabled",
+            )
+
+            if plan_requires_blackbox_refine and not blackbox_refine_enabled:
+                raise ValueError(
+                    f"prompt.plan={prompt_plan} requires prompt.blackbox_refine.enabled=true"
+                )
+
+            iterations = parse_int(
+                blackbox_refine_cfg.get("iterations", 3),
+                "prompt.blackbox_refine.iterations",
+            )
+            if iterations < 1:
+                raise ValueError(
+                    "Invalid config value for prompt.blackbox_refine.iterations: must be >= 1"
+                )
+
+            raw_algorithm: Any = blackbox_refine_cfg.get("algorithm", "hillclimb")
+            if raw_algorithm is None:
+                raise ValueError("Invalid config value for prompt.blackbox_refine.algorithm: None")
+            if not isinstance(raw_algorithm, str):
+                raise ValueError(
+                    "Invalid config type for prompt.blackbox_refine.algorithm: expected string"
+                )
+            algorithm = raw_algorithm.strip().lower()
+            if algorithm not in ("hillclimb", "beam"):
+                raise ValueError(
+                    "Unknown prompt.blackbox_refine.algorithm: "
+                    f"{raw_algorithm!r} (expected: hillclimb|beam)"
+                )
+
+            beam_width = parse_int(
+                blackbox_refine_cfg.get("beam_width", 3),
+                "prompt.blackbox_refine.beam_width",
+            )
+            if beam_width < 1:
+                raise ValueError(
+                    "Invalid config value for prompt.blackbox_refine.beam_width: must be >= 1"
+                )
+            if algorithm == "beam" and beam_width < 2:
+                raise ValueError(
+                    "prompt.blackbox_refine.algorithm=beam requires prompt.blackbox_refine.beam_width >= 2"
+                )
+
+            branching_factor = parse_int(
+                blackbox_refine_cfg.get("branching_factor", 6),
+                "prompt.blackbox_refine.branching_factor",
+            )
+            if branching_factor < 1:
+                raise ValueError(
+                    "Invalid config value for prompt.blackbox_refine.branching_factor: must be >= 1"
+                )
+
+            include_parents_as_candidates = parse_bool(
+                blackbox_refine_cfg.get("include_parents_as_candidates", True),
+                "prompt.blackbox_refine.include_parents_as_candidates",
+            )
+
+            if algorithm == "beam":
+                available_initial = branching_factor + (1 if include_parents_as_candidates else 0)
+                if available_initial < beam_width:
+                    raise ValueError(
+                        "prompt.blackbox_refine.algorithm=beam requires enough initial candidates: "
+                        "branching_factor + (include_parents_as_candidates?1:0) must be >= beam_width "
+                        f"(got branching_factor={branching_factor}, include_parents_as_candidates={include_parents_as_candidates}, beam_width={beam_width})"
+                    )
+
+            generator_model = optional_str("prompt.blackbox_refine.generator_model")
+            generator_temperature = parse_float(
+                blackbox_refine_cfg.get("generator_temperature", 0.9),
+                "prompt.blackbox_refine.generator_temperature",
+            )
+            if not (0.0 <= generator_temperature <= 1.5):
+                raise ValueError(
+                    "Invalid config value for prompt.blackbox_refine.generator_temperature: "
+                    "must be in [0, 1.5]"
+                )
+
+            max_prompt_chars: int | None
+            if "max_prompt_chars" not in blackbox_refine_cfg:
+                max_prompt_chars = 3500
+            else:
+                raw_max_chars = blackbox_refine_cfg.get("max_prompt_chars")
+                if raw_max_chars is None:
+                    max_prompt_chars = None
+                else:
+                    max_prompt_chars = parse_int(raw_max_chars, "prompt.blackbox_refine.max_prompt_chars")
+                    if max_prompt_chars <= 0:
+                        raise ValueError(
+                            "Invalid config value for prompt.blackbox_refine.max_prompt_chars: must be > 0 or null"
+                        )
+
+            raw_variation_prompt: Any = blackbox_refine_cfg.get("variation_prompt")
+            variation_prompt_cfg: Mapping[str, Any]
+            if raw_variation_prompt is None:
+                variation_prompt_cfg = {}
+            elif not isinstance(raw_variation_prompt, Mapping):
+                raise ValueError(
+                    "Invalid config type for prompt.blackbox_refine.variation_prompt: expected mapping"
+                )
+            else:
+                variation_prompt_cfg = raw_variation_prompt
+
+            raw_template: Any = variation_prompt_cfg.get("template", "v1")
+            if raw_template is None:
+                raise ValueError(
+                    "Invalid config value for prompt.blackbox_refine.variation_prompt.template: None"
+                )
+            if not isinstance(raw_template, str):
+                raise ValueError(
+                    "Invalid config type for prompt.blackbox_refine.variation_prompt.template: expected string"
+                )
+            template = raw_template.strip().lower()
+            if template not in ("v1", "v2"):
+                raise ValueError(
+                    "Unknown prompt.blackbox_refine.variation_prompt.template: "
+                    f"{raw_template!r} (expected: v1|v2)"
+                )
+
+            include_concepts = parse_bool(
+                variation_prompt_cfg.get("include_concepts", True),
+                "prompt.blackbox_refine.variation_prompt.include_concepts",
+            )
+            include_context_guidance = parse_bool(
+                variation_prompt_cfg.get("include_context_guidance", False),
+                "prompt.blackbox_refine.variation_prompt.include_context_guidance",
+            )
+            include_profile = parse_bool(
+                variation_prompt_cfg.get("include_profile", True),
+                "prompt.blackbox_refine.variation_prompt.include_profile",
+            )
+
+            raw_profile_source: Any = variation_prompt_cfg.get("profile_source", "likes_dislikes")
+            if raw_profile_source is None:
+                raise ValueError(
+                    "Invalid config value for prompt.blackbox_refine.variation_prompt.profile_source: None"
+                )
+            if not isinstance(raw_profile_source, str):
+                raise ValueError(
+                    "Invalid config type for prompt.blackbox_refine.variation_prompt.profile_source: expected string"
+                )
+            profile_source = raw_profile_source.strip().lower()
+            if profile_source not in (
+                "raw",
+                "generator_hints",
+                "likes_dislikes",
+                "dislikes_only",
+                "combined",
+            ):
+                raise ValueError(
+                    "Unknown prompt.blackbox_refine.variation_prompt.profile_source: "
+                    f"{raw_profile_source!r} (expected: raw|generator_hints|likes_dislikes|dislikes_only|combined)"
+                )
+
+            if (
+                include_profile
+                and profile_source == "generator_hints"
+                and not prompt_scoring.generator_profile_abstraction
+            ):
+                warnings.append(
+                    "prompt.blackbox_refine.variation_prompt.profile_source=generator_hints but "
+                    "prompt.scoring.generator_profile_abstraction=false; generator_hints will equal raw profile in blackbox.prepare"
+                )
+
+            include_novelty_summary = parse_bool(
+                variation_prompt_cfg.get("include_novelty_summary", True),
+                "prompt.blackbox_refine.variation_prompt.include_novelty_summary",
+            )
+            include_mutation_directive = parse_bool(
+                variation_prompt_cfg.get("include_mutation_directive", True),
+                "prompt.blackbox_refine.variation_prompt.include_mutation_directive",
+            )
+            include_scoring_rubric = parse_bool(
+                variation_prompt_cfg.get("include_scoring_rubric", True),
+                "prompt.blackbox_refine.variation_prompt.include_scoring_rubric",
+            )
+
+            variation_prompt = PromptBlackboxRefineVariationPromptConfig(
+                template=template,  # type: ignore[arg-type]
+                include_concepts=include_concepts,
+                include_context_guidance=include_context_guidance,
+                include_profile=include_profile,
+                profile_source=profile_source,  # type: ignore[arg-type]
+                include_novelty_summary=include_novelty_summary,
+                include_mutation_directive=include_mutation_directive,
+                include_scoring_rubric=include_scoring_rubric,
+            )
+
+            raw_mutation_directives: Any = blackbox_refine_cfg.get("mutation_directives")
+            mutation_directives_cfg: Mapping[str, Any]
+            if raw_mutation_directives is None:
+                mutation_directives_cfg = {}
+            elif not isinstance(raw_mutation_directives, Mapping):
+                raise ValueError(
+                    "Invalid config type for prompt.blackbox_refine.mutation_directives: expected mapping"
+                )
+            else:
+                mutation_directives_cfg = raw_mutation_directives
+
+            raw_mutation_mode: Any = mutation_directives_cfg.get("mode", "random")
+            if raw_mutation_mode is None:
+                raise ValueError(
+                    "Invalid config value for prompt.blackbox_refine.mutation_directives.mode: None"
+                )
+            if not isinstance(raw_mutation_mode, str):
+                raise ValueError(
+                    "Invalid config type for prompt.blackbox_refine.mutation_directives.mode: expected string"
+                )
+            mutation_mode = raw_mutation_mode.strip().lower()
+            if mutation_mode not in ("none", "random", "cycle", "fixed"):
+                raise ValueError(
+                    "Unknown prompt.blackbox_refine.mutation_directives.mode: "
+                    f"{raw_mutation_mode!r} (expected: none|random|cycle|fixed)"
+                )
+
+            default_directives = (
+                "Mutate composition and camera perspective while preserving subject and mood.",
+                "Increase specificity: add concrete materials, lighting, and lens details.",
+                "Introduce a subtle narrative twist; avoid clichés.",
+            )
+            directives_raw: Any
+            if "directives" in mutation_directives_cfg:
+                directives_raw = mutation_directives_cfg.get("directives")
+                directives = parse_string_list(
+                    directives_raw,
+                    "prompt.blackbox_refine.mutation_directives.directives",
+                )
+            else:
+                directives = tuple(default_directives)
+
+            if mutation_mode != "none" and not directives:
+                raise ValueError(
+                    "prompt.blackbox_refine.mutation_directives.mode requires prompt.blackbox_refine.mutation_directives.directives"
+                )
+
+            raw_per_axis: Any = mutation_directives_cfg.get("per_axis")
+            per_axis_cfg: Mapping[str, Any]
+            if raw_per_axis is None:
+                per_axis_cfg = {}
+            elif not isinstance(raw_per_axis, Mapping):
+                raise ValueError(
+                    "Invalid config type for prompt.blackbox_refine.mutation_directives.per_axis: expected mapping"
+                )
+            else:
+                per_axis_cfg = raw_per_axis
+
+            per_axis_enabled = parse_bool(
+                per_axis_cfg.get("enabled", False),
+                "prompt.blackbox_refine.mutation_directives.per_axis.enabled",
+            )
+            per_axis_axes = parse_string_list(
+                per_axis_cfg.get("axes"),
+                "prompt.blackbox_refine.mutation_directives.per_axis.axes",
+            )
+            if per_axis_enabled:
+                raise ValueError(
+                    "prompt.blackbox_refine.mutation_directives.per_axis.enabled=true is not implemented yet"
+                )
+
+            mutation_directives = PromptBlackboxRefineMutationDirectivesConfig(
+                mode=mutation_mode,  # type: ignore[arg-type]
+                directives=tuple(directives),
+                per_axis=PromptBlackboxRefineMutationPerAxisConfig(
+                    enabled=per_axis_enabled,
+                    axes=tuple(per_axis_axes),
+                ),
+            )
+
+            raw_judging: Any = blackbox_refine_cfg.get("judging")
+            judging_cfg: Mapping[str, Any]
+            if raw_judging is None:
+                judging_cfg = {}
+            elif not isinstance(raw_judging, Mapping):
+                raise ValueError("Invalid config type for prompt.blackbox_refine.judging: expected mapping")
+            else:
+                judging_cfg = raw_judging
+
+            judges_list_raw = judging_cfg.get("judges")
+            judges: list[PromptBlackboxRefineJudgeConfig] = []
+            if judges_list_raw is None:
+                warnings.append(
+                    "prompt.blackbox_refine.judging.judges not set; defaulting to one judge (id=j1)"
+                )
+                judges.append(
+                    PromptBlackboxRefineJudgeConfig(
+                        id="j1",
+                        model=None,
+                        temperature=None,
+                        weight=1.0,
+                        rubric="default",  # type: ignore[arg-type]
+                    )
+                )
+            else:
+                if not isinstance(judges_list_raw, list):
+                    raise ValueError(
+                        "Invalid config type for prompt.blackbox_refine.judging.judges: expected list[object]"
+                    )
+                if not judges_list_raw:
+                    raise ValueError("prompt.blackbox_refine.judging.judges must not be empty")
+
+                seen_judge_ids: set[str] = set()
+                for idx, judge_raw in enumerate(judges_list_raw):
+                    if not isinstance(judge_raw, Mapping):
+                        raise ValueError(
+                            f"Invalid config type for prompt.blackbox_refine.judging.judges[{idx}]: expected mapping"
+                        )
+
+                    allowed_judge_keys = {"id", "model", "temperature", "weight", "rubric"}
+                    for key in judge_raw.keys():
+                        if key not in allowed_judge_keys:
+                            raise ValueError(
+                                f"Unknown config key prompt.blackbox_refine.judging.judges[{idx}].{key}"
+                            )
+
+                    raw_judge_id = judge_raw.get("id")
+                    if raw_judge_id is None:
+                        raise ValueError(
+                            f"Missing required config: prompt.blackbox_refine.judging.judges[{idx}].id"
+                        )
+                    if not isinstance(raw_judge_id, str) or not raw_judge_id.strip():
+                        raise ValueError(
+                            f"Invalid config value for prompt.blackbox_refine.judging.judges[{idx}].id: must be a non-empty string"
+                        )
+                    judge_id = raw_judge_id.strip()
+                    if judge_id in seen_judge_ids:
+                        raise ValueError(
+                            f"Duplicate judge id in prompt.blackbox_refine.judging.judges: {judge_id}"
+                        )
+                    seen_judge_ids.add(judge_id)
+
+                    judge_model: str | None = None
+                    raw_judge_model = judge_raw.get("model")
+                    if raw_judge_model is not None:
+                        if not isinstance(raw_judge_model, str):
+                            raise ValueError(
+                                f"Invalid config type for prompt.blackbox_refine.judging.judges[{idx}].model: expected string or null"
+                            )
+                        judge_model = raw_judge_model.strip() or None
+                        if raw_judge_model is not None and judge_model is None:
+                            raise ValueError(
+                                f"Invalid config value for prompt.blackbox_refine.judging.judges[{idx}].model: must be a non-empty string or null"
+                            )
+
+                    judge_temp: float | None = None
+                    raw_judge_temp = judge_raw.get("temperature")
+                    if raw_judge_temp is not None:
+                        judge_temp = parse_float(
+                            raw_judge_temp,
+                            f"prompt.blackbox_refine.judging.judges[{idx}].temperature",
+                        )
+                        if not (0.0 <= judge_temp <= 1.5):
+                            raise ValueError(
+                                f"Invalid config value for prompt.blackbox_refine.judging.judges[{idx}].temperature: must be in [0, 1.5]"
+                            )
+
+                    judge_weight = parse_float(
+                        judge_raw.get("weight", 1.0),
+                        f"prompt.blackbox_refine.judging.judges[{idx}].weight",
+                    )
+                    if judge_weight <= 0:
+                        raise ValueError(
+                            f"Invalid config value for prompt.blackbox_refine.judging.judges[{idx}].weight: must be > 0"
+                        )
+
+                    raw_rubric: Any = judge_raw.get("rubric", "default")
+                    if raw_rubric is None:
+                        raise ValueError(
+                            f"Invalid config value for prompt.blackbox_refine.judging.judges[{idx}].rubric: None"
+                        )
+                    if not isinstance(raw_rubric, str):
+                        raise ValueError(
+                            f"Invalid config type for prompt.blackbox_refine.judging.judges[{idx}].rubric: expected string"
+                        )
+                    rubric = raw_rubric.strip().lower()
+                    if rubric not in ("default", "strict", "novelty_heavy"):
+                        raise ValueError(
+                            f"Unknown prompt.blackbox_refine.judging.judges[{idx}].rubric: "
+                            f"{raw_rubric!r} (expected: default|strict|novelty_heavy)"
+                        )
+
+                    judges.append(
+                        PromptBlackboxRefineJudgeConfig(
+                            id=judge_id,
+                            model=judge_model,
+                            temperature=judge_temp,
+                            weight=float(judge_weight),
+                            rubric=rubric,  # type: ignore[arg-type]
+                        )
+                    )
+
+            raw_aggregation: Any = judging_cfg.get("aggregation", "mean")
+            if raw_aggregation is None:
+                raise ValueError("Invalid config value for prompt.blackbox_refine.judging.aggregation: None")
+            if not isinstance(raw_aggregation, str):
+                raise ValueError(
+                    "Invalid config type for prompt.blackbox_refine.judging.aggregation: expected string"
+                )
+            aggregation = raw_aggregation.strip().lower()
+            if aggregation not in ("mean", "median", "min", "max", "trimmed_mean"):
+                raise ValueError(
+                    "Unknown prompt.blackbox_refine.judging.aggregation: "
+                    f"{raw_aggregation!r} (expected: mean|median|min|max|trimmed_mean)"
+                )
+
+            trimmed_mean_drop = parse_int(
+                judging_cfg.get("trimmed_mean_drop", 0),
+                "prompt.blackbox_refine.judging.trimmed_mean_drop",
+            )
+            if trimmed_mean_drop < 0:
+                raise ValueError(
+                    "Invalid config value for prompt.blackbox_refine.judging.trimmed_mean_drop: must be >= 0"
+                )
+            if aggregation != "trimmed_mean" and "trimmed_mean_drop" in judging_cfg and trimmed_mean_drop != 0:
+                raise ValueError(
+                    "prompt.blackbox_refine.judging.trimmed_mean_drop is only valid when aggregation=trimmed_mean"
+                )
+            if aggregation == "trimmed_mean" and trimmed_mean_drop * 2 >= len(judges):
+                raise ValueError(
+                    "prompt.blackbox_refine.judging.trimmed_mean_drop is too large for judge count "
+                    f"(drop={trimmed_mean_drop}, judges={len(judges)})"
+                )
+
+            judging = PromptBlackboxRefineJudgingConfig(
+                judges=tuple(judges),
+                aggregation=aggregation,  # type: ignore[arg-type]
+                trimmed_mean_drop=trimmed_mean_drop,
+            )
+
+            raw_selection: Any = blackbox_refine_cfg.get("selection")
+            selection_cfg: Mapping[str, Any]
+            if raw_selection is None:
+                selection_cfg = {}
+            elif not isinstance(raw_selection, Mapping):
+                raise ValueError("Invalid config type for prompt.blackbox_refine.selection: expected mapping")
+            else:
+                selection_cfg = raw_selection
+
+            raw_expl_override = selection_cfg.get("exploration_rate_override")
+            exploration_rate_override: float | None = None
+            if raw_expl_override is not None:
+                exploration_rate_override = parse_float(
+                    raw_expl_override, "prompt.blackbox_refine.selection.exploration_rate_override"
+                )
+                if not (0.0 <= exploration_rate_override <= 0.5):
+                    raise ValueError(
+                        "Invalid config value for prompt.blackbox_refine.selection.exploration_rate_override: must be in [0, 0.5]"
+                    )
+
+            group_by_beam = parse_bool(
+                selection_cfg.get("group_by_beam", False),
+                "prompt.blackbox_refine.selection.group_by_beam",
+            )
+
+            raw_tie_breaker: Any = selection_cfg.get("tie_breaker", "stable_id")
+            if raw_tie_breaker is None:
+                raise ValueError("Invalid config value for prompt.blackbox_refine.selection.tie_breaker: None")
+            if not isinstance(raw_tie_breaker, str):
+                raise ValueError(
+                    "Invalid config type for prompt.blackbox_refine.selection.tie_breaker: expected string"
+                )
+            tie_breaker = raw_tie_breaker.strip().lower()
+            if tie_breaker not in ("stable_id", "prefer_shorter", "prefer_novel"):
+                raise ValueError(
+                    "Unknown prompt.blackbox_refine.selection.tie_breaker: "
+                    f"{raw_tie_breaker!r} (expected: stable_id|prefer_shorter|prefer_novel)"
+                )
+
+            selection = PromptBlackboxRefineSelectionConfig(
+                exploration_rate_override=exploration_rate_override,
+                group_by_beam=group_by_beam,
+                tie_breaker=tie_breaker,  # type: ignore[arg-type]
+            )
+
+            prompt_blackbox_refine = PromptBlackboxRefineConfig(
+                enabled=blackbox_refine_enabled,
+                iterations=iterations,
+                algorithm=algorithm,  # type: ignore[arg-type]
+                beam_width=beam_width,
+                branching_factor=branching_factor,
+                include_parents_as_candidates=include_parents_as_candidates,
+                generator_model=generator_model,
+                generator_temperature=generator_temperature,
+                max_prompt_chars=max_prompt_chars,
+                variation_prompt=variation_prompt,
+                mutation_directives=mutation_directives,
+                judging=judging,
+                selection=selection,
+            )
 
         concepts_cfg_raw: Any = prompt_cfg.get("concepts")
         concepts_cfg: Mapping[str, Any]
@@ -1138,6 +1935,7 @@ class RunConfig:
                 log_dir=normalize_path(log_dir_raw),
                 run_mode=run_mode,  # type: ignore[arg-type]
                 experiment=experiment,
+                run_review=run_review,
                 categories_path=normalize_path(categories_path_raw),
                 profile_path=normalize_path(profile_path_raw),
                 generations_csv_path=normalize_optional_path(generations_csv_raw),
@@ -1145,6 +1943,7 @@ class RunConfig:
                 caption_font_path=normalize_path(caption_font_raw) if caption_font_raw else None,
                 random_seed=random_seed,
                 prompt_scoring=prompt_scoring,
+                prompt_blackbox_refine=prompt_blackbox_refine,
                 prompt_concepts=prompt_concepts,
                 prompt_plan=prompt_plan,
                 prompt_refinement_policy=prompt_refinement_policy,

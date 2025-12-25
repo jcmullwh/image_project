@@ -359,15 +359,81 @@ def idea_cards_generate_prompt(
     )
 
 
+def idea_card_generate_prompt(
+    *,
+    concepts: list[str],
+    generator_profile_hints: str,
+    idea_id: str,
+    idea_ordinal: int | None = None,
+    num_ideas: int,
+    context_guidance: str | None = None,
+    diversity_directive: str | None = None,
+) -> str:
+    concepts_block = "\n".join(f"- {c}" for c in concepts) if concepts else "- <none>"
+    hints = (generator_profile_hints or "").strip()
+    context_block = (context_guidance or "").strip()
+    directive_block = (diversity_directive or "").strip()
+    ordinal = int(idea_ordinal) if idea_ordinal is not None else None
+    return textwrap.dedent(
+        f"""
+        Generate ONE image "idea card" as strict JSON.
+
+        This is idea id {idea_id!r} ({ordinal if ordinal is not None else "?"} of {num_ideas}). Your JSON MUST include "id": "{idea_id}".
+
+        Goal:
+        - Produce a bold, specific, non-generic idea with clear visual anchors.
+        - Avoid vague filler ("beautiful", "stunning", "mystical", "epic") and avoid cliché combinations.
+        - Make this idea feel meaningfully different in approach (composition/setting/medium/narrative) from other ids in the same batch.
+
+        Diversity directive (apply it without contradicting selected concepts):
+        {directive_block if directive_block else "<none>"}
+
+        Selected concepts:
+        {concepts_block}
+
+        Context guidance (optional):
+        {context_block if context_block else "<none>"}
+
+        Generator-safe profile hints:
+        {hints if hints else "<none>"}
+
+        Output must be STRICT JSON only (no markdown, no commentary), with this exact schema:
+        {{
+          "id": "{idea_id}",
+          "hook": "One sentence pitch.",
+          "narrative": "Short paragraph.",
+          "options": {{
+            "composition": ["...", "..."],
+            "palette": ["...", "..."],
+            "medium": ["..."],
+            "mood": ["..."]
+          }},
+          "avoid": ["..."]
+        }}
+
+        Hard constraints:
+        - id MUST be exactly "{idea_id}".
+        - Each options list must contain meaningful, non-synonym variation (materially different choices).
+        - Composition options should be concrete and camera/composition-aware (e.g., framing, angle, lens, negative space).
+        - Palette options should be concrete (named colors + lighting temperature, not just "vibrant").
+        - composition and palette lists must have at least 2 items.
+        - medium and mood lists must have at least 1 item.
+        - "avoid" may be omitted or an empty list, but if present it should be specific (e.g., overused motifs, compositional pitfalls, disliked vibes).
+        """.strip()
+    )
+
+
 def idea_cards_judge_prompt(
     *,
     concepts: list[str],
     raw_profile: str,
     idea_cards_json: str,
     recent_motif_summary: str | None,
+    context_guidance: str | None = None,
 ) -> str:
     concepts_block = "\n".join(f"- {c}" for c in concepts) if concepts else "- <none>"
     recent_block = (recent_motif_summary or "").strip()
+    context_block = (context_guidance or "").strip()
     return textwrap.dedent(
         f"""
         You are a strict numeric judge. Score each candidate idea card from 0 to 100.
@@ -375,6 +441,9 @@ def idea_cards_judge_prompt(
         Inputs:
         - Selected concepts (must align strongly):
         {concepts_block}
+
+        - Context guidance (optional; reward tasteful use when present):
+        {context_block if context_block else "<none>"}
 
         - Raw user profile (use for judging only; do not rewrite it):
         {raw_profile.strip()}
@@ -405,23 +474,32 @@ def final_prompt_from_selected_idea_prompt(
     concepts: list[str],
     raw_profile: str,
     selected_idea_card: dict[str, object],
+    context_guidance: str | None = None,
 ) -> str:
     concepts_block = "\n".join(f"- {c}" for c in concepts) if concepts else "- <none>"
     idea_json = json.dumps(selected_idea_card, ensure_ascii=False, indent=2)
+    context_block = (context_guidance or "").strip()
     return textwrap.dedent(
         f"""
-        Create a single final image prompt (Midjourney-style), based on the selected idea card.
+        Create a single final image prompt, based on the selected idea card.
+
+        Output format:
+        - Output ONLY the final image prompt. No title, no explanation, no quotes, no markdown.
+        - Prefer a high-signal prompt with short labeled lines (omit labels that don't apply).
+        - Be concrete: subject/action, setting, lighting, composition/framing, medium/style, palette, textures/materials.
+        - Avoid generic adjectives and avoid cliché combinations; make it feel like a specific artwork, not a generic scene.
 
         Selected concepts (must be integrated thoughtfully):
         {concepts_block}
+
+        Context guidance (optional; incorporate subtle seasonal/holiday cues when present):
+        {context_block if context_block else "<none>"}
 
         Raw user profile (authoritative preferences and avoid constraints):
         {raw_profile.strip()}
 
         Selected idea card (JSON):
         {idea_json}
-
-        Output ONLY the final image prompt. No title, no explanation, no quotes, no markdown.
         """.strip()
     )
 
@@ -803,6 +881,30 @@ def _resolve_blackbox_profile_text(
                 f"{stage_id} requires generator_profile_hints for {config_path}=generator_hints"
             )
         return hints
+    if source == "generator_hints_plus_dislikes":
+        hints = ctx.outputs.get("generator_profile_hints")
+        if not isinstance(hints, str) or not hints.strip():
+            raise ValueError(
+                f"{stage_id} requires generator_profile_hints for {config_path}=generator_hints_plus_dislikes"
+            )
+
+        dislikes_raw = ctx.outputs.get("dislikes")
+        if dislikes_raw is None:
+            dislikes = []
+        elif isinstance(dislikes_raw, list):
+            dislikes = [str(v).strip() for v in dislikes_raw if str(v).strip()]
+        else:
+            raise ValueError(
+                f"{stage_id} requires dislikes to be a list for {config_path}=generator_hints_plus_dislikes"
+            )
+
+        dislikes_block = "\n".join(f"- {item}" for item in dislikes) if dislikes else "- <none>"
+        return (
+            "Profile extraction (generator-safe hints):\n"
+            + hints.strip()
+            + "\n\nDislikes:\n"
+            + dislikes_block
+        ).strip()
 
     raise ValueError(f"Unknown profile source for {config_path}: {source}")
 
@@ -822,20 +924,21 @@ def blackbox_prepare(inputs: PlanInputs) -> ActionStageSpec:
         if not scoring_cfg.enabled:
             raise ValueError("blackbox.prepare requires prompt.scoring.enabled=true")
 
-        novelty_enabled = bool(scoring_cfg.novelty.enabled and scoring_cfg.novelty.window > 0)
+        novelty_enabled_cfg = bool(scoring_cfg.novelty.enabled and scoring_cfg.novelty.window > 0)
+        novelty_enabled_effective = bool(novelty_enabled_cfg)
         ctx.logger.info(
             "Blackbox scoring enabled: num_ideas=%d, exploration_rate=%.3g, novelty=%s",
             scoring_cfg.num_ideas,
             scoring_cfg.exploration_rate,
-            novelty_enabled,
+            novelty_enabled_cfg,
         )
 
         novelty_summary: dict[str, Any]
-        if novelty_enabled:
+        if novelty_enabled_cfg:
             try:
                 novelty_summary = blackbox_scoring.extract_recent_motif_summary(
                     generations_csv_path=ctx.cfg.generations_csv_path,
-                    window=scoring_cfg.novelty.window,
+                    novelty_cfg=scoring_cfg.novelty,
                 )
             except Exception as exc:
                 ctx.logger.warning(
@@ -843,7 +946,7 @@ def blackbox_prepare(inputs: PlanInputs) -> ActionStageSpec:
                     ctx.cfg.generations_csv_path,
                     exc,
                 )
-                novelty_enabled = False
+                novelty_enabled_effective = False
                 novelty_summary = {
                     "enabled": False,
                     "window": scoring_cfg.novelty.window,
@@ -861,13 +964,20 @@ def blackbox_prepare(inputs: PlanInputs) -> ActionStageSpec:
         if ctx.blackbox_scoring is None:
             ctx.blackbox_scoring = {}
         ctx.blackbox_scoring["novelty_summary"] = novelty_summary
+        ctx.blackbox_scoring["novelty"] = {
+            "method": scoring_cfg.novelty.method,
+            "window": int(scoring_cfg.novelty.window),
+            "enabled_cfg": bool(novelty_enabled_cfg),
+            "enabled_effective": bool(novelty_enabled_effective),
+        }
 
         # Default generator hints (may be overwritten by profile_abstraction stage).
         ctx.outputs["generator_profile_hints"] = str(ctx.outputs.get("preferences_guidance") or "")
 
         return {
-            "novelty_enabled": novelty_enabled,
-            "novelty_window": scoring_cfg.novelty.window,
+            "novelty_enabled": bool(novelty_enabled_effective),
+            "novelty_window": int(scoring_cfg.novelty.window),
+            "novelty_method": scoring_cfg.novelty.method,
         }
 
     return ActionStageSpec(
@@ -909,9 +1019,20 @@ def blackbox_idea_cards_generate(inputs: PlanInputs) -> StageSpec:
     scoring_cfg = inputs.cfg.prompt_scoring
 
     def _prompt(ctx: RunContext) -> str:
-        hints = ctx.outputs.get("generator_profile_hints")
-        if not isinstance(hints, str) or not hints.strip():
+        idea_profile_source = scoring_cfg.idea_profile_source
+        if idea_profile_source == "none":
+            hints = ""
+        elif idea_profile_source == "raw":
             hints = str(ctx.outputs.get("preferences_guidance") or "")
+        elif idea_profile_source == "generator_hints":
+            hints = ctx.outputs.get("generator_profile_hints")
+            if not isinstance(hints, str) or not hints.strip():
+                hints = str(ctx.outputs.get("preferences_guidance") or "")
+        else:  # pragma: no cover - guarded by config validation
+            raise ValueError(
+                "Unknown prompt.scoring.idea_profile_source: "
+                f"{idea_profile_source!r} (expected: raw|generator_hints|none)"
+            )
         return prompts.idea_cards_generate_prompt(
             concepts=list(ctx.selected_concepts),
             generator_profile_hints=str(hints or ""),
@@ -928,6 +1049,115 @@ def blackbox_idea_cards_generate(inputs: PlanInputs) -> StageSpec:
     )
 
 
+def build_blackbox_isolated_idea_card_specs(inputs: PlanInputs) -> list[StageNodeSpec]:
+    from image_project.framework.scoring import expected_idea_ids
+
+    scoring_cfg = inputs.cfg.prompt_scoring
+    idea_ids = expected_idea_ids(scoring_cfg.num_ideas)
+    context_guidance = inputs.context_guidance or None
+
+    diversity_directives: tuple[str, ...] = (
+        "Perspective-first: extreme close-up / macro framing, tactile textures, intimate scale.",
+        "Environment-first: wide establishing shot with clear foreground/midground/background and strong negative space.",
+        "Light-first: dramatic lighting design (chiaroscuro, rim light, silhouettes, strong shadow shapes).",
+        "Color-first: decisive palette strategy (limited palette with 1 accent, or bold complementary contrast).",
+        "Narrative-first: depict a precise moment of action/gesture with implied before/after; avoid romance tropes.",
+        "Surreal-but-coherent: one impossible element treated as mundane; avoid dreamy vagueness.",
+        "Medium/artifact-first: make the medium feel real (film grain, brushwork, paper texture, collage seams, 3D materials).",
+        "Time/setting shift: relocate to an unexpected setting or era with concrete props/weather/time-of-day cues.",
+    )
+
+    def _resolve_profile_hints(ctx: RunContext, *, stage_id: str) -> str:
+        idea_profile_source = scoring_cfg.idea_profile_source
+        if idea_profile_source == "none":
+            return ""
+        if idea_profile_source == "raw":
+            return str(ctx.outputs.get("preferences_guidance") or "")
+        if idea_profile_source == "generator_hints":
+            hints = ctx.outputs.get("generator_profile_hints")
+            if not isinstance(hints, str) or not hints.strip():
+                return str(ctx.outputs.get("preferences_guidance") or "")
+            return hints
+        raise ValueError(
+            f"Unknown prompt.scoring.idea_profile_source for {stage_id}: "
+            f"{idea_profile_source!r} (expected: raw|generator_hints|none)"
+        )
+
+    specs: list[StageNodeSpec] = []
+    for idea_ordinal, idea_id in enumerate(idea_ids, start=1):
+        stage_id = f"blackbox.idea_card_generate.{idea_id}"
+        output_key = f"blackbox.idea_card.{idea_id}.json"
+        directive = diversity_directives[(idea_ordinal - 1) % len(diversity_directives)]
+
+        def _prompt(
+            ctx: RunContext,
+            *,
+            idea_id=idea_id,
+            idea_ordinal=idea_ordinal,
+            directive=directive,
+            stage_id=stage_id,
+            context_guidance=context_guidance,
+        ) -> str:
+            hints = _resolve_profile_hints(ctx, stage_id=stage_id)
+            return prompts.idea_card_generate_prompt(
+                concepts=list(ctx.selected_concepts),
+                generator_profile_hints=str(hints or ""),
+                idea_id=idea_id,
+                idea_ordinal=idea_ordinal,
+                num_ideas=scoring_cfg.num_ideas,
+                context_guidance=context_guidance,
+                diversity_directive=directive,
+            )
+
+        specs.append(
+            StageSpec(
+                stage_id=stage_id,
+                prompt=_prompt,
+                temperature=0.8,
+                merge="none",
+                output_key=output_key,
+                refinement_policy="none",
+                tags=("blackbox",),
+                doc="Generate one idea card (strict JSON).",
+                source="prompts.idea_card_generate_prompt",
+            )
+        )
+
+    def _assemble(ctx: RunContext, *, idea_ids=idea_ids) -> str:
+        import json
+
+        from image_project.framework import scoring as blackbox_scoring
+
+        ideas: list[dict[str, Any]] = []
+        for idea_id in idea_ids:
+            key = f"blackbox.idea_card.{idea_id}.json"
+            raw = ctx.outputs.get(key)
+            if not isinstance(raw, str) or not raw.strip():
+                raise ValueError(f"Missing required output: {key}")
+            try:
+                ideas.append(blackbox_scoring.parse_idea_card_json(raw, expected_id=idea_id))
+            except Exception as exc:
+                setattr(exc, "pipeline_step", f"blackbox.idea_card_generate.{idea_id}")
+                setattr(exc, "pipeline_path", f"pipeline/blackbox.idea_card_generate.{idea_id}/draft")
+                raise
+
+        return json.dumps({"ideas": ideas}, ensure_ascii=False, indent=2)
+
+    specs.append(
+        ActionStageSpec(
+            stage_id="blackbox.idea_cards_assemble",
+            fn=_assemble,
+            merge="none",
+            output_key="idea_cards_json",
+            tags=("blackbox",),
+            doc="Assemble per-idea JSON outputs into a combined idea_cards_json payload.",
+            source="blackbox_scoring.parse_idea_card_json",
+        )
+    )
+
+    return specs
+
+
 @StageCatalog.register(
     "blackbox.idea_cards_judge_score",
     doc="Judge idea cards and emit scores (strict JSON).",
@@ -941,6 +1171,7 @@ def blackbox_idea_cards_judge_score(inputs: PlanInputs) -> StageSpec:
         judge_params["model"] = scoring_cfg.judge_model
 
     judge_profile_source = scoring_cfg.judge_profile_source
+    context_guidance = inputs.context_guidance or None
 
     def _prompt(ctx: RunContext) -> str:
         import json
@@ -964,6 +1195,7 @@ def blackbox_idea_cards_judge_score(inputs: PlanInputs) -> StageSpec:
             ),
             idea_cards_json=idea_cards_json,
             recent_motif_summary=recent_motif_summary,
+            context_guidance=context_guidance,
         )
 
     return StageSpec(
@@ -1001,19 +1233,58 @@ def blackbox_select_idea_card(inputs: PlanInputs) -> ActionStageSpec:
         if not isinstance(idea_scores_json, str) or not idea_scores_json.strip():
             raise ValueError("Missing required output: idea_scores_json")
 
+        novelty_cfg = scoring_cfg.novelty
+        novelty_enabled_cfg = bool(novelty_cfg.enabled and novelty_cfg.window > 0)
         novelty_summary: dict[str, Any] | None = None
+        novelty_available = False
         if ctx.blackbox_scoring is not None:
             raw = ctx.blackbox_scoring.get("novelty_summary")
-            if isinstance(raw, dict) and raw.get("enabled"):
+            if isinstance(raw, dict):
                 novelty_summary = raw
+                novelty_available = bool(raw.get("enabled"))
+
+        novelty_missing = bool(novelty_enabled_cfg and not novelty_available)
+        if ctx.blackbox_scoring is None:
+            ctx.blackbox_scoring = {}
+        novelty_meta = ctx.blackbox_scoring.get("novelty")
+        if not isinstance(novelty_meta, dict):
+            novelty_meta = {}
+            ctx.blackbox_scoring["novelty"] = novelty_meta
+        novelty_meta.update(
+            {
+                "method": novelty_cfg.method,
+                "window": int(novelty_cfg.window),
+                "enabled_cfg": bool(novelty_enabled_cfg),
+                "summary_available": bool(novelty_available),
+                "missing_summary": bool(novelty_missing),
+            }
+        )
+
+        if novelty_missing:
+            warn = (
+                "pipeline/blackbox.select_idea_card/action: prompt.scoring.novelty.enabled=true but novelty summary is "
+                "unavailable; novelty penalties disabled for this run"
+            )
+            ctx.logger.warning(warn)
+            warnings_log = ctx.blackbox_scoring.get("warnings")
+            if not isinstance(warnings_log, list):
+                warnings_log = []
+                ctx.blackbox_scoring["warnings"] = warnings_log
+            warnings_log.append(warn)
 
         try:
             idea_cards = blackbox_scoring.parse_idea_cards_json(
                 idea_cards_json, expected_num_ideas=scoring_cfg.num_ideas
             )
         except Exception as exc:
-            setattr(exc, "pipeline_step", "blackbox.idea_cards_generate")
-            setattr(exc, "pipeline_path", "pipeline/blackbox.idea_cards_generate/draft")
+            pipeline = ctx.outputs.get("prompt_pipeline")
+            resolved = pipeline.get("resolved_stages") if isinstance(pipeline, dict) else None
+            if isinstance(resolved, list) and "blackbox.idea_cards_assemble" in resolved:
+                setattr(exc, "pipeline_step", "blackbox.idea_cards_assemble")
+                setattr(exc, "pipeline_path", "pipeline/blackbox.idea_cards_assemble/action")
+            else:
+                setattr(exc, "pipeline_step", "blackbox.idea_cards_generate")
+                setattr(exc, "pipeline_path", "pipeline/blackbox.idea_cards_generate/draft")
             raise
 
         expected_ids = [card.get("id") for card in idea_cards if isinstance(card, dict)]
@@ -1033,6 +1304,7 @@ def blackbox_select_idea_card(inputs: PlanInputs) -> ActionStageSpec:
             idea_cards=idea_cards,
             exploration_rate=scoring_cfg.exploration_rate,
             rng=random.Random(scoring_seed),
+            novelty_cfg=novelty_cfg,
             novelty_summary=novelty_summary,
         )
 
@@ -1089,6 +1361,7 @@ def blackbox_select_idea_card(inputs: PlanInputs) -> ActionStageSpec:
 def blackbox_image_prompt_creation(inputs: PlanInputs) -> StageSpec:
     scoring_cfg = inputs.cfg.prompt_scoring
     final_profile_source = scoring_cfg.final_profile_source
+    context_guidance = inputs.context_guidance or None
 
     def _prompt(ctx: RunContext) -> str:
         selected_card = ctx.outputs.get("selected_idea_card")
@@ -1103,6 +1376,7 @@ def blackbox_image_prompt_creation(inputs: PlanInputs) -> StageSpec:
                 config_path="prompt.scoring.final_profile_source",
             ),
             selected_idea_card=selected_card,
+            context_guidance=context_guidance,
         )
 
     return StageSpec(
