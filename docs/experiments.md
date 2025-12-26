@@ -49,7 +49,7 @@ Set `prompt.plan` to one of:
 - `refine_only`: refine a provided draft prompt into the final image prompt
 - `baseline`: one-stage pipeline that captures `initial_prompt`
 - `simple`: two-stage pipeline: `standard.initial_prompt` -> `standard.image_prompt_creation`
-- `simple_no_concepts`: two-stage pipeline without concept selection/filtering
+- `simple_no_concepts`: skips concept selection/filtering and uses generator-safe profile abstraction
 - `profile_only`: `standard`, but forces context injection off (even if `context.enabled: true`)
 - `profile_only_simple`: `simple`, but forces context injection off
 - `custom`: run an explicit stage sequence from `prompt.stages.sequence`
@@ -265,4 +265,53 @@ prompt:
       - standard.image_prompt_creation
   output:
     capture_stage: standard.image_prompt_creation
+```
+
+## 3x3 Experiment Runner
+
+The repo includes a small experiment harness that runs **3 distinct variants × 3 runs each** and labels every run via `experiment.{id,variant,tags}`.
+
+```bash
+pdm run experiment-3x3 --dry-run
+pdm run experiment-3x3 --output-root ./_artifacts/experiments/my_3x3
+```
+
+Note: non-`--dry-run` execution forces `run.mode=full` so each run produces an image.
+Concepts are randomly sampled per run index and reused across sets (A1/B1/C1 share concepts, etc).
+
+Variants:
+
+- **A**: `standard` + `refinement.policy=tot`
+- **B**: `blackbox` + `prompt.scoring.enabled=true` + `refinement.policy=tot`
+- **C**: `simple_no_concepts` + `refinement.policy=none`
+
+## A/B Refinement Block Experiment Runner
+
+The repo also includes an A/B harness that runs a **3-prompt custom pipeline** and tests whether adding an explicit **refinement block** to the *middle* prompt improves the final formatted image prompt.
+
+It runs pairs `A1/B1`, `A2/B2`, ... and labels each run via `experiment.{id,variant,tags}`.
+
+Stages (custom plan):
+
+- `ab.random_token` (action) -> `ab.scene_draft` -> `ab.scene_refine_*` -> `ab.final_prompt_format`
+
+Run:
+
+```bash
+pdm run experiment-ab-refinement-block --dry-run
+pdm run experiment-ab-refinement-block --runs 5
+```
+
+Data:
+
+- Default: `--data sample` uses repo sample CSVs under `image_project/impl/current/data/sample/`.
+- Use `--data config` to use the `prompt.categories_path` / `prompt.profile_path` from your loaded config.
+
+Compare A vs B:
+
+- The runner prints generation ids like `A1_<uuid>` and `B1_<uuid>`.
+- Compare a run pair with run-review:
+
+```bash
+pdm run run-review --compare <A_generation_id> <B_generation_id> --logs-dir <output_root>/logs
 ```

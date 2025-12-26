@@ -157,6 +157,8 @@ Optional: set `image.caption_font_path` to a `.ttf` file to control the caption 
 ## How to run
 
 - Generate (uses `config/config.yaml` + optional `config/config.local.yaml`): `pdm run generate`
+- 3x3 experiment (3 variants × 3 runs): `pdm run experiment-3x3` (add `--dry-run` to validate only)
+- A/B refinement-block experiment (prompt-only by default): `pdm run experiment-ab-refinement-block` (add `--dry-run` to validate only)
 - Tests: `pdm run test` (or `pytest`)
 
 ## Examples:

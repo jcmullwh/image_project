@@ -1407,3 +1407,181 @@ def refine_image_prompt_refine(inputs: PlanInputs) -> StageSpec:
         temperature=0.8,
         is_default_capture=True,
     )
+
+
+@StageCatalog.register(
+    "ab.random_token",
+    doc="Generate a deterministic per-run random token.",
+    source="inline",
+    tags=("ab",),
+)
+def ab_random_token(_inputs: PlanInputs) -> ActionStageSpec:
+    def _action(ctx: RunContext) -> str:
+        roll = ctx.rng.randint(100000, 999999)
+        return f"RV-{ctx.seed}-{roll}"
+
+    return ActionStageSpec(
+        stage_id="ab.random_token",
+        fn=_action,
+        merge="none",
+        output_key="ab_random_token",
+    )
+
+
+@StageCatalog.register(
+    "ab.scene_draft",
+    doc="Create a scene draft from a random token.",
+    source="prompts.ab_scene_draft",
+    tags=("ab",),
+)
+def ab_scene_draft(_inputs: PlanInputs) -> StageSpec:
+    def _prompt(ctx: RunContext) -> str:
+        token = ctx.outputs.get("ab_random_token")
+        token_text = str(token).strip() if token is not None else ""
+        if not token_text:
+            raise ValueError("Missing required output: ab_random_token")
+
+        return textwrap.dedent(
+            f"""\
+            You are drafting a cinematic scene description that will later be converted into an image generation prompt.
+
+            Required token: {token_text}
+
+            Requirements:
+            - Include the token verbatim as visible text in the scene (e.g., on a sign, label, screen, tattoo, receipt).
+            - Describe a single coherent moment (no montages).
+            - Be concrete and visual: subject, setting, action, lighting, mood, camera/framing.
+            - Avoid cliches and generic phrasing.
+
+            Output:
+            - Return ONLY the scene description as 4-6 sentences. No headings, no bullets.
+            """
+        ).strip()
+
+    return StageSpec(
+        stage_id="ab.scene_draft",
+        prompt=_prompt,
+        temperature=0.85,
+        output_key="ab_scene_draft",
+    )
+
+
+def _ab_require_text_output(ctx: RunContext, key: str) -> str:
+    value = ctx.outputs.get(key)
+    if not isinstance(value, str):
+        value = str(value or "")
+    text = value.strip()
+    if not text:
+        raise ValueError(f"Missing required output: {key}")
+    return text
+
+
+@StageCatalog.register(
+    "ab.scene_refine_no_block",
+    doc="Refine the draft scene with a minimal instruction set.",
+    source="prompts.ab_scene_refine_no_block",
+    tags=("ab",),
+)
+def ab_scene_refine_no_block(_inputs: PlanInputs) -> StageSpec:
+    def _prompt(ctx: RunContext) -> str:
+        token = _ab_require_text_output(ctx, "ab_random_token")
+        draft = _ab_require_text_output(ctx, "ab_scene_draft")
+        return textwrap.dedent(
+            f"""\
+            Refine the following scene draft for an image prompt.
+
+            Constraints:
+            - Keep the required token verbatim somewhere as visible text in the scene: {token}
+            - Make the scene more specific, vivid, and visually grounded.
+
+            Draft:
+            {draft}
+
+            Output:
+            - Return ONLY the revised scene description (4-6 sentences). No headings, no bullets.
+            """
+        ).strip()
+
+    return StageSpec(
+        stage_id="ab.scene_refine_no_block",
+        prompt=_prompt,
+        temperature=0.75,
+        output_key="ab_scene_refined",
+    )
+
+
+@StageCatalog.register(
+    "ab.scene_refine_with_block",
+    doc="Refine the draft scene with an explicit refinement block.",
+    source="prompts.ab_scene_refine_with_block",
+    tags=("ab",),
+)
+def ab_scene_refine_with_block(_inputs: PlanInputs) -> StageSpec:
+    def _prompt(ctx: RunContext) -> str:
+        token = _ab_require_text_output(ctx, "ab_random_token")
+        draft = _ab_require_text_output(ctx, "ab_scene_draft")
+        return textwrap.dedent(
+            f"""\
+            Refine the following scene draft for an image prompt.
+
+            Required token (must remain verbatim as visible text in the scene): {token}
+
+            Refinement block (apply silently; do not output this block):
+            - Subject: make the main subject unmistakable and unique (no generic "a person").
+            - Setting: make time/place concrete (materials, era, weather, geography, props).
+            - Composition: specify framing, lens feel, depth of field, foreground/background.
+            - Lighting: specify the dominant light source(s) and the mood they create.
+            - Color: specify a palette and a couple accent colors.
+            - Specificity: add 3+ grounded details (textures, signage, wear, reflections, particles).
+            - Token: integrate the token diegetically (a label, screen, tag), not as metadata.
+            - Cliche filter: remove stock phrases and overused tropes.
+
+            Draft:
+            {draft}
+
+            Output:
+            - Return ONLY the revised scene description (4-6 sentences). No headings, no bullets.
+            """
+        ).strip()
+
+    return StageSpec(
+        stage_id="ab.scene_refine_with_block",
+        prompt=_prompt,
+        temperature=0.75,
+        output_key="ab_scene_refined",
+    )
+
+
+@StageCatalog.register(
+    "ab.final_prompt_format",
+    doc="Format the refined scene into a strict single-line prompt template.",
+    source="prompts.ab_final_prompt_format",
+    tags=("ab",),
+)
+def ab_final_prompt_format(_inputs: PlanInputs) -> StageSpec:
+    def _prompt(ctx: RunContext) -> str:
+        token = _ab_require_text_output(ctx, "ab_random_token")
+        refined = _ab_require_text_output(ctx, "ab_scene_refined")
+
+        return textwrap.dedent(
+            f"""\
+            Convert the refined scene description into a final image generation prompt using the exact one-line format below.
+
+            Refined scene:
+            {refined}
+
+            Output format (exactly one line; keep labels and separators):
+            SUBJECT=<...> | SETTING=<...> | ACTION=<...> | COMPOSITION=<...> | CAMERA=<...> | LIGHTING=<...> | COLOR=<...> | STYLE=<...> | TEXT_IN_SCENE="{token}" | AR=16:9
+
+            Rules:
+            - Ensure TEXT_IN_SCENE uses the token exactly as provided.
+            - Do not add extra lines before/after.
+            """
+        ).strip()
+
+    return StageSpec(
+        stage_id="ab.final_prompt_format",
+        prompt=_prompt,
+        temperature=0.6,
+        is_default_capture=True,
+    )
