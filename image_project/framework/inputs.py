@@ -69,19 +69,26 @@ def extract_dislikes(user_profile: Any) -> list[str]:
     if user_profile is None:
         return []
 
-    try:
-        dislikes_series = user_profile.get("Dislikes")
-    except Exception:
-        dislikes_series = None
+    def _get_values(column: str) -> list[str]:
+        try:
+            series = user_profile.get(column)
+        except Exception:
+            series = None
+        if series is None:
+            return []
+        return [str(value).strip() for value in series.dropna().tolist() if str(value).strip()]
 
-    if dislikes_series is None:
-        return []
+    combined: list[str] = [*_get_values("Dislikes"), *_get_values("Hates")]
 
-    return [
-        str(value).strip()
-        for value in dislikes_series.dropna().tolist()
-        if str(value).strip()
-    ]
+    # De-dupe while preserving order for stable concept filtering.
+    seen: set[str] = set()
+    out: list[str] = []
+    for value in combined:
+        if value in seen:
+            continue
+        seen.add(value)
+        out.append(value)
+    return out
 
 
 def apply_concept_filters(

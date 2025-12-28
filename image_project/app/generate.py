@@ -10,13 +10,52 @@ from dataclasses import asdict
 from datetime import datetime
 from typing import Any
 
-import pandas as pd
+TextAI = None
+ImageAI = None
 
-try:
-    from ai_backend import ImageAI, TextAI
-except ModuleNotFoundError:  # pragma: no cover
-    ImageAI = None  # type: ignore[assignment]
-    TextAI = None  # type: ignore[assignment]
+
+def _load_text_ai_cls():
+    if TextAI is not None:
+        return TextAI
+
+    try:
+        from openai_backend.openai_text_backend import OpenAITextBackend  # noqa: PLC0415
+
+        return OpenAITextBackend
+    except ModuleNotFoundError:
+        pass
+
+    try:
+        from ai_backend import TextAI as BackendTextAI  # type: ignore[import-not-found]  # noqa: PLC0415
+
+        return BackendTextAI
+    except ModuleNotFoundError as exc:  # pragma: no cover
+        raise ModuleNotFoundError(
+            "Missing dependency: ai_backend (required for text generation). "
+            "Install project dependencies via `pdm install`."
+        ) from exc
+
+
+def _load_image_ai_cls():
+    if ImageAI is not None:
+        return ImageAI
+
+    try:
+        from openai_backend.openai_image_backend import OpenAIImageBackend  # noqa: PLC0415
+
+        return OpenAIImageBackend
+    except ModuleNotFoundError:
+        pass
+
+    try:
+        from ai_backend import ImageAI as BackendImageAI  # type: ignore[import-not-found]  # noqa: PLC0415
+
+        return BackendImageAI
+    except ModuleNotFoundError as exc:  # pragma: no cover
+        raise ModuleNotFoundError(
+            "Missing dependency: ai_backend (required for image generation). "
+            "Install project dependencies via `pdm install`."
+        ) from exc
 
 from image_project.foundation.config_io import load_config
 from image_project.foundation.messages import MessageHandler
@@ -36,6 +75,7 @@ from image_project.framework.artifacts import (
 from image_project.framework.config import RunConfig
 from image_project.framework.context import ContextManager
 from image_project.framework.inputs import extract_dislikes, resolve_prompt_inputs
+from image_project.framework.profile_io import load_user_profile
 from image_project.framework.media import UpscaleConfig, save_image, upscale_image_to_4k
 from image_project.framework.prompting import PlanInputs, resolve_stage_specs
 from image_project.framework.runtime import RunContext
@@ -228,7 +268,7 @@ def run_generation(cfg_dict, *, generation_id: str | None = None, config_meta: d
         logger.info("Loaded %d category rows", len(prompt_data))
 
         logger.info("Loading user profile from %s", cfg.profile_path)
-        user_profile = pd.read_csv(cfg.profile_path)
+        user_profile = load_user_profile(cfg.profile_path)
         logger.info("Loaded %d user profile rows", len(user_profile))
         preferences_guidance = build_preferences_guidance(user_profile)
         user_dislikes = extract_dislikes(user_profile)
@@ -252,10 +292,7 @@ def run_generation(cfg_dict, *, generation_id: str | None = None, config_meta: d
         )
 
         phase = "init_text_ai"
-        text_ai_cls = TextAI
-        if text_ai_cls is None:  # pragma: no cover
-            from ai_backend import TextAI as text_ai_cls  # type: ignore[assignment]
-
+        text_ai_cls = _load_text_ai_cls()
         ai_text = text_ai_cls(model="gpt-5.2", reasoning={"effort": "medium"})
         logger.info("Initialized TextAI with model gpt-5.2")
 
@@ -421,10 +458,7 @@ def run_generation(cfg_dict, *, generation_id: str | None = None, config_meta: d
             return ctx
 
         phase = "init_image_ai"
-        image_ai_cls = ImageAI
-        if image_ai_cls is None:  # pragma: no cover
-            from ai_backend import ImageAI as image_ai_cls  # type: ignore[assignment]
-
+        image_ai_cls = _load_image_ai_cls()
         ai_image = image_ai_cls()
         logger.info("Initialized ImageAI")
 

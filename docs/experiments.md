@@ -50,6 +50,7 @@ Set `prompt.plan` to one of:
 - `baseline`: one-stage pipeline that captures `initial_prompt`
 - `simple`: two-stage pipeline: `standard.initial_prompt` -> `standard.image_prompt_creation`
 - `simple_no_concepts`: skips concept selection/filtering and uses generator-safe profile abstraction
+- `direct`: one-stage final prompt from selected concepts + profile
 - `profile_only`: `standard`, but forces context injection off (even if `context.enabled: true`)
 - `profile_only_simple`: `simple`, but forces context injection off
 - `custom`: run an explicit stage sequence from `prompt.stages.sequence`
@@ -281,9 +282,24 @@ Concepts are randomly sampled per run index and reused across sets (A1/B1/C1 sha
 
 Variants:
 
-- **A**: `standard` + `refinement.policy=tot`
-- **B**: `blackbox` + `prompt.scoring.enabled=true` + `refinement.policy=tot`
+- **A**: `blackbox` + `prompt.scoring.enabled=true` + `prompt.scoring.{judge,final}_profile_source=generator_hints` + `refinement.policy=none`
+- **B**: `blackbox` + `prompt.scoring.enabled=true` + `prompt.scoring.{judge,final}_profile_source=raw` + `refinement.policy=none`
 - **C**: `simple_no_concepts` + `refinement.policy=none`
+
+## Profile v5 3x3 Runner
+
+Compares v5 profile formats and a one-shot prompt path:
+
+- **A**: `blackbox_refine` + `refinement.policy=none` + v5 `like/dislike` profile
+- **B**: `blackbox_refine` + `refinement.policy=none` + v5 `love/like/dislike/hate` profile
+- **C**: `direct` + `refinement.policy=none` + v5 `love/like/dislike/hate` profile
+
+Run:
+
+```bash
+pdm run experiment-profile-v5-3x3 --dry-run
+pdm run experiment-profile-v5-3x3 --profile-like-dislike-path "M:/My Drive/image_project/data/user_profile_v5_like_dislike.csv" --profile-love-like-dislike-hate-path "M:/My Drive/image_project/data/user_profile_v5_love_like_dislike_hate.csv"
+```
 
 ## A/B Refinement Block Experiment Runner
 
@@ -309,9 +325,15 @@ Data:
 
 Compare A vs B:
 
-- The runner prints generation ids like `A1_<uuid>` and `B1_<uuid>`.
-- Compare a run pair with run-review:
+- The runner writes a pairing manifest at `<output_root>/pairs.json` so you don't need to manually match ids.
+- Compare all run pairs with run-review:
 
 ```bash
-pdm run run-review --compare <A_generation_id> <B_generation_id> --logs-dir <output_root>/logs
+pdm run run-review --compare-experiment <output_root> --all --output-dir <review_dir>
+```
+
+Compare a single pair (by run index):
+
+```bash
+pdm run run-review --compare-experiment <output_root> --pair 1 --output-dir <review_dir>
 ```

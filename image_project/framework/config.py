@@ -184,6 +184,7 @@ class PromptScoringConfig:
     idea_profile_source: ScoringIdeaProfileSource
     final_profile_source: ScoringProfileSource
     generator_profile_abstraction: bool
+    generator_profile_hints_path: str | None
     novelty: PromptNoveltyConfig
 
 
@@ -437,6 +438,7 @@ class RunConfig:
                 "idea_profile_source": None,
                 "final_profile_source": None,
                 "generator_profile_abstraction": None,
+                "generator_profile_hints_path": None,
                 "novelty": {
                     "enabled": None,
                     "window": None,
@@ -859,6 +861,108 @@ class RunConfig:
         prompt_stages_exclude = parse_string_list(stages_cfg.get("exclude"), "prompt.stages.exclude")
         prompt_stages_sequence = parse_string_list(stages_cfg.get("sequence"), "prompt.stages.sequence")
 
+        if prompt_plan == "custom":
+            if not prompt_stages_sequence:
+                raise ValueError("prompt.plan=custom requires prompt.stages.sequence")
+
+            try:
+                from image_project.impl.current.prompting import StageCatalog  # noqa: PLC0415
+            except Exception as exc:  # noqa: BLE001
+                raise ValueError(
+                    "prompt.plan=custom requires a working StageCatalog, but it failed to import: "
+                    f"{exc}"
+                ) from exc
+
+            available = StageCatalog.available()
+            available_set = set(available)
+
+            from collections import defaultdict as _defaultdict  # noqa: PLC0415
+            import difflib  # noqa: PLC0415
+
+            suffix_to_full: dict[str, list[str]] = _defaultdict(list)
+            for stage_id in available:
+                suffix_to_full[stage_id.split(".", 1)[-1]].append(stage_id)
+
+            def suggest(stage_id: str) -> list[str]:
+                if not stage_id:
+                    return []
+                suggestions: list[str] = []
+                suggestions.extend(difflib.get_close_matches(stage_id, available, n=6, cutoff=0.6))
+
+                suffix = stage_id.split(".", 1)[-1]
+                close_suffixes = difflib.get_close_matches(
+                    suffix, sorted(suffix_to_full.keys()), n=6, cutoff=0.6
+                )
+                for match_suffix in close_suffixes:
+                    suggestions.extend(sorted(suffix_to_full.get(match_suffix, ())))
+
+                seen: set[str] = set()
+                unique: list[str] = []
+                for item in suggestions:
+                    if item in seen:
+                        continue
+                    seen.add(item)
+                    unique.append(item)
+                return unique[:8]
+
+            resolved_sequence: list[str] = []
+            unknown: list[tuple[str, str, list[str]]] = []
+            ambiguous: list[tuple[str, str, list[str]]] = []
+
+            for idx, raw_stage_id in enumerate(prompt_stages_sequence):
+                path = f"prompt.stages.sequence[{idx}]"
+                stage_id = raw_stage_id.strip()
+
+                if stage_id in available_set:
+                    resolved_sequence.append(stage_id)
+                    continue
+
+                if "." not in stage_id:
+                    matches = sorted(s for s in available if s.endswith("." + stage_id))
+                    if len(matches) == 1:
+                        resolved_sequence.append(matches[0])
+                        continue
+                    if len(matches) > 1:
+                        ambiguous.append((path, stage_id, matches))
+                        continue
+
+                unknown.append((path, stage_id, suggest(stage_id)))
+
+            if unknown or ambiguous:
+                lines = [
+                    "Invalid stage ids for prompt.plan=custom (StageCatalog validation failed):",
+                ]
+                for path, stage_id, suggestions in unknown:
+                    if suggestions:
+                        lines.append(
+                            f"- {path}={stage_id!r} is unknown (did you mean: {', '.join(suggestions)})"
+                        )
+                    else:
+                        lines.append(f"- {path}={stage_id!r} is unknown")
+
+                for path, stage_id, matches in ambiguous:
+                    lines.append(
+                        f"- {path}={stage_id!r} is ambiguous (matches: {', '.join(matches)}); "
+                        "use a fully-qualified stage id"
+                    )
+
+                lines.append("Run `pdm run list-stages` to see valid stage ids.")
+                raise ValueError("\n".join(lines))
+
+            if len(set(resolved_sequence)) != len(resolved_sequence):
+                seen: set[str] = set()
+                dups: list[str] = []
+                for item in resolved_sequence:
+                    if item in seen and item not in dups:
+                        dups.append(item)
+                    seen.add(item)
+                raise ValueError(
+                    "prompt.stages.sequence contains duplicate stage ids after normalization: "
+                    + ", ".join(dups)
+                )
+
+            prompt_stages_sequence = tuple(resolved_sequence)
+
         raw_overrides: Any = stages_cfg.get("overrides")
         overrides_cfg: Mapping[str, Any]
         if raw_overrides is None:
@@ -1033,30 +1137,19 @@ class RunConfig:
             "prompt.scoring.generator_profile_abstraction",
         )
 
-        if judge_profile_source in ("generator_hints", "generator_hints_plus_dislikes") and not generator_profile_abstraction:
+        generator_profile_hints_path_raw = optional_str(
+            "prompt.scoring.generator_profile_hints_path"
+        )
+        generator_profile_hints_path = normalize_optional_path(generator_profile_hints_path_raw)
+        if generator_profile_hints_path and not scoring_enabled:
             warnings.append(
-                f"prompt.scoring.judge_profile_source={judge_profile_source} but "
-                "prompt.scoring.generator_profile_abstraction=false; generator_hints will equal raw profile in blackbox.prepare"
+                "prompt.scoring.generator_profile_hints_path is set but scoring is disabled; "
+                "it will be ignored unless prompt.scoring.enabled=true and prompt.plan=blackbox"
             )
-
-        raw_idea_profile_source: Any = scoring_cfg.get("idea_profile_source", "generator_hints")
-        if raw_idea_profile_source is None:
-            raise ValueError("Invalid config value for prompt.scoring.idea_profile_source: None")
-        if not isinstance(raw_idea_profile_source, str):
-            raise ValueError(
-                "Invalid config type for prompt.scoring.idea_profile_source: expected string"
-            )
-        idea_profile_source = raw_idea_profile_source.strip().lower()
-        if idea_profile_source not in ("raw", "generator_hints", "none"):
-            raise ValueError(
-                "Unknown prompt.scoring.idea_profile_source: "
-                f"{raw_idea_profile_source!r} (expected: raw|generator_hints|none)"
-            )
-
-        if idea_profile_source == "generator_hints" and not generator_profile_abstraction:
+        if generator_profile_hints_path and generator_profile_abstraction:
             warnings.append(
-                "prompt.scoring.idea_profile_source=generator_hints but "
-                "prompt.scoring.generator_profile_abstraction=false; generator_hints will equal raw profile in blackbox.prepare"
+                "prompt.scoring.generator_profile_hints_path is set; this will override "
+                "prompt.scoring.generator_profile_abstraction and skip the abstraction stage"
             )
 
         raw_novelty: Any = scoring_cfg.get("novelty")
@@ -1143,6 +1236,7 @@ class RunConfig:
             idea_profile_source=idea_profile_source,  # type: ignore[arg-type]
             final_profile_source=final_profile_source,  # type: ignore[arg-type]
             generator_profile_abstraction=generator_profile_abstraction,
+            generator_profile_hints_path=generator_profile_hints_path,
             novelty=PromptNoveltyConfig(
                 enabled=novelty_enabled,
                 window=novelty_window,

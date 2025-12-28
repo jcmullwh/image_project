@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import random
+import re
 import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -85,7 +86,7 @@ def _merge_cfg(base_cfg: Mapping[str, Any], *overlays: Mapping[str, Any]) -> dic
 
 def _default_output_root() -> str:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    return os.path.join("_artifacts", "experiments", f"{timestamp}_ab_refinement_block")
+    return os.path.join("_artifacts", "experiments", f"{timestamp}_ab_scenespec_json_intermediary")
 
 
 def _compute_random_token(seed: int) -> str:
@@ -137,7 +138,6 @@ def build_plan(
     upscale_dir = os.path.join(output_root, "upscaled")
 
     stage_prefix = ["ab.random_token", "ab.scene_draft"]
-    stage_suffix = ["ab.final_prompt_format"]
 
     common_overrides: dict[str, Any] = {
         "run": {"mode": run_mode},
@@ -173,21 +173,23 @@ def build_plan(
 
     variants: dict[str, dict[str, Any]] = {
         "A": {
-            "variant_name": "no_refinement_block",
-            "refine_stage": "ab.scene_refine_no_block",
+            "variant_name": "prose_refine",
+            "stages": ["ab.scene_refine_with_block", "ab.final_prompt_format"],
+            "capture_stage": "ab.final_prompt_format",
             "experiment": {
-                "variant": "A_no_refinement_block",
-                "notes": "Middle prompt is a minimal refinement instruction set.",
-                "tags": ["ab", "refinement_block:no", "plan:custom", "mode:" + run_mode],
+                "variant": "A_prose_refine",
+                "notes": "Draft scene -> prose refinement (refinement block) -> strict one-line final prompt.",
+                "tags": ["ab", "path:prose", "plan:custom", "mode:" + run_mode],
             },
         },
         "B": {
-            "variant_name": "with_refinement_block",
-            "refine_stage": "ab.scene_refine_with_block",
+            "variant_name": "scenespec_json",
+            "stages": ["ab.scene_spec_json", "ab.final_prompt_format_from_scenespec"],
+            "capture_stage": "ab.final_prompt_format_from_scenespec",
             "experiment": {
-                "variant": "B_with_refinement_block",
-                "notes": "Middle prompt includes an explicit refinement block checklist.",
-                "tags": ["ab", "refinement_block:yes", "plan:custom", "mode:" + run_mode],
+                "variant": "B_scenespec_json",
+                "notes": "Draft scene -> SceneSpec JSON intermediary -> strict one-line final prompt.",
+                "tags": ["ab", "path:scenespec_json", "plan:custom", "mode:" + run_mode],
             },
         },
     }
@@ -199,13 +201,14 @@ def build_plan(
 
         for variant_id in ("A", "B"):
             variant = variants[variant_id]
-            stage_sequence = [*stage_prefix, str(variant["refine_stage"]), *stage_suffix]
+            stage_sequence = [*stage_prefix, *list(variant["stages"])]
 
             generation_id = f"{variant_id}{run_index + 1}_{generate_unique_id()}"
             run_overlay = {
                 "prompt": {
                     "random_seed": seed,
                     "stages": {"sequence": stage_sequence},
+                    "output": {"capture_stage": str(variant["capture_stage"])},
                 },
                 "experiment": {
                     "variant": variant["experiment"]["variant"],
@@ -235,16 +238,353 @@ def _print_plan(plan: Sequence[PlannedRun]) -> None:
         prompt_cfg = entry.cfg_dict.get("prompt") if isinstance(entry.cfg_dict.get("prompt"), dict) else {}
         stage_cfg = prompt_cfg.get("stages") if isinstance(prompt_cfg.get("stages"), dict) else {}
         sequence = stage_cfg.get("sequence") if isinstance(stage_cfg.get("sequence"), list) else []
+        capture_cfg = prompt_cfg.get("output") if isinstance(prompt_cfg.get("output"), dict) else {}
+        capture = capture_cfg.get("capture_stage")
         print(
             f"{entry.variant_id}{entry.run_index}: generation_id={entry.generation_id} "
-            f"seed={entry.seed} token={entry.random_token} stages={sequence}"
+            f"seed={entry.seed} token={entry.random_token} capture={capture} stages={sequence}"
         )
+
+
+_FINAL_PROMPT_KEYS = (
+    "SUBJECT",
+    "SETTING",
+    "ACTION",
+    "COMPOSITION",
+    "CAMERA",
+    "LIGHTING",
+    "COLOR",
+    "STYLE",
+    "TEXT_IN_SCENE",
+    "AR",
+)
+
+_SPECIFICITY_MIN_WORDS: dict[str, int] = {
+    "SUBJECT": 5,
+    "SETTING": 6,
+    "ACTION": 5,
+    "COMPOSITION": 5,
+    "CAMERA": 3,
+    "LIGHTING": 3,
+    "COLOR": 3,
+    "STYLE": 3,
+}
+
+_CLICHE_PHRASES = (
+    "masterpiece",
+    "highly detailed",
+    "ultra detailed",
+    "ultra-detailed",
+    "ultra realistic",
+    "ultra-realistic",
+    "hyper realistic",
+    "hyper-realistic",
+    "photorealistic",
+    "cinematic",
+    "award-winning",
+    "epic",
+    "stunning",
+    "breathtaking",
+    "8k",
+    "hdr",
+)
+
+
+def _to_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    return str(value).strip()
+
+
+def _word_count(text: str) -> int:
+    return len([part for part in re.split(r"\s+", text.strip()) if part])
+
+
+def _cliche_hits(text: str) -> list[str]:
+    haystack = text.lower()
+    hits: list[str] = []
+    for phrase in _CLICHE_PHRASES:
+        if phrase in haystack:
+            hits.append(phrase)
+    return hits
+
+
+def _is_generic_subject(text: str) -> bool:
+    cleaned = re.sub(r"\s+", " ", text.strip().lower())
+    if not cleaned:
+        return True
+    generic = (
+        "a person",
+        "person",
+        "someone",
+        "somebody",
+        "a man",
+        "a woman",
+        "a figure",
+        "a character",
+        "a human",
+        "a scene",
+        "a landscape",
+        "a city",
+        "a building",
+        "a creature",
+        "an animal",
+    )
+    if cleaned in generic:
+        return True
+    return any(cleaned.startswith(prefix + " ") for prefix in generic)
+
+
+def _parse_final_prompt_line(*, final_prompt: Any, token: str) -> dict[str, Any]:
+    raw = _to_text(final_prompt)
+    issues: list[dict[str, str]] = []
+    parsed_fields: dict[str, str] = {}
+
+    if not raw:
+        return {
+            "ok": False,
+            "issues": [{"code": "final_prompt_missing", "message": "Final prompt is empty or missing"}],
+        }
+
+    if "\n" in raw or "\r" in raw:
+        issues.append({"code": "final_prompt_multiline", "message": "Final prompt contains newline(s)"})
+
+    parts = [part.strip() for part in raw.split(" | ")]
+    if len(parts) != len(_FINAL_PROMPT_KEYS):
+        issues.append(
+            {
+                "code": "final_prompt_segment_count",
+                "message": f"Expected {len(_FINAL_PROMPT_KEYS)} segments but got {len(parts)}",
+            }
+        )
+
+    for idx, key in enumerate(_FINAL_PROMPT_KEYS):
+        if idx >= len(parts):
+            break
+        segment = parts[idx]
+        if "=" not in segment:
+            issues.append({"code": "final_prompt_bad_segment", "message": f"Missing '=' in segment: {segment!r}"})
+            continue
+        seg_key, seg_value = segment.split("=", 1)
+        seg_key = seg_key.strip()
+        seg_value = seg_value.strip()
+        if seg_key != key:
+            issues.append(
+                {
+                    "code": "final_prompt_bad_key_order",
+                    "message": f"Expected key {key} at position {idx + 1} but got {seg_key}",
+                }
+            )
+        parsed_fields[seg_key] = seg_value
+
+    missing_keys = [key for key in _FINAL_PROMPT_KEYS if key not in parsed_fields]
+    if missing_keys:
+        issues.append(
+            {
+                "code": "final_prompt_missing_keys",
+                "message": f"Missing keys: {', '.join(missing_keys)}",
+            }
+        )
+
+    empty_keys: list[str] = []
+    placeholder_keys: list[str] = []
+    word_counts: dict[str, int] = {}
+    specificity_violations: dict[str, int] = {}
+
+    for key, value in parsed_fields.items():
+        cleaned = value.strip()
+        if not cleaned:
+            empty_keys.append(key)
+        if "<...>" in cleaned or cleaned in {"<...>", "..."}:
+            placeholder_keys.append(key)
+        word_counts[key] = _word_count(cleaned.strip('"'))
+        min_words = _SPECIFICITY_MIN_WORDS.get(key)
+        if min_words is not None and word_counts[key] < min_words:
+            specificity_violations[key] = word_counts[key]
+
+    if empty_keys:
+        issues.append({"code": "final_prompt_empty_fields", "message": f"Empty fields: {', '.join(empty_keys)}"})
+    if placeholder_keys:
+        issues.append(
+            {
+                "code": "final_prompt_placeholders",
+                "message": f"Placeholder values present: {', '.join(placeholder_keys)}",
+            }
+        )
+
+    text_in_scene_raw = parsed_fields.get("TEXT_IN_SCENE", "")
+    text_in_scene_value = text_in_scene_raw
+    if text_in_scene_raw.startswith('"') and text_in_scene_raw.endswith('"') and len(text_in_scene_raw) >= 2:
+        text_in_scene_value = text_in_scene_raw[1:-1]
+    else:
+        issues.append(
+            {
+                "code": "final_prompt_text_in_scene_quotes",
+                "message": "TEXT_IN_SCENE value must be quoted like \"...\"",
+            }
+        )
+
+    token_ok = text_in_scene_value == token
+    if not token_ok:
+        issues.append(
+            {
+                "code": "final_prompt_token_mismatch",
+                "message": f'TEXT_IN_SCENE "{text_in_scene_value}" does not match token "{token}"',
+            }
+        )
+
+    ar_ok = parsed_fields.get("AR") == "16:9"
+    if not ar_ok:
+        issues.append({"code": "final_prompt_ar_mismatch", "message": 'AR must equal "16:9"'})
+
+    cliche_hits = _cliche_hits(raw)
+
+    return {
+        "ok": len(issues) == 0,
+        "issues": issues,
+        "fields": parsed_fields,
+        "word_counts": word_counts,
+        "specificity": {
+            "min_words": dict(_SPECIFICITY_MIN_WORDS),
+            "violations": specificity_violations,
+        },
+        "cliche_hits": cliche_hits,
+        "token_expected": token,
+        "text_in_scene": text_in_scene_value,
+        "token_ok": token_ok,
+        "ar_ok": ar_ok,
+    }
+
+
+def _parse_scenespec_json(*, spec_json: Any, token: str) -> dict[str, Any] | None:
+    raw = _to_text(spec_json)
+    if not raw:
+        return None
+
+    required_keys = (
+        "subject",
+        "setting",
+        "action",
+        "composition",
+        "camera",
+        "lighting",
+        "color",
+        "style",
+        "text_in_scene",
+        "must_keep",
+        "avoid",
+    )
+
+    issues: list[dict[str, str]] = []
+    parsed: Any
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        return {
+            "ok": False,
+            "issues": [{"code": "scenespec_json_parse_error", "message": str(exc)}],
+            "raw": raw,
+        }
+
+    if not isinstance(parsed, dict):
+        return {
+            "ok": False,
+            "issues": [{"code": "scenespec_json_not_object", "message": "SceneSpec must be a JSON object"}],
+        }
+
+    missing = [key for key in required_keys if key not in parsed]
+    if missing:
+        issues.append({"code": "scenespec_missing_keys", "message": f"Missing keys: {', '.join(missing)}"})
+
+    extra = [key for key in parsed.keys() if key not in required_keys]
+    if extra:
+        issues.append({"code": "scenespec_extra_keys", "message": f"Extra keys present: {', '.join(extra)}"})
+
+    empty_fields: list[str] = []
+    type_errors: list[str] = []
+    word_counts: dict[str, int] = {}
+
+    for key in required_keys:
+        if key not in parsed:
+            continue
+        value = parsed[key]
+        if key in {"must_keep", "avoid"}:
+            if not isinstance(value, list):
+                type_errors.append(f"{key} (expected list)")
+                continue
+            cleaned_items = [str(item).strip() for item in value if str(item).strip()]
+            if len(cleaned_items) < 3:
+                empty_fields.append(key)
+            parsed[key] = cleaned_items
+            continue
+        if not isinstance(value, str):
+            type_errors.append(f"{key} (expected string)")
+            continue
+        cleaned = value.strip()
+        if not cleaned:
+            empty_fields.append(key)
+        word_counts[key] = _word_count(cleaned)
+        parsed[key] = cleaned
+
+    if empty_fields:
+        issues.append({"code": "scenespec_empty_fields", "message": f"Empty/too-short fields: {', '.join(empty_fields)}"})
+    if type_errors:
+        issues.append({"code": "scenespec_type_errors", "message": f"Type issues: {', '.join(type_errors)}"})
+
+    subject_text = str(parsed.get("subject", "")).strip()
+    subject_generic = _is_generic_subject(subject_text)
+    if subject_generic:
+        issues.append({"code": "scenespec_generic_subject", "message": "subject appears generic"})
+
+    token_value = str(parsed.get("text_in_scene", "")).strip()
+    token_ok = token_value == token
+    if not token_ok:
+        issues.append(
+            {
+                "code": "scenespec_token_mismatch",
+                "message": f'text_in_scene "{token_value}" does not match token "{token}"',
+            }
+        )
+
+    return {
+        "ok": len(issues) == 0,
+        "issues": issues,
+        "parsed": parsed,
+        "word_counts": word_counts,
+        "token_expected": token,
+        "token_ok": token_ok,
+        "subject_generic": subject_generic,
+    }
+
+
+def _compute_auto_checks(*, variant_id: str, outputs: Mapping[str, Any], token: str) -> dict[str, Any]:
+    scene_draft = _to_text(outputs.get("ab_scene_draft"))
+    scene_refined = _to_text(outputs.get("ab_scene_refined"))
+    scenespec_json = outputs.get("ab_scene_spec_json")
+    final_prompt = outputs.get("image_prompt")
+
+    final_prompt_checks = _parse_final_prompt_line(final_prompt=final_prompt, token=token)
+    scenespec_checks = _parse_scenespec_json(spec_json=scenespec_json, token=token) if variant_id == "B" else None
+
+    token_presence = {
+        "in_scene_draft": token in scene_draft if scene_draft else False,
+        "in_scene_refined": token in scene_refined if scene_refined else False,
+        "in_scenespec_raw": token in _to_text(scenespec_json) if scenespec_json is not None else False,
+    }
+
+    return {
+        "final_prompt": final_prompt_checks,
+        "scenespec_json": scenespec_checks,
+        "token_presence": token_presence,
+    }
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        prog="run_experiment_ab_refinement_block",
-        description="Run an A/B prompt-only experiment testing whether a refinement block helps the middle prompt.",
+        prog="run_experiment_ab_scenespec_json_intermediary",
+        description="Run an A/B prompt experiment testing whether a SceneSpec JSON intermediary improves strict one-line prompts.",
     )
     parser.add_argument(
         "--config-path",
@@ -321,7 +661,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     experiment_id = (args.experiment_id or "").strip()
     if not experiment_id:
-        experiment_id = "exp_ab_refinement_block_" + datetime.now().strftime("%Y%m%d_%H%M%S")
+        experiment_id = "exp_ab_scenespec_json_intermediary_" + datetime.now().strftime("%Y%m%d_%H%M%S")
 
     base_seed = int(args.seed) if args.seed is not None else int(datetime.now().timestamp())
 
@@ -407,6 +747,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         attempted.add((entry.run_index, entry.variant_id))
         try:
             ctx = run_generation(entry.cfg_dict, generation_id=entry.generation_id, config_meta=cfg_meta)
+            outputs = ctx.outputs if isinstance(ctx.outputs, dict) else {}
             results.append(
                 {
                     "variant": entry.variant_id,
@@ -416,8 +757,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "random_token": entry.random_token,
                     "status": "success",
                     "image_path": getattr(ctx, "image_path", None),
-                    "final_prompt": ctx.outputs.get("image_prompt"),
-                    "outputs": {"prompt_pipeline": ctx.outputs.get("prompt_pipeline")},
+                    "final_prompt": outputs.get("image_prompt"),
+                    "auto_checks": _compute_auto_checks(
+                        variant_id=entry.variant_id,
+                        outputs=outputs,
+                        token=entry.random_token,
+                    ),
+                    "outputs": {"prompt_pipeline": outputs.get("prompt_pipeline")},
                     "error": ctx.error,
                 }
             )

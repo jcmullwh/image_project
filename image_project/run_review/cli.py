@@ -12,6 +12,7 @@ from image_project.foundation.config_io import find_repo_root
 
 from .evolution import thresholds_from_overrides
 from .render_html import render_compare_html, render_html
+from .compare_experiment import PairSelection, compare_experiment_pairs
 from .report_builder import RunLoadError, build_report, report_to_dict, diff_reports
 from .report_model import RunInputs, RunReport
 
@@ -275,6 +276,13 @@ def main(argv=None):
     parser.add_argument("--no-evolution", action="store_true", dest="no_evolution")
     parser.add_argument("--evolution-thresholds", dest="evolution_thresholds", help="JSON overrides for evolution thresholds")
     parser.add_argument("--compare", nargs=2, dest="compare")
+    parser.add_argument(
+        "--compare-experiment",
+        dest="compare_experiment",
+        help="Compare A/B experiment pairs from <experiment_dir>/pairs.json",
+    )
+    parser.add_argument("--pair", dest="pair", type=int, help="Compare a single run_index from pairs.json")
+    parser.add_argument("--all", action="store_true", dest="all_pairs", help="Compare all pairs in pairs.json")
     parser.add_argument("--output-dir", dest="output_dir", default=".")
     args = parser.parse_args(argv)
 
@@ -290,6 +298,29 @@ def main(argv=None):
         raise ValueError("--most-recent cannot be combined with --compare")
     if args.compare and (args.oplog or args.transcript):
         raise ValueError("--compare cannot be combined with --oplog/--transcript")
+    if args.compare and args.compare_experiment:
+        raise ValueError("--compare cannot be combined with --compare-experiment")
+    if args.compare_experiment and args.most_recent:
+        raise ValueError("--most-recent cannot be combined with --compare-experiment")
+    if args.compare_experiment and (args.generation_id or args.oplog or args.transcript):
+        raise ValueError(
+            "--compare-experiment cannot be combined with --generation-id or --oplog/--transcript"
+        )
+
+    if args.compare_experiment:
+        selection = PairSelection(all_pairs=bool(args.all_pairs), run_index=args.pair)
+        summary = compare_experiment_pairs(
+            experiment_dir=args.compare_experiment,
+            output_dir=args.output_dir,
+            selection=selection,
+            logs_dir=args.logs_dir,
+            best_effort=bool(args.best_effort),
+            enable_evolution=not args.no_evolution,
+            evolution_thresholds=evolution_thresholds,
+            print_fn=print,
+        )
+        failed = int(((summary.get("counts") or {}).get("failed") or 0))
+        return 0 if failed == 0 else 1
 
     if not args.compare:
         has_artifact_paths = bool(args.oplog or args.transcript)

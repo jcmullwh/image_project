@@ -143,6 +143,31 @@ def test_simple_no_concepts_plan_skips_preprompt(tmp_path, monkeypatch):
     assert "pipeline/standard.image_prompt_creation/draft" in recorded_step_paths
 
 
+def test_direct_plan_creates_final_prompt_in_one_stage(tmp_path, monkeypatch):
+    cfg_dict = _base_cfg_dict(tmp_path)
+    cfg_dict["prompt"]["plan"] = "direct"
+
+    _patch_common(monkeypatch)
+
+    generation_id = "unit_test_direct_plan"
+    app_generate.run_generation(cfg_dict, generation_id=generation_id)
+
+    transcript_path = tmp_path / "logs" / f"{generation_id}_transcript.json"
+    assert transcript_path.exists()
+
+    transcript = json.loads(transcript_path.read_text(encoding="utf-8"))
+    assert transcript["outputs"]["prompt_pipeline"]["plan"] == "direct"
+    assert transcript["outputs"]["prompt_pipeline"]["resolved_stages"] == [
+        "preprompt.select_concepts",
+        "preprompt.filter_concepts",
+        "direct.image_prompt_creation",
+    ]
+    assert transcript["outputs"]["prompt_pipeline"]["capture_stage"] == "direct.image_prompt_creation"
+
+    recorded_step_paths = [step.get("path") for step in transcript.get("steps", [])]
+    assert "pipeline/direct.image_prompt_creation/draft" in recorded_step_paths
+
+
 def test_profile_only_forces_context_injection_off(tmp_path, monkeypatch):
     cfg_dict = _base_cfg_dict(tmp_path)
     cfg_dict["prompt"]["plan"] = "profile_only"

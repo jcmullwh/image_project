@@ -85,7 +85,7 @@ Config loading:
 
 - `prompt.random_seed` (int): makes concept selection deterministic; if omitted, a seed is generated and logged.
 - Prompt plan selection:
-  - `prompt.plan: auto|standard|blackbox|blackbox_refine|blackbox_refine_only|refine_only|baseline|simple|profile_only|profile_only_simple`
+  - `prompt.plan: auto|standard|blackbox|blackbox_refine|blackbox_refine|blackbox_refine_only|refine_only|baseline|simple|simple_no_concepts|direct|profile_only|profile_only_simple`
   - `prompt.refinement.policy: tot|none`
   - `prompt.stages.include` / `prompt.stages.exclude` / `prompt.stages.overrides`
   - `prompt.output.capture_stage`

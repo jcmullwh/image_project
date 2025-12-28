@@ -29,6 +29,19 @@ def build_preferences_guidance(user_profile: pd.DataFrame) -> str:
         return ""
 
     sections: list[str] = []
+    columns = [str(column).strip() for column in user_profile.columns]
+    if "Loves" in columns or "Hates" in columns:
+        sections.append(
+            textwrap.dedent(
+                """\
+                Preference strength legend:
+                - Loves: will, by itself, make the user like the image.
+                - Likes: shows a preference for but not strongly (feedback may be slightly conflicting or not absolute).
+                - Dislikes: shows a dislike for but not strongly (feedback may be slightly conflicting or not absolute).
+                - Hates: will, by itself, make the user dislike the image.
+                """
+            ).strip()
+        )
     for column in user_profile.columns:
         values = [str(value).strip() for value in user_profile[column].dropna().tolist()]
         values = [value for value in values if value]
@@ -500,6 +513,92 @@ def final_prompt_from_selected_idea_prompt(
 
         Selected idea card (JSON):
         {idea_json}
+        """.strip()
+    )
+
+
+def draft_prompt_from_selected_idea_prompt(
+    *,
+    concepts: list[str],
+    raw_profile: str,
+    selected_idea_card: dict[str, object],
+) -> str:
+    concepts_block = "\n".join(f"- {c}" for c in concepts) if concepts else "- <none>"
+    idea_json = json.dumps(selected_idea_card, ensure_ascii=False, indent=2)
+    return textwrap.dedent(
+        f"""
+        Create a draft image prompt (Midjourney-style) based on the selected idea card.
+
+        Selected concepts (must be integrated thoughtfully):
+        {concepts_block}
+
+        Raw user profile (authoritative preferences and avoid constraints):
+        {raw_profile.strip()}
+
+        Selected idea card (JSON):
+        {idea_json}
+
+        Output ONLY the draft image prompt. No title, no explanation, no quotes, no markdown.
+        """
+    ).strip()
+
+
+def refine_draft_prompt_from_selected_idea_prompt(
+    *,
+    concepts: list[str],
+    raw_profile: str,
+    selected_idea_card: dict[str, object],
+    draft_prompt: str,
+) -> str:
+    concepts_block = "\n".join(f"- {c}" for c in concepts) if concepts else "- <none>"
+    idea_json = json.dumps(selected_idea_card, ensure_ascii=False, indent=2)
+    draft_text = (draft_prompt or "").strip()
+    if not draft_text:
+        raise ValueError("Draft prompt cannot be empty")
+    return textwrap.dedent(
+        f"""
+        Refine the following draft image prompt into a stronger final Midjourney-style prompt.
+
+        Selected concepts (must be integrated thoughtfully):
+        {concepts_block}
+
+        Raw user profile (authoritative preferences and avoid constraints):
+        {raw_profile.strip()}
+
+        Selected idea card (JSON):
+        {idea_json}
+
+        Refinement block (apply silently; do not output this block):
+        - Respect preference strength: Loves are near-mandatory positives; Hates are hard excludes.
+        - Keep the core intent; improve specificity, coherence, and visual grounding.
+        - Remove contradictions and vague phrasing.
+        - Keep it concise and generator-friendly.
+
+        Draft prompt:
+        {draft_text}
+
+        Output ONLY the final refined image prompt. No title, no explanation, no quotes, no markdown.
+        """
+    ).strip()
+
+
+def final_prompt_from_concepts_and_profile_prompt(
+    *,
+    concepts: list[str],
+    raw_profile: str,
+) -> str:
+    concepts_block = "\n".join(f"- {c}" for c in concepts) if concepts else "- <none>"
+    return textwrap.dedent(
+        f"""
+        Create a single final image prompt (Midjourney-style) using ONLY the provided concepts and user profile.
+
+        Selected concepts (must be integrated thoughtfully):
+        {concepts_block}
+
+        Raw user profile (authoritative preferences and avoid constraints):
+        {raw_profile.strip()}
+
+        Output ONLY the final image prompt. No title, no explanation, no quotes, no markdown.
         """.strip()
     )
 
@@ -1010,6 +1109,39 @@ def blackbox_profile_abstraction(inputs: PlanInputs) -> StageSpec:
 
 
 @StageCatalog.register(
+    "blackbox.profile_hints_load",
+    doc="Load generator-safe profile hints from a file.",
+    source="framework.profile_io.load_generator_profile_hints",
+    tags=("blackbox",),
+)
+def blackbox_profile_hints_load(_inputs: PlanInputs) -> ActionStageSpec:
+    def _action(ctx: RunContext) -> str:
+        hints_path = ctx.cfg.prompt_scoring.generator_profile_hints_path
+        if not hints_path:
+            raise ValueError(
+                "blackbox.profile_hints_load requires prompt.scoring.generator_profile_hints_path"
+            )
+
+        from image_project.framework.profile_io import load_generator_profile_hints
+
+        hints = load_generator_profile_hints(hints_path)
+        if not isinstance(hints, str) or not hints.strip():
+            raise ValueError(f"Generator profile hints file was empty: {hints_path}")
+
+        ctx.logger.info(
+            "Loaded generator profile hints from %s (chars=%d)", hints_path, len(hints)
+        )
+        return hints
+
+    return ActionStageSpec(
+        stage_id="blackbox.profile_hints_load",
+        fn=_action,
+        merge="none",
+        output_key="generator_profile_hints",
+    )
+
+
+@StageCatalog.register(
     "blackbox.idea_cards_generate",
     doc="Generate idea cards (strict JSON).",
     source="prompts.idea_cards_generate_prompt",
@@ -1388,6 +1520,109 @@ def blackbox_image_prompt_creation(inputs: PlanInputs) -> StageSpec:
 
 
 @StageCatalog.register(
+    "blackbox.image_prompt_draft",
+    doc="Create a draft prompt from selected idea card (for downstream refinement).",
+    source="prompts.draft_prompt_from_selected_idea_prompt",
+    tags=("blackbox",),
+)
+def blackbox_image_prompt_draft(inputs: PlanInputs) -> StageSpec:
+    scoring_cfg = inputs.cfg.prompt_scoring
+    final_profile_source = scoring_cfg.final_profile_source
+
+    def _prompt(ctx: RunContext) -> str:
+        selected_card = ctx.outputs.get("selected_idea_card")
+        if not isinstance(selected_card, dict):
+            raise ValueError("Missing required output: selected_idea_card")
+        return prompts.draft_prompt_from_selected_idea_prompt(
+            concepts=list(ctx.selected_concepts),
+            raw_profile=_resolve_blackbox_profile_text(
+                ctx,
+                source=final_profile_source,
+                stage_id="blackbox.image_prompt_draft",
+                config_path="prompt.scoring.final_profile_source",
+            ),
+            selected_idea_card=selected_card,
+        )
+
+    return StageSpec(
+        stage_id="blackbox.image_prompt_draft",
+        prompt=_prompt,
+        temperature=0.8,
+        merge="none",
+        output_key="blackbox_draft_image_prompt",
+        refinement_policy="none",
+    )
+
+
+@StageCatalog.register(
+    "blackbox.image_prompt_refine",
+    doc="Refine the draft prompt into a final prompt (no ToT).",
+    source="prompts.refine_draft_prompt_from_selected_idea_prompt",
+    tags=("blackbox",),
+)
+def blackbox_image_prompt_refine(inputs: PlanInputs) -> StageSpec:
+    scoring_cfg = inputs.cfg.prompt_scoring
+    final_profile_source = scoring_cfg.final_profile_source
+
+    def _prompt(ctx: RunContext) -> str:
+        selected_card = ctx.outputs.get("selected_idea_card")
+        if not isinstance(selected_card, dict):
+            raise ValueError("Missing required output: selected_idea_card")
+
+        draft = ctx.outputs.get("blackbox_draft_image_prompt")
+        if not isinstance(draft, str) or not draft.strip():
+            raise ValueError("Missing required output: blackbox_draft_image_prompt")
+
+        return prompts.refine_draft_prompt_from_selected_idea_prompt(
+            concepts=list(ctx.selected_concepts),
+            raw_profile=_resolve_blackbox_profile_text(
+                ctx,
+                source=final_profile_source,
+                stage_id="blackbox.image_prompt_refine",
+                config_path="prompt.scoring.final_profile_source",
+            ),
+            selected_idea_card=selected_card,
+            draft_prompt=draft,
+        )
+
+    return StageSpec(
+        stage_id="blackbox.image_prompt_refine",
+        prompt=_prompt,
+        temperature=0.4,
+        refinement_policy="none",
+        is_default_capture=True,
+    )
+
+
+@StageCatalog.register(
+    "direct.image_prompt_creation",
+    doc="Create final prompt directly from concepts + profile.",
+    source="prompts.final_prompt_from_concepts_and_profile_prompt",
+    tags=("direct",),
+)
+def direct_image_prompt_creation(_inputs: PlanInputs) -> StageSpec:
+    def _prompt(ctx: RunContext) -> str:
+        if not ctx.selected_concepts:
+            raise ValueError(
+                "direct.image_prompt_creation requires selected concepts; "
+                "run preprompt.select_concepts first (or include it in the plan)."
+            )
+
+        return prompts.final_prompt_from_concepts_and_profile_prompt(
+            concepts=list(ctx.selected_concepts),
+            raw_profile=str(ctx.outputs.get("preferences_guidance") or ""),
+        )
+
+    return StageSpec(
+        stage_id="direct.image_prompt_creation",
+        prompt=_prompt,
+        temperature=0.8,
+        is_default_capture=True,
+        refinement_policy="none",
+    )
+
+
+@StageCatalog.register(
     "refine.image_prompt_refine",
     doc="Refine a provided draft into the final image prompt.",
     source="prompts.refine_image_prompt_prompt",
@@ -1553,6 +1788,63 @@ def ab_scene_refine_with_block(_inputs: PlanInputs) -> StageSpec:
 
 
 @StageCatalog.register(
+    "ab.scene_spec_json",
+    doc="Convert the scene draft into a strict SceneSpec JSON intermediary.",
+    source="inline",
+    tags=("ab",),
+)
+def ab_scene_spec_json(_inputs: PlanInputs) -> StageSpec:
+    def _prompt(ctx: RunContext) -> str:
+        token = _ab_require_text_output(ctx, "ab_random_token")
+        draft = _ab_require_text_output(ctx, "ab_scene_draft")
+
+        return textwrap.dedent(
+            f"""\
+            Convert the scene draft into a strict SceneSpec JSON object.
+
+            Required token (must appear as visible text in the scene): {token}
+
+            Scene draft:
+            {draft}
+
+            SceneSpec schema (required keys):
+            {{
+              "subject": "...",
+              "setting": "...",
+              "action": "...",
+              "composition": "...",
+              "camera": "...",
+              "lighting": "...",
+              "color": "...",
+              "style": "...",
+              "text_in_scene": "{token}",
+              "must_keep": ["...", "..."],
+              "avoid": ["...", "..."]
+            }}
+
+            Hard requirements:
+            - Output ONLY valid JSON (no markdown, no code fences, no comments).
+            - No empty strings. No empty arrays.
+            - "subject" must be specific and unique (avoid generic subjects like "a person", "someone", "a figure").
+            - "text_in_scene" must exactly equal the required token.
+            - "must_keep" and "avoid" must each contain at least 3 concrete, visual items.
+            - Keep it a single coherent moment (no montages, no scene cuts).
+
+            Self-check before output (do not include this check in the output):
+            - Every required key exists and is non-empty.
+            - text_in_scene matches the token exactly.
+            """
+        ).strip()
+
+    return StageSpec(
+        stage_id="ab.scene_spec_json",
+        prompt=_prompt,
+        temperature=0.55,
+        output_key="ab_scene_spec_json",
+    )
+
+
+@StageCatalog.register(
     "ab.final_prompt_format",
     doc="Format the refined scene into a strict single-line prompt template.",
     source="prompts.ab_final_prompt_format",
@@ -1584,4 +1876,40 @@ def ab_final_prompt_format(_inputs: PlanInputs) -> StageSpec:
         prompt=_prompt,
         temperature=0.6,
         is_default_capture=True,
+    )
+
+
+@StageCatalog.register(
+    "ab.final_prompt_format_from_scenespec",
+    doc="Format a SceneSpec JSON intermediary into the strict single-line prompt template.",
+    source="inline",
+    tags=("ab",),
+)
+def ab_final_prompt_format_from_scenespec(_inputs: PlanInputs) -> StageSpec:
+    def _prompt(ctx: RunContext) -> str:
+        token = _ab_require_text_output(ctx, "ab_random_token")
+        spec_json = _ab_require_text_output(ctx, "ab_scene_spec_json")
+
+        return textwrap.dedent(
+            f"""\
+            Convert the SceneSpec JSON into a final image generation prompt using the exact one-line format below.
+
+            SceneSpec JSON:
+            {spec_json}
+
+            Output format (exactly one line; keep labels and separators):
+            SUBJECT=<...> | SETTING=<...> | ACTION=<...> | COMPOSITION=<...> | CAMERA=<...> | LIGHTING=<...> | COLOR=<...> | STYLE=<...> | TEXT_IN_SCENE="{token}" | AR=16:9
+
+            Rules:
+            - Use only information present in the JSON (no inventions).
+            - Do not output placeholders like "<...>"; fill every field concretely.
+            - Ensure TEXT_IN_SCENE uses the token exactly as provided.
+            - Do not add extra lines before/after.
+            """
+        ).strip()
+
+    return StageSpec(
+        stage_id="ab.final_prompt_format_from_scenespec",
+        prompt=_prompt,
+        temperature=0.55,
     )

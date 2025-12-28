@@ -20,6 +20,7 @@ prompt:
     judge_temperature: 0.0
     judge_model: null
     generator_profile_abstraction: true
+    generator_profile_hints_path: null  # optional: load hints from file instead of generating
     novelty:
       enabled: true
       window: 25
@@ -42,7 +43,7 @@ prompt:
 ## Flow
 
 1. Prepare scoring context (`blackbox.prepare`) including novelty summary and default generator hints.
-2. Generate a generator-safe profile summary (`blackbox.profile_abstraction`) when enabled.
+2. Load a generator-safe profile summary (`blackbox.profile_hints_load`) when configured, otherwise generate it (`blackbox.profile_abstraction`) when enabled.
 3. Generate N idea cards (`blackbox.idea_cards_generate`) as strict JSON.
 4. Score idea cards with a separate judge (`blackbox.idea_cards_judge_score`) as strict JSON `{ "scores": [{"id","score"}] }`.
 5. Select a winner in code (`blackbox.select_idea_card`) using epsilon-greedy and optional novelty penalty from recent `prompt.generations_path` history.

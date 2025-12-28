@@ -226,7 +226,9 @@ class BlackboxPromptPlan(LinearStagePlan):
             StageCatalog.build("preprompt.filter_concepts", inputs),
             StageCatalog.build("blackbox.prepare", inputs),
         ]
-        if scoring_cfg.generator_profile_abstraction:
+        if scoring_cfg.generator_profile_hints_path:
+            sequence.append("blackbox.profile_hints_load")
+        elif scoring_cfg.generator_profile_abstraction:
             sequence.append(StageCatalog.build("blackbox.profile_abstraction", inputs))
 
         sequence.extend(build_blackbox_isolated_idea_card_specs(inputs))

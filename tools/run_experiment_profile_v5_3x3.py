@@ -84,7 +84,7 @@ def _merge_cfg(base_cfg: Mapping[str, Any], *overlays: Mapping[str, Any]) -> dic
 
 def _default_output_root() -> str:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    return os.path.join("_artifacts", "experiments", f"{timestamp}_3x3")
+    return os.path.join("_artifacts", "experiments", f"{timestamp}_profile_v5_3x3")
 
 
 def _parse_sets(value: str) -> tuple[str, ...]:
@@ -97,6 +97,7 @@ def _parse_sets(value: str) -> tuple[str, ...]:
     if unknown:
         raise ValueError(f"Unknown set id(s): {unknown} (expected: A,B,C)")
     return tuple(tokens)
+
 
 def _normalize_string_list(items: Sequence[Any] | None) -> list[str]:
     if not items:
@@ -130,7 +131,7 @@ def generate_shared_concepts_by_run(
 ) -> tuple[list[int], list[tuple[str, ...]]]:
     """
     Generate run-indexed concepts once and reuse them across sets:
-      - run 1 concepts used for A1/B1/C1 (if the plan uses concepts)
+      - run 1 concepts used for A1/B1/C1
       - run 2 concepts used for A2/B2/C2
       - ...
     """
@@ -168,7 +169,6 @@ def generate_shared_concepts_by_run(
 
             attempt += 1
             if attempt >= 50:
-                # Best-effort: accept duplicates rather than failing the run.
                 seeds.append(concept_seed)
                 concepts_by_run.append(combined or tuple(pinned))
                 break
@@ -189,6 +189,9 @@ def build_plan(
     concepts_by_run: Sequence[Sequence[str]],
     enable_upscale: bool,
     enable_upload: bool,
+    profile_like_dislike_path: str,
+    profile_love_like_dislike_hate_path: str,
+    generator_profile_hints_path: str | None,
 ) -> list[PlannedRun]:
     if len(concept_seeds_by_run) != runs_per_set or len(concepts_by_run) != runs_per_set:
         raise ValueError("concept_seeds_by_run and concepts_by_run must match runs_per_set length")
@@ -208,7 +211,6 @@ def build_plan(
         "prompt": {
             "generations_path": os.path.join(log_dir, "generations_v2.csv"),
             "titles_manifest_path": os.path.join(generation_dir, "titles_manifest.csv"),
-            "refinement": {"policy": "none"},
         },
         "experiment": {"id": experiment_id},
         "upscale": {"enabled": bool(enable_upscale)},
@@ -216,51 +218,91 @@ def build_plan(
     }
 
     variant_overrides: dict[str, dict[str, Any]] = {
+        # A: blackbox refine (idea generation + explicit refinement), using v5 like/dislike profile.
         "A": {
             "prompt": {
-                "plan": "blackbox",
-                "scoring": {
-                    "enabled": True,
-                    "num_ideas": 8,
-                    "judge_profile_source": "generator_hints",
-                    "final_profile_source": "generator_hints",
-                },
-            },
-            "experiment": {
-                "variant": "A_blackbox_hints_none",
-                "notes": "blackbox plan + scoring (judge/final use generator_hints; no refinement; shared per-run concepts; concept filters disabled)",
-                "tags": ["exp3x3", "set:A", "plan:blackbox", "refinement:none", "scoring:on", "profile:hints"],
-            },
-        },
-        "B": {
-            "prompt": {
-                "plan": "blackbox",
+                "plan": "blackbox_refine",
+                "profile_path": profile_like_dislike_path,
+                "refinement": {"policy": "none"},
                 "scoring": {
                     "enabled": True,
                     "num_ideas": 8,
                     "judge_profile_source": "raw",
                     "final_profile_source": "raw",
+                    "generator_profile_abstraction": True,
+                    "novelty": {"enabled": False, "window": 0},
                 },
             },
             "experiment": {
-                "variant": "B_blackbox_raw_none",
-                "notes": "blackbox plan + scoring (judge/final use raw profile; no refinement; shared per-run concepts; concept filters disabled)",
-                "tags": ["exp3x3", "set:B", "plan:blackbox", "refinement:none", "scoring:on", "profile:raw"],
+                "variant": "A_blackbox_refine_like_dislike",
+                "notes": "blackbox_refine plan + scoring; v5 like/dislike profile; shared per-run concepts; concept filters disabled",
+                "tags": [
+                    "exp3x3",
+                    "profile_v5",
+                    "set:A",
+                    "plan:blackbox_refine",
+                    "refinement:none",
+                    "profile:like_dislike",
+                ],
             },
         },
+        # B: blackbox refine (idea generation + explicit refinement), using v5 love/like/dislike/hate profile.
+        "B": {
+            "prompt": {
+                "plan": "blackbox_refine",
+                "profile_path": profile_love_like_dislike_hate_path,
+                "refinement": {"policy": "none"},
+                "scoring": {
+                    "enabled": True,
+                    "num_ideas": 8,
+                    "judge_profile_source": "raw",
+                    "final_profile_source": "raw",
+                    "generator_profile_abstraction": True,
+                    "novelty": {"enabled": False, "window": 0},
+                },
+            },
+            "experiment": {
+                "variant": "B_blackbox_refine_love_like_dislike_hate",
+                "notes": "blackbox_refine plan + scoring; v5 love/like/dislike/hate profile; shared per-run concepts; concept filters disabled",
+                "tags": [
+                    "exp3x3",
+                    "profile_v5",
+                    "set:B",
+                    "plan:blackbox_refine",
+                    "refinement:none",
+                    "profile:love_like_dislike_hate",
+                ],
+            },
+        },
+        # C: one-shot final prompt creation from concepts + profile, no scoring/refinement.
         "C": {
             "prompt": {
-                "plan": "simple_no_concepts",
+                "plan": "direct",
+                "profile_path": profile_love_like_dislike_hate_path,
+                "refinement": {"policy": "none"},
                 "scoring": {"enabled": False},
             },
             "experiment": {
-                "variant": "C_simple_no_concepts_none",
-                "notes": "simple_no_concepts plan (no refinement; concepts generated for parity but plan ignores concept selection)",
-                "tags": ["exp3x3", "set:C", "plan:simple_no_concepts", "refinement:none"],
+                "variant": "C_direct_none_love_like_dislike_hate",
+                "notes": "direct plan (single-turn final prompt from concepts + profile); v5 love/like/dislike/hate profile; shared per-run concepts; concept filters disabled",
+                "tags": [
+                    "exp3x3",
+                    "profile_v5",
+                    "set:C",
+                    "plan:direct",
+                    "refinement:none",
+                    "profile:love_like_dislike_hate",
+                ],
             },
-            "context": {"enabled": False},
         },
     }
+
+    if generator_profile_hints_path:
+        for set_id in ("A", "B"):
+            scoring_cfg = variant_overrides[set_id]["prompt"]["scoring"]
+            if not isinstance(scoring_cfg, dict):
+                raise TypeError(f"Expected prompt.scoring mapping for set {set_id}")
+            scoring_cfg["generator_profile_hints_path"] = generator_profile_hints_path
 
     planned: list[PlannedRun] = []
     for set_id in enabled_sets:
@@ -282,7 +324,9 @@ def build_plan(
                         "filters": {"enabled": False},
                     },
                 },
-                "experiment": {"tags": list(set_overrides["experiment"]["tags"]) + [f"run:{run_index + 1}"]},
+                "experiment": {
+                    "tags": list(set_overrides["experiment"]["tags"]) + [f"run:{run_index + 1}"]
+                },
             }
 
             cfg_dict = _merge_cfg(base_cfg, set_cfg_overlay, run_overlay)
@@ -306,19 +350,31 @@ def _print_plan(plan: Sequence[PlannedRun]) -> None:
     for entry in plan:
         prompt_cfg = entry.cfg_dict.get("prompt") if isinstance(entry.cfg_dict.get("prompt"), dict) else {}
         plan_name = prompt_cfg.get("plan")
-        refinement = (prompt_cfg.get("refinement") or {}).get("policy") if isinstance(prompt_cfg.get("refinement"), dict) else None
-        scoring_enabled = (prompt_cfg.get("scoring") or {}).get("enabled") if isinstance(prompt_cfg.get("scoring"), dict) else None
+        refinement = (
+            (prompt_cfg.get("refinement") or {}).get("policy")
+            if isinstance(prompt_cfg.get("refinement"), dict)
+            else None
+        )
+        scoring_enabled = (
+            (prompt_cfg.get("scoring") or {}).get("enabled")
+            if isinstance(prompt_cfg.get("scoring"), dict)
+            else None
+        )
+        profile_path = prompt_cfg.get("profile_path")
         concepts_preview = ", ".join(entry.concepts) if entry.concepts else "<none>"
         print(
             f"{entry.set_id}{entry.run_index}: generation_id={entry.generation_id} seed={entry.seed} "
-            f"plan={plan_name} refinement={refinement} scoring={scoring_enabled} concepts=[{concepts_preview}]"
+            f"plan={plan_name} refinement={refinement} scoring={scoring_enabled} "
+            f"profile={profile_path} concepts=[{concepts_preview}]"
         )
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        prog="run_experiment_3x3",
-        description="Run a 3x3 experiment (3 variants × 3 runs) using prompt plans + experiment labels.",
+        prog="run_experiment_profile_v5_3x3",
+        description=(
+            "Run a 3x3 experiment (A/B/C variants x 3 runs) to compare v5 profile formats and a direct one-shot plan."
+        ),
     )
     parser.add_argument(
         "--config-path",
@@ -336,7 +392,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--experiment-id",
         type=str,
         default=None,
-        help="Experiment id written into transcript metadata. Defaults to a timestamped exp3x3 id.",
+        help="Experiment id written into transcript metadata. Defaults to a timestamped exp id.",
     )
     parser.add_argument(
         "--sets",
@@ -365,6 +421,27 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="Optional pinned concept (repeatable). If omitted, concepts are randomly sampled per run index and shared across sets.",
     )
     parser.add_argument(
+        "--profile-like-dislike-path",
+        type=str,
+        default="./image_project/impl/current/data/sample/user_profile_v5_like_dislike.csv",
+        help="CSV path for the v5 like/dislike profile format (A set).",
+    )
+    parser.add_argument(
+        "--profile-love-like-dislike-hate-path",
+        type=str,
+        default="./image_project/impl/current/data/sample/user_profile_v5_love_like_dislike_hate.csv",
+        help="CSV path for the v5 love/like/dislike/hate profile format (B/C sets).",
+    )
+    parser.add_argument(
+        "--generator-profile-hints-path",
+        type=str,
+        default=None,
+        help=(
+            "Optional path to a generator-safe profile hints file (e.g. v5 abstraction CSV). "
+            "When set, A/B load hints from this file instead of generating them."
+        ),
+    )
+    parser.add_argument(
         "--enable-upscale",
         action="store_true",
         help="Enable upscaling (uses the base config's upscale settings).",
@@ -377,30 +454,25 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Validate configs and print the run plan without calling any AI or generating images.",
+        help="Only print the planned runs + validate configs; do not execute the pipeline.",
     )
     parser.add_argument(
         "--continue-on-error",
         action="store_true",
-        help="Keep running remaining runs if a run fails.",
+        help="Continue running remaining planned runs even if one fails.",
     )
 
     args = parser.parse_args(list(argv) if argv is not None else None)
 
-    if args.runs_per_set <= 0:
-        raise SystemExit("--runs-per-set must be > 0")
-
-    if not args.dry_run and args.mode != "full":
-        raise SystemExit("This experiment runner is intended to generate images; use --mode full (or --dry-run).")
-
     enabled_sets = _parse_sets(args.sets)
 
-    output_root = args.output_root or _default_output_root()
-    output_root = os.path.abspath(output_root)
+    if not args.dry_run and args.mode != "full":
+        raise SystemExit(
+            "This experiment runner is intended to generate images; use --mode full (or --dry-run)."
+        )
 
-    experiment_id = (args.experiment_id or "").strip()
-    if not experiment_id:
-        experiment_id = "exp3x3_" + datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_root = args.output_root or _default_output_root()
+    experiment_id = args.experiment_id or f"profile_v5_3x3_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
     base_seed = int(args.seed) if args.seed is not None else int(datetime.now().timestamp())
 
@@ -427,6 +499,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         concepts_by_run=concepts_by_run,
         enable_upscale=bool(args.enable_upscale),
         enable_upload=bool(args.enable_upload),
+        profile_like_dislike_path=str(args.profile_like_dislike_path),
+        profile_love_like_dislike_hate_path=str(args.profile_love_like_dislike_hate_path),
+        generator_profile_hints_path=(str(args.generator_profile_hints_path) if args.generator_profile_hints_path else None),
     )
 
     os.makedirs(output_root, exist_ok=True)
@@ -461,6 +536,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             {"run": idx + 1, "concept_seed": concept_seeds_by_run[idx], "concepts": list(concepts_by_run[idx])}
             for idx in range(len(concepts_by_run))
         ],
+        "profiles": {
+            "like_dislike": str(args.profile_like_dislike_path),
+            "love_like_dislike_hate": str(args.profile_love_like_dislike_hate_path),
+            "generator_profile_hints_path": str(args.generator_profile_hints_path)
+            if args.generator_profile_hints_path
+            else None,
+        },
         "enable_upscale": bool(args.enable_upscale),
         "enable_upload": bool(args.enable_upload),
         "validation_errors": validation_errors,

@@ -59,6 +59,7 @@ prompt:
     idea_profile_source: generator_hints  # raw|generator_hints|none
     final_profile_source: raw  # raw|generator_hints
     generator_profile_abstraction: true
+    generator_profile_hints_path: null  # optional file containing generator-safe hints (overrides abstraction stage)
     novelty:
       enabled: true
       window: 25
