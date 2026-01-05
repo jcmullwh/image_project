@@ -54,20 +54,30 @@ def profile_representation_from_guidance(
     sections = _parse_profile_sections(raw)
     likes = sections.get("likes", "").strip()
     dislikes_section = sections.get("dislikes", "").strip()
+    hates_section = sections.get("hates", "").strip()
 
     if source == "likes_dislikes":
         blocks: list[str] = []
         if likes:
             blocks.append("Likes:\n" + likes)
+        if hates_section:
+            blocks.append("Hates:\n" + hates_section)
         if dislikes_section:
             blocks.append("Dislikes:\n" + dislikes_section)
         return "\n\n".join(blocks).strip() or "<none>"
 
     if source == "dislikes_only":
+        blocks = []
+        if hates_section:
+            blocks.append("Hates:\n" + hates_section)
         if dislikes_section:
-            return ("Dislikes:\n" + dislikes_section).strip()
+            blocks.append("Dislikes:\n" + dislikes_section)
+        if blocks:
+            return "\n\n".join(blocks).strip()
         if dislikes_list:
-            return ("Dislikes:\n" + "\n".join(f"- {item}" for item in dislikes_list)).strip()
+            return (
+                "Dislikes/Hates:\n" + "\n".join(f"- {item}" for item in dislikes_list)
+            ).strip()
         return "<none>"
 
     if source == "combined":
@@ -75,7 +85,7 @@ def profile_representation_from_guidance(
         if hints:
             blocks.append("Generator-safe profile hints:\n" + hints)
         blocks.append(
-            "Likes/Dislikes (raw, minimal):\n"
+            "Likes/Dislikes/Hates (raw, minimal):\n"
             + profile_representation_from_guidance(
                 profile_source="likes_dislikes",
                 preferences_guidance=raw,
@@ -180,10 +190,9 @@ def variation_generate_prompt(
         """\
         Mutation bar (must satisfy):
         - The variant must be meaningfully different from the base prompt (not a paraphrase).
-        - Change at least TWO major axes vs the base: composition/perspective, setting/time/weather, lighting/palette, medium/style, subject/action/props.
         - Prefer concrete, renderable specifics (materials, textures, camera/framing, lighting design); avoid vague filler.
         - If NOVELTY SUMMARY is present, actively avoid the most repeated motifs/phrases.
-        - Follow MUTATION DIRECTIVE when present, but still meet this mutation bar.
+        - Follow MUTATION DIRECTIVE when present.
         """
     ).strip()
 
@@ -192,7 +201,7 @@ def variation_generate_prompt(
             f"""\
             You rewrite image prompts.
 
-            Task: produce ONE improved image prompt variant based on the base prompt and optional reference blocks.
+            Task: produce ONE image prompt variant based on the base prompt and optional reference blocks.
 
             BASE PROMPT (to improve):
             {base}

@@ -10,7 +10,7 @@ pdm run update-stages-docs
 python tools/generate_stages_doc.py
 ```
 
-Total stages: 22
+Total stages: 27
 
 ## ab
 
@@ -27,9 +27,17 @@ Total stages: 22
 - `blackbox.idea_cards_generate` (chat): Generate idea cards (strict JSON). `(prompts.idea_cards_generate_prompt)`
 - `blackbox.idea_cards_judge_score` (chat): Judge idea cards and emit scores (strict JSON). `(prompts.idea_cards_judge_prompt)`
 - `blackbox.image_prompt_creation` (chat): Create final prompt from selected idea card. `(prompts.final_prompt_from_selected_idea_prompt)`
+- `blackbox.image_prompt_draft` (chat): Create a draft prompt from selected idea card (for downstream refinement). `(prompts.draft_prompt_from_selected_idea_prompt)`
+- `blackbox.image_prompt_openai` (chat): Create an OpenAI (GPT Image 1.5) formatted prompt from the selected idea card. `(prompts.openai_image_prompt_from_selected_idea_prompt)`
+- `blackbox.image_prompt_refine` (chat): Refine the draft prompt into a final prompt (no ToT). `(prompts.refine_draft_prompt_from_selected_idea_prompt)`
 - `blackbox.prepare` (action): Prepare blackbox scoring (novelty summary + default generator hints). `(blackbox_scoring.extract_recent_motif_summary)`
 - `blackbox.profile_abstraction` (chat): Create generator-safe profile hints. `(prompts.profile_abstraction_prompt)`
+- `blackbox.profile_hints_load` (action): Load generator-safe profile hints from a file. `(framework.profile_io.load_generator_profile_hints)`
 - `blackbox.select_idea_card` (action): Select an idea card using judge scores (and novelty penalties when enabled). `(blackbox_scoring.select_candidate)`
+
+## direct
+
+- `direct.image_prompt_creation` (chat): Create final prompt directly from concepts + profile. `(prompts.final_prompt_from_concepts_and_profile_prompt)`
 
 ## preprompt
 

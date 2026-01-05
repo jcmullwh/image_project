@@ -5,6 +5,7 @@ This file summarizes experiments that have been planned and/or executed in this 
 ## Artifact conventions
 
 - `experiment_plan.json`: planned variants, seeds, and config provenance (`config_meta`).
+- `experiment_plan_full.json`: planned variants plus per-run resolved configs and resolved prompt pipeline stages (written even for `--dry-run`).
 - `experiment_results.json`: per-run status + primary outputs (only present when the runner executed).
 - `logs/runs_index.jsonl`: per-run metadata, resolved prompt pipeline, and artifact paths.
 

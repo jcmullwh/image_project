@@ -28,7 +28,9 @@ class BlackboxRefinePromptPlan(LinearStagePlan):
             StageCatalog.build("preprompt.filter_concepts", inputs),
             StageCatalog.build("blackbox.prepare", inputs),
         ]
-        if scoring_cfg.generator_profile_abstraction:
+        if scoring_cfg.generator_profile_hints_path:
+            base.append(StageCatalog.build("blackbox.profile_hints_load", inputs))
+        elif scoring_cfg.generator_profile_abstraction:
             base.append(StageCatalog.build("blackbox.profile_abstraction", inputs))
 
         base.extend(
@@ -39,9 +41,9 @@ class BlackboxRefinePromptPlan(LinearStagePlan):
             ]
         )
 
-        seed_stage = StageCatalog.build("blackbox.image_prompt_creation", inputs)
+        seed_stage = StageCatalog.build("blackbox.image_prompt_openai", inputs)
         if not isinstance(seed_stage, StageSpec):
-            raise TypeError("blackbox.image_prompt_creation must be a chat stage")
+            raise TypeError("blackbox.image_prompt_openai must be a chat stage")
 
         base.append(
             StageSpec(
@@ -92,7 +94,9 @@ class BlackboxRefineOnlyPromptPlan(LinearStagePlan):
             StageCatalog.build("preprompt.filter_concepts", inputs),
             StageCatalog.build("blackbox.prepare", inputs),
         ]
-        if scoring_cfg.generator_profile_abstraction:
+        if scoring_cfg.generator_profile_hints_path:
+            specs.append(StageCatalog.build("blackbox.profile_hints_load", inputs))
+        elif scoring_cfg.generator_profile_abstraction:
             specs.append(StageCatalog.build("blackbox.profile_abstraction", inputs))
 
         def _seed_action(ctx: RunContext, *, draft_text=draft_text) -> str:

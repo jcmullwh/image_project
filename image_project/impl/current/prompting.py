@@ -517,6 +517,54 @@ def final_prompt_from_selected_idea_prompt(
     )
 
 
+def openai_image_prompt_from_selected_idea_prompt(
+    *,
+    concepts: list[str],
+    raw_profile: str,
+    selected_idea_card: dict[str, object],
+    context_guidance: str | None = None,
+    max_chars: int | None = None,
+) -> str:
+    concepts_block = "\n".join(f"- {c}" for c in concepts) if concepts else "- <none>"
+    idea_json = json.dumps(selected_idea_card, ensure_ascii=False, indent=2)
+    context_block = (context_guidance or "").strip()
+    target = int(max_chars) if max_chars is not None else 3500
+    return textwrap.dedent(
+        f"""
+        You are writing the image prompt text for OpenAI GPT Image 1.5.
+
+        Output rules:
+        - Output ONLY the final image prompt (no analysis, no commentary, no JSON/YAML).
+        - Use short labeled sections with line breaks; omit any section that doesn't apply.
+        - Prefer concrete nouns + renderable constraints; avoid vague hype and redundant synonyms.
+        - Your output MUST be fewer than {target} characters.
+
+        Use this rough order (rename freely if it reads better):
+        1) DELIVERABLE / INTENT
+        2) CONTENT
+        3) CONTEXT / WORLD (optional)
+        4) STYLE / MEDIUM
+        5) COMPOSITION / GEOMETRY
+        6) CONSTRAINTS
+           - MUST INCLUDE:
+           - MUST NOT INCLUDE:
+        7) TEXT IN IMAGE (only if required)
+
+        Selected concepts (must be integrated thoughtfully):
+        {concepts_block}
+
+        Context guidance (optional; incorporate subtle seasonal/holiday cues when present):
+        {context_block if context_block else "<none>"}
+
+        Raw user profile (authoritative preferences and avoid constraints):
+        {raw_profile.strip()}
+
+        Selected idea card (JSON):
+        {idea_json}
+        """.strip()
+    )
+
+
 def draft_prompt_from_selected_idea_prompt(
     *,
     concepts: list[str],
@@ -1154,16 +1202,17 @@ def blackbox_idea_cards_generate(inputs: PlanInputs) -> StageSpec:
         idea_profile_source = scoring_cfg.idea_profile_source
         if idea_profile_source == "none":
             hints = ""
-        elif idea_profile_source == "raw":
-            hints = str(ctx.outputs.get("preferences_guidance") or "")
-        elif idea_profile_source == "generator_hints":
-            hints = ctx.outputs.get("generator_profile_hints")
-            if not isinstance(hints, str) or not hints.strip():
-                hints = str(ctx.outputs.get("preferences_guidance") or "")
+        elif idea_profile_source in ("raw", "generator_hints", "generator_hints_plus_dislikes"):
+            hints = _resolve_blackbox_profile_text(
+                ctx,
+                source=idea_profile_source,
+                stage_id="blackbox.idea_cards_generate",
+                config_path="prompt.scoring.idea_profile_source",
+            )
         else:  # pragma: no cover - guarded by config validation
             raise ValueError(
                 "Unknown prompt.scoring.idea_profile_source: "
-                f"{idea_profile_source!r} (expected: raw|generator_hints|none)"
+                f"{idea_profile_source!r} (expected: raw|generator_hints|generator_hints_plus_dislikes|none)"
             )
         return prompts.idea_cards_generate_prompt(
             concepts=list(ctx.selected_concepts),
@@ -1189,14 +1238,18 @@ def build_blackbox_isolated_idea_card_specs(inputs: PlanInputs) -> list[StageNod
     context_guidance = inputs.context_guidance or None
 
     diversity_directives: tuple[str, ...] = (
-        "Perspective-first: extreme close-up / macro framing, tactile textures, intimate scale.",
-        "Environment-first: wide establishing shot with clear foreground/midground/background and strong negative space.",
-        "Light-first: dramatic lighting design (chiaroscuro, rim light, silhouettes, strong shadow shapes).",
-        "Color-first: decisive palette strategy (limited palette with 1 accent, or bold complementary contrast).",
-        "Narrative-first: depict a precise moment of action/gesture with implied before/after; avoid romance tropes.",
-        "Surreal-but-coherent: one impossible element treated as mundane; avoid dreamy vagueness.",
-        "Medium/artifact-first: make the medium feel real (film grain, brushwork, paper texture, collage seams, 3D materials).",
-        "Time/setting shift: relocate to an unexpected setting or era with concrete props/weather/time-of-day cues.",
+        # Explicit wildcards / escape hatches
+        "Develop your strongest interpretation of how these components fit together.",
+        "Follow the most compelling idea that emerges from these components, even if it doesn’t match a clear pattern.",
+        # Structured but non-prescriptive lenses
+        "Synthesize the components into a single coherent idea, prioritizing internal logic over novelty.",
+        "Reinterpret the role or meaning of one component while keeping all components recognizable.",
+        "Let one component strongly shape how the others are understood or used.",
+        "Treat all components as equally fundamental, without an obvious focal element.",
+        # Semi-open exploration
+        "Explore an interpretation that feels unexpected but still defensible given the components.",
+        "Look for a non-obvious relationship or alignment between the components.",
+
     )
 
     def _resolve_profile_hints(ctx: RunContext, *, stage_id: str) -> str:
@@ -1210,9 +1263,16 @@ def build_blackbox_isolated_idea_card_specs(inputs: PlanInputs) -> list[StageNod
             if not isinstance(hints, str) or not hints.strip():
                 return str(ctx.outputs.get("preferences_guidance") or "")
             return hints
+        if idea_profile_source == "generator_hints_plus_dislikes":
+            return _resolve_blackbox_profile_text(
+                ctx,
+                source=idea_profile_source,
+                stage_id=stage_id,
+                config_path="prompt.scoring.idea_profile_source",
+            )
         raise ValueError(
             f"Unknown prompt.scoring.idea_profile_source for {stage_id}: "
-            f"{idea_profile_source!r} (expected: raw|generator_hints|none)"
+            f"{idea_profile_source!r} (expected: raw|generator_hints|generator_hints_plus_dislikes|none)"
         )
 
     specs: list[StageNodeSpec] = []
@@ -1513,6 +1573,45 @@ def blackbox_image_prompt_creation(inputs: PlanInputs) -> StageSpec:
 
     return StageSpec(
         stage_id="blackbox.image_prompt_creation",
+        prompt=_prompt,
+        temperature=0.8,
+        is_default_capture=True,
+    )
+
+
+@StageCatalog.register(
+    "blackbox.image_prompt_openai",
+    doc="Create an OpenAI (GPT Image 1.5) formatted prompt from the selected idea card.",
+    source="prompts.openai_image_prompt_from_selected_idea_prompt",
+    tags=("blackbox",),
+)
+def blackbox_image_prompt_openai(inputs: PlanInputs) -> StageSpec:
+    scoring_cfg = inputs.cfg.prompt_scoring
+    final_profile_source = scoring_cfg.final_profile_source
+    context_guidance = inputs.context_guidance or None
+    max_chars: int | None = None
+    if inputs.cfg.prompt_blackbox_refine is not None:
+        max_chars = inputs.cfg.prompt_blackbox_refine.max_prompt_chars
+
+    def _prompt(ctx: RunContext) -> str:
+        selected_card = ctx.outputs.get("selected_idea_card")
+        if not isinstance(selected_card, dict):
+            raise ValueError("Missing required output: selected_idea_card")
+        return prompts.openai_image_prompt_from_selected_idea_prompt(
+            concepts=list(ctx.selected_concepts),
+            raw_profile=_resolve_blackbox_profile_text(
+                ctx,
+                source=final_profile_source,
+                stage_id="blackbox.image_prompt_openai",
+                config_path="prompt.scoring.final_profile_source",
+            ),
+            selected_idea_card=selected_card,
+            context_guidance=context_guidance,
+            max_chars=max_chars,
+        )
+
+    return StageSpec(
+        stage_id="blackbox.image_prompt_openai",
         prompt=_prompt,
         temperature=0.8,
         is_default_capture=True,

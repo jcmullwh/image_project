@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import os
 import sys
 from collections import defaultdict
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -19,71 +20,110 @@ class StageDocRow:
     tags: tuple[str, ...]
 
 
-def _infer_stage_kind(builder: Any) -> str | None:
-    annotation = getattr(builder, "__annotations__", {}).get("return")
+def _infer_stage_kind_from_return_annotation(annotation: ast.expr | None) -> str | None:
     if annotation is None:
         return None
-    if isinstance(annotation, str):
-        if "ActionStageSpec" in annotation:
+
+    if isinstance(annotation, ast.Name):
+        if annotation.id == "ActionStageSpec":
             return "action"
-        if "StageSpec" in annotation:
+        if annotation.id == "StageSpec":
             return "chat"
         return None
-    name = getattr(annotation, "__name__", "")
-    if name == "ActionStageSpec":
-        return "action"
-    if name == "StageSpec":
-        return "chat"
+
+    if isinstance(annotation, ast.Attribute):
+        if annotation.attr == "ActionStageSpec":
+            return "action"
+        if annotation.attr == "StageSpec":
+            return "chat"
+        return None
+
+    if isinstance(annotation, ast.Subscript):
+        return _infer_stage_kind_from_return_annotation(annotation.value)
+
     return None
 
 
-def _normalize_doc(value: Any) -> str | None:
-    if value is None:
-        return None
-    if not isinstance(value, str):
-        return str(value).strip() or None
-    return value.strip() or None
+def _normalize_str_constant(value: Any) -> str | None:
+    if isinstance(value, str):
+        return value.strip() or None
+    return None
+
+
+def _extract_string_tuple(node: ast.AST) -> tuple[str, ...]:
+    if not isinstance(node, (ast.Tuple, ast.List)):
+        return ()
+    items: list[str] = []
+    for elt in node.elts:
+        if isinstance(elt, ast.Constant) and isinstance(elt.value, str):
+            item = elt.value.strip()
+            if item:
+                items.append(item)
+    return tuple(items)
+
+
+def _stage_rows_from_ast(prompting_path: Path) -> list[StageDocRow]:
+    source = prompting_path.read_text(encoding="utf-8-sig")
+    tree = ast.parse(source, filename=str(prompting_path))
+
+    rows: list[StageDocRow] = []
+    for node in tree.body:
+        if not isinstance(node, ast.FunctionDef):
+            continue
+
+        for decorator in node.decorator_list:
+            if not isinstance(decorator, ast.Call):
+                continue
+            func = decorator.func
+            if not (
+                isinstance(func, ast.Attribute)
+                and isinstance(func.value, ast.Name)
+                and func.value.id == "StageCatalog"
+                and func.attr == "register"
+            ):
+                continue
+
+            stage_id: str | None = None
+            if decorator.args and isinstance(decorator.args[0], ast.Constant):
+                stage_id = _normalize_str_constant(decorator.args[0].value)
+            if not stage_id:
+                continue
+
+            doc: str | None = None
+            source_ref: str | None = None
+            tags: tuple[str, ...] = ()
+            for kw in decorator.keywords:
+                if not isinstance(kw, ast.keyword) or kw.arg is None:
+                    continue
+                if kw.arg == "doc" and isinstance(kw.value, ast.Constant):
+                    doc = _normalize_str_constant(kw.value.value)
+                elif kw.arg == "source" and isinstance(kw.value, ast.Constant):
+                    source_ref = _normalize_str_constant(kw.value.value)
+                elif kw.arg == "tags":
+                    tags = _extract_string_tuple(kw.value)
+
+            kind = _infer_stage_kind_from_return_annotation(node.returns)
+            rows.append(
+                StageDocRow(
+                    stage_id=stage_id,
+                    kind=kind,
+                    doc=doc,
+                    source=source_ref,
+                    tags=tags,
+                )
+            )
+
+    rows.sort(key=lambda r: r.stage_id)
+    return rows
 
 
 def _stage_rows() -> list[StageDocRow]:
     project_root = Path(__file__).resolve().parent.parent
-    if str(project_root) not in sys.path:
-        sys.path.insert(0, str(project_root))
+    prompting_path = project_root / "image_project" / "impl" / "current" / "prompting.py"
+    if not prompting_path.exists():
+        raise RuntimeError(f"Prompting module not found: {prompting_path}")
 
-    try:
-        from image_project.impl.current.prompting import StageCatalog  # noqa: PLC0415
-    except Exception as exc:  # noqa: BLE001
-        raise RuntimeError(f"Failed to import StageCatalog: {exc}") from exc
-
-    registry: Mapping[str, Any] = getattr(StageCatalog, "_REGISTRY", {})
-    if not isinstance(registry, Mapping):
-        raise RuntimeError("StageCatalog registry is not a mapping; cannot enumerate stages")
-
-    rows: list[StageDocRow] = []
-    for stage_id in StageCatalog.available():
-        entry = registry.get(stage_id)
-        if entry is None:
-            raise RuntimeError(f"StageCatalog registry missing entry for {stage_id!r}")
-
-        builder = getattr(entry, "builder", None)
-        kind = _infer_stage_kind(builder)
-        doc = _normalize_doc(getattr(entry, "doc", None))
-        source = _normalize_doc(getattr(entry, "source", None))
-        tags_raw = getattr(entry, "tags", ()) or ()
-        tags = tuple(str(tag).strip() for tag in tags_raw if str(tag).strip())
-
-        rows.append(
-            StageDocRow(
-                stage_id=str(stage_id),
-                kind=kind,
-                doc=doc,
-                source=source,
-                tags=tags,
-            )
-        )
-
-    rows.sort(key=lambda r: r.stage_id)
-    return rows
+    return _stage_rows_from_ast(prompting_path)
 
 
 def generate_markdown(*, rows: Iterable[StageDocRow]) -> str:

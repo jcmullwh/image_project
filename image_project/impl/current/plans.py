@@ -227,7 +227,7 @@ class BlackboxPromptPlan(LinearStagePlan):
             StageCatalog.build("blackbox.prepare", inputs),
         ]
         if scoring_cfg.generator_profile_hints_path:
-            sequence.append("blackbox.profile_hints_load")
+            sequence.append(StageCatalog.build("blackbox.profile_hints_load", inputs))
         elif scoring_cfg.generator_profile_abstraction:
             sequence.append(StageCatalog.build("blackbox.profile_abstraction", inputs))
 
@@ -237,7 +237,7 @@ class BlackboxPromptPlan(LinearStagePlan):
             [
                 StageCatalog.build("blackbox.idea_cards_judge_score", inputs),
                 StageCatalog.build("blackbox.select_idea_card", inputs),
-                StageCatalog.build("blackbox.image_prompt_creation", inputs),
+                StageCatalog.build("blackbox.image_prompt_openai", inputs),
             ]
         )
         return sequence

@@ -150,4 +150,5 @@ def test_blackbox_refine_plan_adds_final_refinement_stage(tmp_path):
     )
 
     stage_ids = [spec.stage_id for spec in resolved.plan.stage_specs(inputs)]
-    assert stage_ids[-2:] == ["blackbox.image_prompt_draft", "blackbox.image_prompt_refine"]
+    assert "blackbox_refine.init_state" in stage_ids
+    assert stage_ids[-1] == "blackbox_refine.finalize"

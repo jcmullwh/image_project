@@ -17,8 +17,10 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from image_project.app.generate import run_generation
+from image_project.app.experiment_dry_run import write_experiment_plan_full
 from image_project.foundation.config_io import load_config
 from image_project.framework.artifacts import generate_unique_id
+from image_project.framework.artifacts_index import maybe_update_artifacts_index
 from image_project.framework.config import RunConfig
 
 
@@ -228,14 +230,21 @@ def build_plan(
                     "enabled": True,
                     "num_ideas": 8,
                     "judge_profile_source": "raw",
+                    "idea_profile_source": "generator_hints_plus_dislikes",
                     "final_profile_source": "raw",
                     "generator_profile_abstraction": True,
                     "novelty": {"enabled": False, "window": 0},
                 },
+                "blackbox_refine": {
+                    "variation_prompt": {
+                        "include_profile": True,
+                        "profile_source": "dislikes_only",
+                    }
+                },
             },
             "experiment": {
                 "variant": "A_blackbox_refine_like_dislike",
-                "notes": "blackbox_refine plan + scoring; v5 like/dislike profile; shared per-run concepts; concept filters disabled",
+                "notes": "blackbox_refine plan + scoring; v5 like/dislike profile; shared per-run concepts; concept filters enabled",
                 "tags": [
                     "exp3x3",
                     "profile_v5",
@@ -256,14 +265,21 @@ def build_plan(
                     "enabled": True,
                     "num_ideas": 8,
                     "judge_profile_source": "raw",
+                    "idea_profile_source": "generator_hints_plus_dislikes",
                     "final_profile_source": "raw",
                     "generator_profile_abstraction": True,
                     "novelty": {"enabled": False, "window": 0},
                 },
+                "blackbox_refine": {
+                    "variation_prompt": {
+                        "include_profile": True,
+                        "profile_source": "dislikes_only",
+                    }
+                },
             },
             "experiment": {
                 "variant": "B_blackbox_refine_love_like_dislike_hate",
-                "notes": "blackbox_refine plan + scoring; v5 love/like/dislike/hate profile; shared per-run concepts; concept filters disabled",
+                "notes": "blackbox_refine plan + scoring; v5 love/like/dislike/hate profile; shared per-run concepts; concept filters enabled",
                 "tags": [
                     "exp3x3",
                     "profile_v5",
@@ -284,7 +300,7 @@ def build_plan(
             },
             "experiment": {
                 "variant": "C_direct_none_love_like_dislike_hate",
-                "notes": "direct plan (single-turn final prompt from concepts + profile); v5 love/like/dislike/hate profile; shared per-run concepts; concept filters disabled",
+                "notes": "direct plan (single-turn final prompt from concepts + profile); v5 love/like/dislike/hate profile; shared per-run concepts; concept filters enabled",
                 "tags": [
                     "exp3x3",
                     "profile_v5",
@@ -321,7 +337,7 @@ def build_plan(
                     "random_seed": seed,
                     "concepts": {
                         "selection": {"strategy": "fixed", "fixed": list(concepts)},
-                        "filters": {"enabled": False},
+                        "filters": {"enabled": True},
                     },
                 },
                 "experiment": {
@@ -564,17 +580,40 @@ def main(argv: Sequence[str] | None = None) -> int:
         json.dump(payload, handle, ensure_ascii=False, indent=2)
         handle.write("\n")
 
+    full_plan_path = os.path.join(output_root, "experiment_plan_full.json")
+    write_experiment_plan_full(
+        full_plan_path,
+        summary_payload=payload,
+        runs=[
+            {
+                "set": entry.set_id,
+                "set_name": entry.set_name,
+                "run": entry.run_index,
+                "generation_id": entry.generation_id,
+                "seed": entry.seed,
+                "concept_seed": entry.concept_seed,
+                "concepts": list(entry.concepts),
+                "cfg_dict": entry.cfg_dict,
+            }
+            for entry in plan
+        ],
+    )
+
     if validation_errors:
         _print_plan(plan)
         print(f"Wrote experiment plan to {summary_path}")
+        print(f"Wrote expanded experiment plan to {full_plan_path}")
         print("Config validation errors:")
         print(json.dumps(validation_errors, ensure_ascii=False, indent=2))
+        maybe_update_artifacts_index(repo_root=str(PROJECT_ROOT))
         return 2
 
     _print_plan(plan)
     print(f"Wrote experiment plan to {summary_path}")
+    print(f"Wrote expanded experiment plan to {full_plan_path}")
 
     if args.dry_run:
+        maybe_update_artifacts_index(repo_root=str(PROJECT_ROOT))
         return 0
 
     results: list[dict[str, Any]] = []
@@ -618,6 +657,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         handle.write("\n")
 
     print(f"Wrote experiment results to {results_path}")
+    maybe_update_artifacts_index(repo_root=str(PROJECT_ROOT))
     return 0 if failures == 0 else 1
 
 

@@ -293,6 +293,8 @@ Compares v5 profile formats and a one-shot prompt path:
 - **A**: `blackbox_refine` + `refinement.policy=none` + v5 `like/dislike` profile
 - **B**: `blackbox_refine` + `refinement.policy=none` + v5 `love/like/dislike/hate` profile
 - **C**: `direct` + `refinement.policy=none` + v5 `love/like/dislike/hate` profile
+- Concept filters: enabled (see `preprompt.filter_concepts` / `prompt.concepts.filters.*`)
+- Seed prompt formatting: `blackbox.image_prompt_openai` (GPT Image 1.5 prompt text) after idea-card selection
 
 Run:
 

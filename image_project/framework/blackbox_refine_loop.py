@@ -681,7 +681,8 @@ def _resolve_candidate_prompt_text(
 
     original_chars = len(text)
     truncated = False
-    if max_prompt_chars is not None and len(text) > int(max_prompt_chars):
+    # Truncate if over max_prompt_chars * 1.25 to allow some buffer for LLM generation overshoot
+    if max_prompt_chars is not None and len(text) > int(max_prompt_chars*1.25):
         truncated = True
         text = text[: int(max_prompt_chars)].rstrip()
         if not text:

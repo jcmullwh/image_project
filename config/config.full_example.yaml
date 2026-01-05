@@ -56,7 +56,7 @@ prompt:
     judge_temperature: 0.0
     judge_model: null
     judge_profile_source: raw  # raw|generator_hints|generator_hints_plus_dislikes
-    idea_profile_source: generator_hints  # raw|generator_hints|none
+    idea_profile_source: generator_hints  # raw|generator_hints|generator_hints_plus_dislikes|none
     final_profile_source: raw  # raw|generator_hints
     generator_profile_abstraction: true
     generator_profile_hints_path: null  # optional file containing generator-safe hints (overrides abstraction stage)

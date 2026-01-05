@@ -11,7 +11,12 @@ from image_project.framework.context import ContextManager
 RunMode = Literal["full", "prompt_only"]
 ScoringProfileSource = Literal["raw", "generator_hints"]
 ScoringJudgeProfileSource = Literal["raw", "generator_hints", "generator_hints_plus_dislikes"]
-ScoringIdeaProfileSource = Literal["raw", "generator_hints", "none"]
+ScoringIdeaProfileSource = Literal[
+    "raw",
+    "generator_hints",
+    "generator_hints_plus_dislikes",
+    "none",
+]
 PromptNoveltyMethod = Literal["df_overlap_v1", "legacy_v0"]
 NoveltyPenaltyScaling = Literal["linear", "sqrt", "quadratic"]
 BlackboxRefineAlgorithm = Literal["hillclimb", "beam"]
@@ -1116,6 +1121,25 @@ class RunConfig:
             raise ValueError(
                 "Unknown prompt.scoring.judge_profile_source: "
                 f"{raw_judge_profile_source!r} (expected: raw|generator_hints|generator_hints_plus_dislikes)"
+            )
+
+        raw_idea_profile_source: Any = scoring_cfg.get("idea_profile_source", "raw")
+        if raw_idea_profile_source is None:
+            raise ValueError("Invalid config value for prompt.scoring.idea_profile_source: None")
+        if not isinstance(raw_idea_profile_source, str):
+            raise ValueError(
+                "Invalid config type for prompt.scoring.idea_profile_source: expected string"
+            )
+        idea_profile_source = raw_idea_profile_source.strip().lower()
+        if idea_profile_source not in (
+            "raw",
+            "generator_hints",
+            "generator_hints_plus_dislikes",
+            "none",
+        ):
+            raise ValueError(
+                "Unknown prompt.scoring.idea_profile_source: "
+                f"{raw_idea_profile_source!r} (expected: raw|generator_hints|generator_hints_plus_dislikes|none)"
             )
 
         raw_final_profile_source: Any = scoring_cfg.get("final_profile_source", "raw")

@@ -17,8 +17,10 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from image_project.app.generate import run_generation
+from image_project.app.experiment_dry_run import write_experiment_plan_full
 from image_project.foundation.config_io import load_config
 from image_project.framework.artifacts import generate_unique_id
+from image_project.framework.artifacts_index import maybe_update_artifacts_index
 from image_project.framework.config import RunConfig
 
 
@@ -482,17 +484,40 @@ def main(argv: Sequence[str] | None = None) -> int:
         json.dump(payload, handle, ensure_ascii=False, indent=2)
         handle.write("\n")
 
+    full_plan_path = os.path.join(output_root, "experiment_plan_full.json")
+    write_experiment_plan_full(
+        full_plan_path,
+        summary_payload=payload,
+        runs=[
+            {
+                "set": entry.set_id,
+                "set_name": entry.set_name,
+                "run": entry.run_index,
+                "generation_id": entry.generation_id,
+                "seed": entry.seed,
+                "concept_seed": entry.concept_seed,
+                "concepts": list(entry.concepts),
+                "cfg_dict": entry.cfg_dict,
+            }
+            for entry in plan
+        ],
+    )
+
     if validation_errors:
         _print_plan(plan)
         print(f"Wrote experiment plan to {summary_path}")
+        print(f"Wrote expanded experiment plan to {full_plan_path}")
         print("Config validation errors:")
         print(json.dumps(validation_errors, ensure_ascii=False, indent=2))
+        maybe_update_artifacts_index(repo_root=str(PROJECT_ROOT))
         return 2
 
     _print_plan(plan)
     print(f"Wrote experiment plan to {summary_path}")
+    print(f"Wrote expanded experiment plan to {full_plan_path}")
 
     if args.dry_run:
+        maybe_update_artifacts_index(repo_root=str(PROJECT_ROOT))
         return 0
 
     results: list[dict[str, Any]] = []
@@ -536,6 +561,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         handle.write("\n")
 
     print(f"Wrote experiment results to {results_path}")
+    maybe_update_artifacts_index(repo_root=str(PROJECT_ROOT))
     return 0 if failures == 0 else 1
 
 
