@@ -114,7 +114,7 @@ def test_blackbox_plan_uses_profile_hints_load_when_configured(tmp_path):
     assert "blackbox.profile_abstraction" not in stage_ids
 
 
-def test_blackbox_refine_plan_adds_final_refinement_stage(tmp_path):
+def test_blackbox_refine_legacy_plan_adds_final_refinement_stage(tmp_path):
     categories_path = tmp_path / "categories.csv"
     profile_path = tmp_path / "profile.csv"
 
@@ -126,7 +126,7 @@ def test_blackbox_refine_plan_adds_final_refinement_stage(tmp_path):
     cfg_dict = {
         "run": {"mode": "prompt_only"},
         "prompt": {
-            "plan": "blackbox_refine",
+            "plan": "blackbox_refine_legacy",
             "categories_path": str(categories_path),
             "profile_path": str(profile_path),
             "scoring": {"enabled": True, "novelty": {"enabled": False, "window": 0}},

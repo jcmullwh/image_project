@@ -107,6 +107,24 @@ class DirectPromptPlan(SequencePromptPlan):
 
 
 @register_plan
+class BlackboxRefinePromptPlan(BlackboxPromptPlan):
+    """Legacy: blackbox scoring + selection, then an explicit final refinement stage."""
+
+    name = "blackbox_refine_legacy"
+
+    def stage_specs(self, inputs: PlanInputs) -> list[StageNodeSpec]:
+        from image_project.impl.current.prompting import StageCatalog
+
+        specs = list(super().stage_specs(inputs))
+        if specs and getattr(specs[-1], "stage_id", None) == "blackbox.image_prompt_creation":
+            specs[-1] = StageCatalog.build("blackbox.image_prompt_draft", inputs)
+        else:
+            specs.append(StageCatalog.build("blackbox.image_prompt_draft", inputs))
+        specs.append(StageCatalog.build("blackbox.image_prompt_refine", inputs))
+        return specs
+
+
+@register_plan
 class ProfileOnlyPromptPlan(StandardPromptPlan):
     """
     Standard pipeline, but disables context injection regardless of `context.enabled`.

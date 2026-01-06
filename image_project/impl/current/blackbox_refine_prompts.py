@@ -152,12 +152,14 @@ def variation_generate_prompt(
     profile_text: str | None,
     novelty_summary: Mapping[str, Any] | None,
     mutation_directive: str | None,
+    score_feedback: Mapping[str, Any] | None,
     include_concepts: bool,
     include_context_guidance: bool,
     include_profile: bool,
     include_novelty_summary: bool,
     include_mutation_directive: bool,
     include_scoring_rubric: bool,
+    score_feedback_max_chars: int | None,
     max_prompt_chars: int | None,
 ) -> str:
     tmpl = (template or "").strip().lower()
@@ -179,6 +181,79 @@ def variation_generate_prompt(
     directive_block = (mutation_directive or "").strip() or "<none>"
     scoring_block = scoring_rubric_text(rubric="default")
 
+    def _format_score_feedback() -> str | None:
+        if not isinstance(score_feedback, Mapping) or not score_feedback:
+            return None
+
+        max_chars = int(score_feedback_max_chars) if score_feedback_max_chars is not None else None
+        if max_chars is not None and max_chars <= 0:
+            max_chars = None
+
+        def _fmt_num(v: Any) -> str:
+            if isinstance(v, bool) or v is None:
+                return "<none>"
+            try:
+                return f"{float(v):.1f}"
+            except Exception:
+                return str(v)
+
+        def _clip(text: str) -> tuple[str, bool]:
+            t = (text or "").strip()
+            if not t:
+                return "<none>", False
+            if max_chars is None or len(t) <= max_chars:
+                return t, False
+            clipped = t[:max_chars].rstrip()
+            return (clipped if clipped else "<truncated>"), True
+
+        iteration = score_feedback.get("iteration")
+        beam_index = score_feedback.get("beam_index")
+        header_bits: list[str] = []
+        if iteration is not None:
+            header_bits.append(f"iter={iteration}")
+        if beam_index is not None:
+            header_bits.append(f"beam={beam_index}")
+        header = (" (" + ", ".join(header_bits) + ")") if header_bits else ""
+
+        best = score_feedback.get("best")
+        worst = score_feedback.get("worst")
+        if not isinstance(best, Mapping) or not isinstance(worst, Mapping):
+            return None
+
+        best_prompt, best_trunc = _clip(str(best.get("prompt") or ""))
+        worst_prompt, worst_trunc = _clip(str(worst.get("prompt") or ""))
+
+        best_id = str(best.get("id") or "").strip() or "<unknown>"
+        worst_id = str(worst.get("id") or "").strip() or "<unknown>"
+
+        best_raw = _fmt_num(best.get("score"))
+        best_penalty = str(best.get("novelty_penalty") if best.get("novelty_penalty") is not None else "<none>")
+        best_eff = _fmt_num(best.get("effective_score"))
+
+        worst_raw = _fmt_num(worst.get("score"))
+        worst_penalty = str(
+            worst.get("novelty_penalty") if worst.get("novelty_penalty") is not None else "<none>"
+        )
+        worst_eff = _fmt_num(worst.get("effective_score"))
+
+        trunc_note = ""
+        if best_trunc or worst_trunc:
+            trunc_note = f"\n\n(Note: prompt text truncated to {max_chars} chars for context.)"
+
+        return textwrap.dedent(
+            f"""\
+            SCORE FEEDBACK EXAMPLES{header} (higher is better; use as a gradient):
+
+            BEST (id={best_id} raw={best_raw} novelty_penalty={best_penalty} effective={best_eff}):
+            {best_prompt}
+
+            WORST (id={worst_id} raw={worst_raw} novelty_penalty={worst_penalty} effective={worst_eff}):
+            {worst_prompt}
+            """
+        ).strip() + trunc_note
+
+    score_feedback_block = _format_score_feedback()
+
     output_constraints: list[str] = [
         "Output ONLY the new final image prompt. No title, no quotes, no markdown.",
         "Do not include explanations or analysis.",
@@ -197,6 +272,7 @@ def variation_generate_prompt(
     ).strip()
 
     if tmpl == "v2":
+        feedback_section = f"\n\n{score_feedback_block}\n" if score_feedback_block else ""
         return textwrap.dedent(
             f"""\
             You rewrite image prompts.
@@ -217,6 +293,7 @@ def variation_generate_prompt(
             {"MUTATION DIRECTIVE:\n" + directive_block if include_mutation_directive else "MUTATION DIRECTIVE:\n<omitted>"}
 
             {"SCORING RUBRIC (what judges reward):\n" + scoring_block if include_scoring_rubric else "SCORING RUBRIC:\n<omitted>"}
+            {feedback_section}
 
             {mutation_bar}
 
@@ -251,6 +328,8 @@ def variation_generate_prompt(
         parts.extend(["Mutation directive:", directive_block, ""])
     if include_scoring_rubric:
         parts.extend(["Scoring rubric:", scoring_block, ""])
+    if score_feedback_block:
+        parts.extend([score_feedback_block, ""])
 
     parts.extend(["Mutation bar:", mutation_bar, ""])
     parts.extend(["Output constraints:", *[f"- {rule}" for rule in output_constraints]])

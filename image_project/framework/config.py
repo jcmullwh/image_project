@@ -29,6 +29,7 @@ BlackboxRefineProfileSource = Literal[
 ]
 BlackboxRefineVariationTemplate = Literal["v1", "v2"]
 BlackboxRefineMutationMode = Literal["none", "random", "cycle", "fixed"]
+BlackboxRefineScoreFeedback = Literal["none", "best_worst"]
 BlackboxRefineJudgeRubric = Literal["default", "strict", "novelty_heavy"]
 BlackboxRefineAggregation = Literal["mean", "median", "min", "max", "trimmed_mean"]
 BlackboxRefineTieBreaker = Literal["stable_id", "prefer_shorter", "prefer_novel"]
@@ -203,6 +204,8 @@ class PromptBlackboxRefineVariationPromptConfig:
     include_novelty_summary: bool
     include_mutation_directive: bool
     include_scoring_rubric: bool
+    score_feedback: BlackboxRefineScoreFeedback
+    score_feedback_max_chars: int
 
 
 @dataclass(frozen=True)
@@ -1123,25 +1126,6 @@ class RunConfig:
                 f"{raw_judge_profile_source!r} (expected: raw|generator_hints|generator_hints_plus_dislikes)"
             )
 
-        raw_idea_profile_source: Any = scoring_cfg.get("idea_profile_source", "raw")
-        if raw_idea_profile_source is None:
-            raise ValueError("Invalid config value for prompt.scoring.idea_profile_source: None")
-        if not isinstance(raw_idea_profile_source, str):
-            raise ValueError(
-                "Invalid config type for prompt.scoring.idea_profile_source: expected string"
-            )
-        idea_profile_source = raw_idea_profile_source.strip().lower()
-        if idea_profile_source not in (
-            "raw",
-            "generator_hints",
-            "generator_hints_plus_dislikes",
-            "none",
-        ):
-            raise ValueError(
-                "Unknown prompt.scoring.idea_profile_source: "
-                f"{raw_idea_profile_source!r} (expected: raw|generator_hints|generator_hints_plus_dislikes|none)"
-            )
-
         raw_final_profile_source: Any = scoring_cfg.get("final_profile_source", "raw")
         if raw_final_profile_source is None:
             raise ValueError("Invalid config value for prompt.scoring.final_profile_source: None")
@@ -1470,6 +1454,32 @@ class RunConfig:
                 "prompt.blackbox_refine.variation_prompt.include_scoring_rubric",
             )
 
+            raw_score_feedback: Any = variation_prompt_cfg.get("score_feedback", "none")
+            if raw_score_feedback is None:
+                raise ValueError(
+                    "Invalid config value for prompt.blackbox_refine.variation_prompt.score_feedback: None"
+                )
+            if not isinstance(raw_score_feedback, str):
+                raise ValueError(
+                    "Invalid config type for prompt.blackbox_refine.variation_prompt.score_feedback: expected string"
+                )
+            score_feedback = raw_score_feedback.strip().lower()
+            if score_feedback not in ("none", "best_worst"):
+                raise ValueError(
+                    "Unknown prompt.blackbox_refine.variation_prompt.score_feedback: "
+                    f"{raw_score_feedback!r} (expected: none|best_worst)"
+                )
+
+            score_feedback_max_chars = parse_int(
+                variation_prompt_cfg.get("score_feedback_max_chars", 900),
+                "prompt.blackbox_refine.variation_prompt.score_feedback_max_chars",
+            )
+            if score_feedback_max_chars <= 0:
+                raise ValueError(
+                    "Invalid config value for prompt.blackbox_refine.variation_prompt.score_feedback_max_chars: "
+                    "must be > 0"
+                )
+
             variation_prompt = PromptBlackboxRefineVariationPromptConfig(
                 template=template,  # type: ignore[arg-type]
                 include_concepts=include_concepts,
@@ -1479,6 +1489,8 @@ class RunConfig:
                 include_novelty_summary=include_novelty_summary,
                 include_mutation_directive=include_mutation_directive,
                 include_scoring_rubric=include_scoring_rubric,
+                score_feedback=score_feedback,  # type: ignore[arg-type]
+                score_feedback_max_chars=score_feedback_max_chars,
             )
 
             raw_mutation_directives: Any = blackbox_refine_cfg.get("mutation_directives")

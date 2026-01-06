@@ -89,6 +89,10 @@ prompt:
       include_novelty_summary: true
       include_mutation_directive: true
       include_scoring_rubric: true
+      # Optional: leak a tiny amount of score feedback into the next iteration's generator prompt
+      # (judges remain blind; this is for "gradient" direction).
+      score_feedback: best_worst  # none|best_worst
+      score_feedback_max_chars: 900
 
     mutation_directives:
       mode: random  # none|random|cycle|fixed

@@ -63,6 +63,8 @@ prompt:
       include_novelty_summary: true
       include_mutation_directive: true
       include_scoring_rubric: true
+      score_feedback: best_worst  # none|best_worst
+      score_feedback_max_chars: 1500
 
     mutation_directives:
       mode: random  # none|random|cycle|fixed
