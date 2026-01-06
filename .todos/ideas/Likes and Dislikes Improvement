@@ -1,0 +1,58 @@
+Here’s a compact concept you can reuse later:
+
+
+---
+
+Preference Axes in Embedding Space
+
+1. Treat each option and each like/dislike term as a point in embedding space.
+
+Embed all candidate options (e.g., prompt fragments, styles, moods).
+
+Embed all “like” phrases and “dislike” phrases.
+
+
+
+2. Turn each like–dislike pair into a “preference axis”.
+
+For a pair (Like, Dislike), define a direction vector
+d = normalize(embed(Like) − embed(Dislike)).
+
+Positive projection along d ≈ “more like the liked concept, less like the disliked one”.
+
+
+
+3. Score each option along all preference axes.
+
+For an option with embedding e, compute a scalar score for each axis:
+sᵢ = dot(normalize(e), dᵢ).
+
+Aggregate across axes (e.g., weighted average) to get a prior preference score in roughly [-1, 1]:
+“How aligned is this option with my likes vs. dislikes, semantically?”
+
+
+
+4. Blend semantic prior with actual feedback.
+
+Maintain an empirical feedback score per option (from user ratings, clicks, etc.), also normalized to [-1, 1].
+
+Combine them, e.g.:
+combined_score = λ · prior + (1 − λ) · empirical_feedback,
+or use the prior as a pseudo-count in a Bayesian-style update.
+
+
+
+5. Use the combined score to define sampling weights.
+
+Convert combined_score into a sampling weight (e.g., via softmax with temperature).
+
+Sample options proportionally to these weights within each category/column.
+
+
+
+
+
+---
+
+In short:
+Map likes/dislikes into directional preference axes in embedding space, project each option onto those axes to get a semantic prior, then blend that prior with observed feedback to drive your selection weights.

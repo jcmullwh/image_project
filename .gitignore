@@ -152,5 +152,7 @@ cython_debug/
 #.idea/
 
 prompt_files/
+_artifacts/
 config.yaml
 *.csv
+.pdm-python

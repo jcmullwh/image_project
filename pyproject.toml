@@ -11,6 +11,8 @@ dependencies = [
     "requests>=2.32.5",
     "pillow>=12.0.0",
     "openai>=2.8.1",
+    "ffmpeg>=1.4",
+    "ai-backend @ file:///${PROJECT_ROOT}/../ai_backend",
 ]
 requires-python = "==3.13.*"
 readme = "README.md"
@@ -18,13 +20,14 @@ license = {text = "MIT"}
 
 
 [tool.pdm]
-distribution = true
+distribution = false
 
 [tool.pdm.dev-dependencies]
 dev = [
-    "-e file:///${PROJECT_ROOT}/../ai_backend#egg=ai-backend",
+    "pytest>=8.0.0",
 ]
 
 [tool.pdm.scripts]
 generate = "main.py"
-test = "python -m unittest discover -s tests"
+test = "pytest"
+manual-upscale = "python scripts/manual_upscale.py"

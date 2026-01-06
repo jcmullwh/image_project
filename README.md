@@ -6,6 +6,93 @@ Personal project exploring prompting and "art" generation. Takes randomly-select
 
 Uses tree-of-thought prompting, experiments with iterative improvement and identities to help guide prompt development.
 
+## Step-Driven Prompt Pipeline
+
+The generation workflow is implemented as a small, declarative chat pipeline built from **Steps** (`ChatStep`) and nested **Blocks** (`Block`). Each step records `{name, path, prompt, response, params, created_at}` into a JSON transcript for later inspection.
+
+See `docs/pipeline.md` for the execution model, merge modes, and the ToT/enclave wrapping pattern.
+
+### Add a new prompt step
+
+1. Add a new prompt function (or inline prompt factory) in `prompts.py`.
+2. Add a new `ChatStep(...)` and include it in the `pipeline_root` construction in `main.run_generation()` (optionally wrap it as a `merge="last_response"` stage block and/or use `capture_key` to store the final output in `ctx.outputs`).
+
+### Hardening behavior (fail-fast + reliable artifacts)
+
+- Pipeline fails fast on `None` / non-string / empty prompts or responses (unless a step explicitly opts into empties via `allow_empty_prompt` / `allow_empty_response`).
+- Config booleans are parsed strictly (e.g. `enabled: "false"` is treated as false; invalid values raise with the full key path).
+- Image save failures raise and abort the run (no successful run with missing files).
+- Transcript JSON is written on success and on failure (once `RunContext` exists). Failed runs include an `error` object with `type`, `message`, `phase`, and optional `step`.
+- If `rclone.enabled: true`, `rclone.remote` and `rclone.album` are required (no empty-string fallbacks).
+- `ChatStep.temperature` is the only supported way to set temperature (do not pass `"temperature"` inside `ChatStep.params`).
+
+### Legacy code
+
+- `main.py` contains the canonical implementation (`run_generation()`).
+- `main_legacy.py` and `legacy_main.py` contain older experimental orchestration/helpers kept for reference.
+
+## Configuration
+
+Required keys (fail-fast if missing/empty):
+
+- `prompt.categories_path`
+- `prompt.profile_path`
+- `prompt.generations_path`
+- `image.generation_path` (preferred) or `image.save_path` (deprecated alias)
+- `image.upscale_path`
+- `image.log_path`
+
+Optional keys:
+
+- `prompt.random_seed` (int): makes concept selection deterministic; if omitted, a seed is generated and logged.
+- `prompt.titles_manifest_path`: defaults to `<image.generation_path>/titles_manifest.csv` (logged at WARNING when defaulted).
+- `image.caption_font_path`: optional `.ttf` for the caption overlay.
+  - If explicitly set and the font cannot be loaded, the run fails loudly (no silent fallback).
+- Boolean flags (e.g. `rclone.enabled`, `upscale.enabled`) accept booleans, `0`/`1`, and strings `"true"`/`"false"`/`"1"`/`"0"`/`"yes"`/`"no"` (case-insensitive); other values raise.
+- Context injectors (default off):
+  - `context.enabled` (bool): enable/disable context injection (default `false`).
+  - `context.injectors` (list[str]): ordered injector names; if omitted while enabled, defaults to `["season", "holiday"]` with a WARNING.
+  - `context.holiday.lookahead_days` (int), `context.holiday.base_probability` (float), `context.holiday.max_probability` (float).
+  - `context.calendar.enabled` (bool): not implemented yet; if set `true`, the run fails fast with a clear `ValueError`.
+
+## Per-Image Identifiers (Seq + Title)
+
+Each generated image is post-processed to add a subtle caption overlay so a viewer can reference images during feedback:
+
+`#042 - Turquoise Citadel` (bottom caption strip)
+
+### Manifest
+
+Each image also appends a row to a CSV manifest so `#NNN` and the title can be resolved back to the underlying generation record.
+
+- Default path: `<image.generation_path>/titles_manifest.csv`
+- Override: set `prompt.titles_manifest_path` in `config/config.yaml`
+
+Columns (v1): `seq`, `title`, `generation_id`, `image_prompt`, `image_path`, `created_at`, plus optional metadata like `model`, `size`, `quality`, `title_source`, `title_raw`.
+
+### Sequencing
+
+Sequence numbers are allocated as `max(seq)+1` from the manifest (starts at `1` if missing/empty).
+
+### Failure behavior
+
+Title generation is best-effort: it retries the model a few times, then falls back to a sanitized single-line title (logging the rejected attempts) so the run can continue.
+
+Optional: set `image.caption_font_path` to a `.ttf` file to control the caption font (otherwise common defaults are tried).
+
+## Run Artifacts
+
+- Image: `<image.generation_path>/<generation_id>_image.jpg` (and optionally `<generation_id>_image_4k.jpg` when upscaling is enabled).
+- Generation CSV: `prompt.generations_path` with schema `generation_id`, `selected_concepts` (JSON string), `final_image_prompt`, `image_path`, `created_at`, `seed`.
+- Transcript JSON: `<image.log_path>/<generation_id>_transcript.json` with keys:
+  - `generation_id`, `seed`, `selected_concepts`, `steps`, `image_path`, `created_at`
+  - When context injection is enabled, the transcript also includes a `context` object (structured metadata keyed by injector name).
+
+## How to run
+
+- Generate: `pdm run generate`
+- Tests: `pdm run test` (or `pytest`)
+
 ## Examples:
 
 ### Random Concepts:
@@ -114,3 +201,99 @@ Fast-paced action movies
 
 - Integrate with midjourney API when available
     - Automate assessment and selection of upscaling/variation images
+
+## 4K Upscaling (Optional)
+
+This project can optionally run a post-processing step to upscale the generated
+image to a "4K" long-edge target (default: 3840px) using the open-source
+Real-ESRGAN NCNN Vulkan portable executable.
+
+### Install Real-ESRGAN (NCNN Vulkan)
+
+1. Download the portable executable for your OS from the Real-ESRGAN project:
+   https://github.com/xinntao/Real-ESRGAN
+
+2. It's easiest to download the OS executable (middle of README page, not a release) 
+   because it includes the models. If not download the model files (param/bin) and 
+   place them in a `models` directory next to the executable, or provide an 
+   explicit `model_path` in config/CLI.
+
+3. Ensure the binary can be found by the project by doing one of:
+   - Put it on your PATH (so `realesrgan-ncnn-vulkan` is executable), OR
+   - Set environment variable `REALESRGAN_NCNN_VULKAN_PATH` to the full path,
+     OR
+   - Set `upscale.realesrgan_binary` in config.
+
+Note: The Vulkan backend generally requires a Vulkan-compatible GPU.
+
+### Configure
+
+Output sizing is configurable in two ways:
+- Preferred: set `upscale.target_aspect_ratio` (e.g., `"16:9"`) plus `target_long_edge_px`. The final resize uses a center-crop to fit the requested ratio (no stretching).
+- Explicit size: set both `upscale.target_width_px` and `upscale.target_height_px` to force an exact output size (overrides aspect ratio/long edge).
+
+Add an `upscale` section to your config (example YAML):
+
+```yaml
+upscale:
+  enabled: true
+  target_long_edge_px: 3840
+  target_aspect_ratio: "16:9"  # default in config/config.yaml
+  # target_width_px: 3840      # optional exact sizing (must set both width/height)
+  # target_height_px: 2160
+  engine: realesrgan-ncnn-vulkan
+  # Optional. If omitted, PATH + REALESRGAN_NCNN_VULKAN_PATH are checked.
+  realesrgan_binary: null
+  # Optional. Directory containing the *.param/*.bin model files.
+  model_path: null
+  model_name: realesrgan-x4plus
+  tile_size: 0
+  tta: false
+  # If true and Real-ESRGAN isn't available, fall back to a Lanczos resize.
+  # Default is false (fail loudly).
+  allow_fallback_resize: false
+```
+
+When enabled, the script saves an additional file named:
+
+`<generation_id>_image_4k.jpg`
+
+### Manual Upscaling CLI
+
+To manually test upscaling on any image, use the helper script:
+
+```
+python scripts/manual_upscale.py path/to/image.jpg
+```
+
+- Writes the result next to the input as `image_4k.jpg` (same extension preserved).
+- Defaults to a 3840px long edge and uses the configured aspect ratio (config defaults to 16:9); override with `--target-long-edge`, `--target-aspect-ratio`, or explicit `--target-width/--target-height`.
+- Provide a custom Real-ESRGAN binary with `--realesrgan-binary /path/to/realesrgan-ncnn-vulkan`.
+- Provide a custom models directory with `--model-path /path/to/models` (folder containing *.param/*.bin).
+
+## Google Photos Upload (Optional)
+
+This project can optionally upload the final output image to Google Photos after
+generation using `rclone`.
+
+Full setup (including creating your own Google OAuth client to avoid shared-quota
+issues) is documented in `docs/rclone-google-photos.md`.
+
+### Configure
+
+Add a `rclone` section to your config (example YAML):
+
+```yaml
+rclone:
+  enabled: true
+  remote: gphotos_personal
+  album: The Day's Art
+```
+
+When enabled, the script runs:
+
+`rclone copy <image_path> <remote>:album/<album>`
+
+Notes:
+- Upload is best-effort: failures are logged and the run continues (image remains on disk).
+- If upscaling is enabled, the upscaled `<generation_id>_image_4k.jpg` is uploaded; otherwise `<generation_id>_image.jpg` is uploaded.
