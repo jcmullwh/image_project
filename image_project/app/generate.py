@@ -8,15 +8,75 @@ import sys
 import time
 from dataclasses import asdict
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
-import pandas as pd
+TextAI = None
+ImageAI = None
 
-try:
-    from ai_backend import ImageAI, TextAI
-except ModuleNotFoundError:  # pragma: no cover
-    ImageAI = None  # type: ignore[assignment]
-    TextAI = None  # type: ignore[assignment]
+DEFAULT_TEXT_MODEL = "gpt-5.2"
+DEFAULT_TEXT_REASONING: dict[str, Any] = {"effort": "medium"}
+
+DEFAULT_IMAGE_MODEL = "gpt-image-1.5"
+DEFAULT_IMAGE_SIZE = "1536x1024"
+DEFAULT_IMAGE_QUALITY = "high"
+DEFAULT_IMAGE_MODERATION = "low"
+
+
+def generation_defaults() -> dict[str, Any]:
+    return {
+        "text_model": DEFAULT_TEXT_MODEL,
+        "text_reasoning": dict(DEFAULT_TEXT_REASONING),
+        "image_model": DEFAULT_IMAGE_MODEL,
+        "image_size": DEFAULT_IMAGE_SIZE,
+        "image_quality": DEFAULT_IMAGE_QUALITY,
+        "image_moderation": DEFAULT_IMAGE_MODERATION,
+        "system_prompt": DEFAULT_SYSTEM_PROMPT,
+    }
+
+
+def _load_text_ai_cls():
+    if TextAI is not None:
+        return TextAI
+
+    try:
+        from openai_backend.openai_text_backend import OpenAITextBackend  # noqa: PLC0415
+
+        return OpenAITextBackend
+    except ModuleNotFoundError:
+        pass
+
+    try:
+        from ai_backend import TextAI as BackendTextAI  # type: ignore[import-not-found]  # noqa: PLC0415
+
+        return BackendTextAI
+    except ModuleNotFoundError as exc:  # pragma: no cover
+        raise ModuleNotFoundError(
+            "Missing dependency: ai_backend (required for text generation). "
+            "Install project dependencies via `pdm install`."
+        ) from exc
+
+
+def _load_image_ai_cls():
+    if ImageAI is not None:
+        return ImageAI
+
+    try:
+        from openai_backend.openai_image_backend import OpenAIImageBackend  # noqa: PLC0415
+
+        return OpenAIImageBackend
+    except ModuleNotFoundError:
+        pass
+
+    try:
+        from ai_backend import ImageAI as BackendImageAI  # type: ignore[import-not-found]  # noqa: PLC0415
+
+        return BackendImageAI
+    except ModuleNotFoundError as exc:  # pragma: no cover
+        raise ModuleNotFoundError(
+            "Missing dependency: ai_backend (required for image generation). "
+            "Install project dependencies via `pdm install`."
+        ) from exc
 
 from image_project.foundation.config_io import load_config
 from image_project.foundation.messages import MessageHandler
@@ -33,9 +93,11 @@ from image_project.framework.artifacts import (
     read_manifest,
     utc_now_iso8601,
 )
+from image_project.framework.artifacts_index import maybe_update_artifacts_index
 from image_project.framework.config import RunConfig
 from image_project.framework.context import ContextManager
 from image_project.framework.inputs import extract_dislikes, resolve_prompt_inputs
+from image_project.framework.profile_io import load_user_profile
 from image_project.framework.media import UpscaleConfig, save_image, upscale_image_to_4k
 from image_project.framework.prompting import PlanInputs, resolve_stage_specs
 from image_project.framework.runtime import RunContext
@@ -87,6 +149,51 @@ def setup_operational_logger(log_dir: str, generation_id: str):
     logger.debug("Operational log file: %s", log_file)
 
     return logger, log_file
+
+
+def _infer_index_root_from_log_dir(log_dir: str) -> Path:
+    try:
+        resolved = Path(log_dir).resolve()
+    except Exception:
+        resolved = Path(log_dir)
+
+    parts = resolved.parts
+    for idx, part in enumerate(parts):
+        if str(part).casefold() == "_artifacts":
+            return Path(*parts[: idx + 1])
+
+    if resolved.name.casefold() == "logs":
+        return resolved.parent
+
+    return resolved
+
+
+def _maybe_update_indexes(cfg: RunConfig, *, config_meta: dict[str, Any] | None, logger: Any) -> None:
+    store_root = _infer_index_root_from_log_dir(cfg.log_dir)
+    repo_root_raw = (config_meta or {}).get("repo_root")
+    repo_root = None
+    if isinstance(repo_root_raw, str) and repo_root_raw.strip():
+        try:
+            repo_root = Path(repo_root_raw).resolve()
+        except Exception:
+            repo_root = None
+
+    if repo_root is not None:
+        try:
+            if store_root.is_relative_to(repo_root):
+                maybe_update_artifacts_index(
+                    artifacts_root=str(store_root),
+                    repo_root=str(repo_root),
+                    logger=logger,
+                )
+                return
+        except Exception:
+            pass
+
+    maybe_update_artifacts_index(
+        artifacts_root=str(store_root),
+        logger=logger,
+    )
 
 
 def upload_to_photos_via_rclone(
@@ -228,7 +335,7 @@ def run_generation(cfg_dict, *, generation_id: str | None = None, config_meta: d
         logger.info("Loaded %d category rows", len(prompt_data))
 
         logger.info("Loading user profile from %s", cfg.profile_path)
-        user_profile = pd.read_csv(cfg.profile_path)
+        user_profile = load_user_profile(cfg.profile_path)
         logger.info("Loaded %d user profile rows", len(user_profile))
         preferences_guidance = build_preferences_guidance(user_profile)
         user_dislikes = extract_dislikes(user_profile)
@@ -252,12 +359,9 @@ def run_generation(cfg_dict, *, generation_id: str | None = None, config_meta: d
         )
 
         phase = "init_text_ai"
-        text_ai_cls = TextAI
-        if text_ai_cls is None:  # pragma: no cover
-            from ai_backend import TextAI as text_ai_cls  # type: ignore[assignment]
-
-        ai_text = text_ai_cls(model="gpt-5.2", reasoning={"effort": "medium"})
-        logger.info("Initialized TextAI with model gpt-5.2")
+        text_ai_cls = _load_text_ai_cls()
+        ai_text = text_ai_cls(model=DEFAULT_TEXT_MODEL, reasoning=dict(DEFAULT_TEXT_REASONING))
+        logger.info("Initialized TextAI with model %s", DEFAULT_TEXT_MODEL)
 
         system_prompt = DEFAULT_SYSTEM_PROMPT
         if context_guidance_text and cfg.context_injection_location in ("system", "both"):
@@ -421,16 +525,13 @@ def run_generation(cfg_dict, *, generation_id: str | None = None, config_meta: d
             return ctx
 
         phase = "init_image_ai"
-        image_ai_cls = ImageAI
-        if image_ai_cls is None:  # pragma: no cover
-            from ai_backend import ImageAI as image_ai_cls  # type: ignore[assignment]
-
+        image_ai_cls = _load_image_ai_cls()
         ai_image = image_ai_cls()
         logger.info("Initialized ImageAI")
 
-        image_model = "gpt-image-1.5"
-        image_size = "1536x1024"
-        image_quality = "high"
+        image_model = DEFAULT_IMAGE_MODEL
+        image_size = DEFAULT_IMAGE_SIZE
+        image_quality = DEFAULT_IMAGE_QUALITY
 
         if not cfg.generation_dir:
             raise ValueError("Missing required config: image.generation_path")
@@ -475,7 +576,7 @@ def run_generation(cfg_dict, *, generation_id: str | None = None, config_meta: d
                 model=image_model,
                 size=image_size,
                 quality=image_quality,
-                moderation="low",
+                moderation=DEFAULT_IMAGE_MODERATION,
             )
             logger.info(
                 "Image generation request sent (model=%s, size=%s, quality=%s)",
@@ -657,6 +758,8 @@ def run_generation(cfg_dict, *, generation_id: str | None = None, config_meta: d
             logger.exception("Run index append failed: %s", exc)
             ctx.outputs["run_index_error"] = str(exc)
 
+        _maybe_update_indexes(cfg, config_meta=config_meta, logger=logger)
+
         logger.info("Operational log stored at %s", operational_log_path)
         logger.info("Run completed successfully for generation %s", generation_id)
 
@@ -731,6 +834,8 @@ def run_generation(cfg_dict, *, generation_id: str | None = None, config_meta: d
                 except Exception as run_index_exc:  # noqa: BLE001
                     logger.exception("Run index append failed: %s", run_index_exc)
                     ctx.outputs["run_index_error"] = str(run_index_exc)
+
+                _maybe_update_indexes(cfg, config_meta=config_meta, logger=logger)
             except Exception:
                 logger.exception("Failed to write transcript during error handling")
         raise

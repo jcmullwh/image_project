@@ -23,3 +23,10 @@ Improve like/dislike
 Add a like/dislike gradient (love to hate)
 
 add an Anki-style cooldown based on how confident we are.
+
+
+
+Current issue: I have no idea with all of the defaults and overrides what an actual experiment will run and especially what the actual difference is between two.
+
+
+experiment dry-run should output both the experiment specific config plus the full config for everything involved in the run (multiple if needed)

@@ -14,13 +14,14 @@ run-review:
 prompt:
   categories_path: "M:/My Drive/image_project/data/category_list_v1.csv"
   profile_path: "M:/My Drive/image_project/data/user_profile_v4.csv"
-  generations_path: "M:/My Drive/image_project/data/generations_v2.csv"  # required for run.mode=full
+  generations_path: "M:/My Drive/image_project/logs/generations_v2.csv"  # required for run.mode=full
+  titles_manifest_path: "M:/My Drive/image_project/generated/titles_manifest.csv"
 
   # Prompt Plans + Stage Modifiers (config-driven experimentation)
   # See docs/experiments.md for examples and available plans (including plan_plugins/*).
   plan: blackbox_refine  # blackbox_refine|blackbox_refine_only
   refinement:
-    policy: none  # tot|none
+    policy: tot  # tot|none
   stages:
     include: []
     exclude: []
@@ -34,7 +35,7 @@ prompt:
     judge_temperature: 0.0
     judge_model: null
     judge_profile_source: generator_hints_plus_dislikes  # raw|generator_hints|generator_hints_plus_dislikes
-    idea_profile_source: none  # raw|generator_hints|none
+    idea_profile_source: none  # raw|generator_hints|generator_hints_plus_dislikes|none
     final_profile_source: raw  # raw|generator_hints
     generator_profile_abstraction: true
     novelty:
@@ -43,10 +44,10 @@ prompt:
 
   blackbox_refine:
     enabled: true
-    iterations: 4
-    algorithm: beam  # hillclimb|beam
+    iterations: 6
+    algorithm: hillclimb  # hillclimb|beam
     beam_width: 3
-    branching_factor: 6
+    branching_factor: 3
     include_parents_as_candidates: true
 
     generator_model: null
@@ -62,16 +63,19 @@ prompt:
       include_novelty_summary: true
       include_mutation_directive: true
       include_scoring_rubric: true
+      score_feedback: best_worst  # none|best_worst
+      score_feedback_max_chars: 1500
 
     mutation_directives:
       mode: random  # none|random|cycle|fixed
       directives:
-        - "Change composition + camera perspective in a non-trivial way (e.g., extreme close-up, overhead, Dutch angle, silhouette, strong negative space)."
-        - "Change setting + time/weather/seasonal cues while keeping the core subject concept intact."
-        - "Increase visual specificity: add concrete materials, textures, lighting, and 1–2 distinct props."
-        - "Shift style/medium (photo vs painting vs illustration vs collage) while preserving the core narrative intent."
-        - "Make it bolder: higher contrast, more dramatic lighting, more decisive color palette; avoid vague adjectives."
-        - "Introduce a subtle but meaningful narrative twist that is still clearly renderable; avoid clichés."
+        - "Reinterpret spatial structure or scale in a meaningful way (e.g., intimacy vs monumentality, focused vs expansive) while preserving subject identity."
+        - "Reframe the setting or context (environment, time, or situational backdrop) in a compatible way that supports the same underlying idea."
+        - "Vary the emotional or atmospheric register of the scene (e.g., calm vs tense, playful vs solemn) without changing the core scenario."
+        - "Alter the visual language used to express the idea (e.g., literal vs suggestive, sparse vs dense, clean vs textured) while keeping intent intact."
+        - "Rework the color or tonal strategy where applicable (e.g., warm vs cool, high-key vs low-key, monochrome vs restrained color) without assuming escalation."
+        - "Apply an alternative realization of the same concept that is meaningfully different but still clearly the same idea and consistent with prior constraints."
+        - "Create a significant variation of this prompt while retaining the core concepts."
       per_axis:
         enabled: false
         axes: []
@@ -104,18 +108,18 @@ experiment:
   tags: []          # list[string]
 
 rclone:
-  enabled: true
+  enabled: false
   # Setup guide: docs/rclone-google-photos.md
-  remote: "gphotos_w_project"
-  album: "The Day's Art"
+  remote: null
+  album: null
 
 upscale:
-  enabled: true
+  enabled: false
   target_long_edge_px: 3840
   target_aspect_ratio: "16:9"
   engine: realesrgan-ncnn-vulkan
   # Optional. If omitted, PATH + REALESRGAN_NCNN_VULKAN_PATH are checked.
-  realesrgan_binary: C:\Users\jason\projects\code\realesrgan-ncnn-vulkan\realesrgan-ncnn-vulkan.exe
+  realesrgan_binary: null
   # Optional. Directory containing the *.param/*.bin model files.
   model_path: null
   model_name: realesrgan-x4plus

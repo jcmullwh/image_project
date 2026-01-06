@@ -20,6 +20,7 @@ prompt:
     judge_temperature: 0.0
     judge_model: null
     generator_profile_abstraction: true
+    generator_profile_hints_path: null  # optional: load hints from file instead of generating
     novelty:
       enabled: true
       window: 25
@@ -42,7 +43,7 @@ prompt:
 ## Flow
 
 1. Prepare scoring context (`blackbox.prepare`) including novelty summary and default generator hints.
-2. Generate a generator-safe profile summary (`blackbox.profile_abstraction`) when enabled.
+2. Load a generator-safe profile summary (`blackbox.profile_hints_load`) when configured, otherwise generate it (`blackbox.profile_abstraction`) when enabled.
 3. Generate N idea cards (`blackbox.idea_cards_generate`) as strict JSON.
 4. Score idea cards with a separate judge (`blackbox.idea_cards_judge_score`) as strict JSON `{ "scores": [{"id","score"}] }`.
 5. Select a winner in code (`blackbox.select_idea_card`) using epsilon-greedy and optional novelty penalty from recent `prompt.generations_path` history.
@@ -57,7 +58,36 @@ Two additional plans add an iterative *prompt refinement loop* on top of blackbo
 
 The loop is configured under `prompt.blackbox_refine` (algorithm, branching factor, iterations, multiple judges + aggregation, mutation directives, etc.).
 
-If `prompt.blackbox_refine.max_prompt_chars` is set and a candidate prompt exceeds it, the candidate is **truncated for judging/selection** and the truncation is recorded in `blackbox_scoring.prompt_refine.iterations[*]` (warnings + per-candidate metadata).
+If `prompt.blackbox_refine.max_prompt_chars` is set, it is included as an output constraint in the generator prompt, but candidate prompts are **not truncated in code** (judges see the full text).
+
+### Score Feedback Gradient (Best/Worst)
+
+By default, the refinement loop keeps judging **blind** (judge prompts never see prior scores), and the generator only sees the current base prompt + optional profile/concepts/novelty blocks.
+
+If you want a directional "gradient" between what scored well vs poorly, enable:
+
+```yaml
+prompt:
+  blackbox_refine:
+    variation_prompt:
+      score_feedback: best_worst        # none|best_worst
+      score_feedback_max_chars: 900     # per prompt example
+```
+
+When enabled, iteration `N` generator prompts include **two scored examples from iteration `N-1`**:
+
+- **BEST**: highest effective score (and its prompt text)
+- **WORST**: lowest effective score (and its prompt text)
+
+This intentionally leaks numeric score feedback into the generator context (judges remain blind).
+
+Implementation details:
+
+- Feedback is stored per iteration under `ctx.outputs`:
+  - `bbref.iter_XX.score_feedback_best_worst_by_beam` (beam-specific buckets)
+  - `bbref.iter_XX.score_feedback_best_worst_overall` (fallback)
+
+Not implemented (idea for a separate experiment): a **pairwise image loop** where a single prompt generates 2 images, a vision-capable judge scores them blind, and the next iteration generates 2 more using best/worst image feedback.
 
 ## Selection algorithm
 
@@ -85,4 +115,3 @@ Selection is represented explicitly as an `action` step in the transcript (`pipe
 
 - `invalid_idea_cards_json`: the generator returned JSON that failed schema validation.
 - `invalid_judge_output`: the judge returned non-JSON or a schema-violating score table.
-

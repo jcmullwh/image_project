@@ -4,11 +4,10 @@ import base64
 import os
 import random
 
-import pandas as pd
-
 from ai_backend import ImageAI, TextAI
 from logging_utils import write_messages_log
 from message_handling import MessageHandler
+from image_project.framework.profile_io import load_user_profile
 from titles import (
     append_manifest_row,
     generate_title,
@@ -113,7 +112,7 @@ def main_legacy() -> None:
         )
 
         logger.info("Loading user profile from %s", profile_path)
-        user_profile = pd.read_csv(profile_path)
+        user_profile = load_user_profile(profile_path)
         logger.info("Loaded %d user profile rows", len(user_profile))
 
         rng = random.Random()

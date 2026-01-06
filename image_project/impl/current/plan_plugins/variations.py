@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from image_project.framework.runtime import RunContext
 from image_project.framework.prompting import PlanInputs, StageNodeSpec, StageSpec
-from image_project.impl.current.plans import SequencePromptPlan, StandardPromptPlan, register_plan
+from image_project.impl.current.plans import (
+    SequencePromptPlan,
+    StandardPromptPlan,
+    register_plan,
+)
 
 
 def _freeform_first_prompt(*, preferences_guidance: str, context_guidance: str | None) -> str:
@@ -88,6 +92,36 @@ class SimpleNoConceptsPromptPlan(SequencePromptPlan):
             ),
             StageCatalog.build("standard.image_prompt_creation", inputs),
         ]
+
+
+@register_plan
+class DirectPromptPlan(SequencePromptPlan):
+    """One-stage final prompt creation from concepts + profile."""
+
+    name = "direct"
+    sequence = (
+        "preprompt.select_concepts",
+        "preprompt.filter_concepts",
+        "direct.image_prompt_creation",
+    )
+
+
+@register_plan
+class BlackboxRefinePromptPlan(BlackboxPromptPlan):
+    """Legacy: blackbox scoring + selection, then an explicit final refinement stage."""
+
+    name = "blackbox_refine_legacy"
+
+    def stage_specs(self, inputs: PlanInputs) -> list[StageNodeSpec]:
+        from image_project.impl.current.prompting import StageCatalog
+
+        specs = list(super().stage_specs(inputs))
+        if specs and getattr(specs[-1], "stage_id", None) == "blackbox.image_prompt_creation":
+            specs[-1] = StageCatalog.build("blackbox.image_prompt_draft", inputs)
+        else:
+            specs.append(StageCatalog.build("blackbox.image_prompt_draft", inputs))
+        specs.append(StageCatalog.build("blackbox.image_prompt_refine", inputs))
+        return specs
 
 
 @register_plan

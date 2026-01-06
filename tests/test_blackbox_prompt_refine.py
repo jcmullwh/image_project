@@ -274,6 +274,91 @@ def test_novelty_penalty_applied_in_selection(tmp_path):
     assert iteration_log["selection"]["novelty"]["method"] == "df_overlap_v1"
 
 
+def test_best_worst_score_feedback_is_injected_into_next_iteration_generation_prompt(tmp_path):
+    (tmp_path / "logs").mkdir()
+    (tmp_path / "categories.csv").write_text(
+        "Subject Matter,Narrative,Mood,Composition,Perspective,Style,Time Period_Context,Color Scheme\n"
+        "Cat,Quest,Moody,Wide,Top-down,Baroque,Renaissance,Vibrant\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "profile.csv").write_text("Likes,Dislikes\ncolorful,boring\n", encoding="utf-8")
+
+    cfg_dict = _base_cfg_dict(tmp_path)
+    cfg_dict["prompt"]["blackbox_refine"] = {
+        "enabled": True,
+        "iterations": 2,
+        "algorithm": "hillclimb",
+        "branching_factor": 2,
+        "include_parents_as_candidates": False,
+        "generator_temperature": 0.9,
+        "variation_prompt": {
+            "template": "v1",
+            "include_profile": False,
+            "include_context_guidance": False,
+            "include_novelty_summary": False,
+            "include_mutation_directive": False,
+            "include_scoring_rubric": False,
+            "score_feedback": "best_worst",
+            "score_feedback_max_chars": 2000,
+        },
+        "judging": {"judges": [{"id": "j1"}], "aggregation": "mean"},
+    }
+    cfg_dict["prompt"]["scoring"].update({"exploration_rate": 0.0, "novelty": {"enabled": False, "window": 0}})
+
+    cfg, _warnings = RunConfig.from_dict(cfg_dict)
+
+    inputs = PlanInputs(
+        cfg=cfg,
+        ai_text=None,
+        prompt_data=pd.DataFrame(),
+        user_profile=pd.DataFrame(),
+        preferences_guidance="Likes:\n- colorful",
+        context_guidance=None,
+        rng=random.Random(0),
+        draft_prompt="seed",
+    )
+
+    loop_specs = build_blackbox_refine_loop_specs(inputs, seed_output_key="bbref.seed_prompt")
+    init_stage = loop_specs[0]
+    select_stage = next(
+        spec for spec in loop_specs if getattr(spec, "stage_id", "") == "blackbox_refine.iter_01.select"
+    )
+    gen_stage_iter2 = next(
+        spec
+        for spec in loop_specs
+        if getattr(spec, "stage_id", "") == "blackbox_refine.iter_02.beam_01.cand_A"
+    )
+
+    ctx = RunContext(
+        generation_id="unit_test",
+        cfg=cfg,
+        logger=_make_logger("test.bbref.feedback"),
+        rng=random.Random(0),
+        seed=123,
+        created_at="2025-01-01T00:00:00Z",
+        messages=MessageHandler("system"),
+        selected_concepts=["X"],
+    )
+    ctx.outputs["bbref.seed_prompt"] = "SEED"
+    init_stage.fn(ctx)  # type: ignore[attr-defined]
+
+    ctx.outputs["bbref.iter_01.beam_01.cand_A.prompt"] = "PROMPT_A"
+    ctx.outputs["bbref.iter_01.beam_01.cand_B.prompt"] = "PROMPT_B"
+    ctx.outputs["bbref.iter_01.judge_j1.scores_json"] = json.dumps(
+        {"scores": [{"id": "A", "score": 10}, {"id": "B", "score": 90}]}
+    )
+
+    select_stage.fn(ctx)  # type: ignore[attr-defined]
+
+    prompt_text = gen_stage_iter2.prompt(ctx)  # type: ignore[attr-defined]
+    assert "SCORE FEEDBACK EXAMPLES" in prompt_text
+    assert "BEST" in prompt_text and "WORST" in prompt_text
+    assert "PROMPT_A" in prompt_text
+    assert "PROMPT_B" in prompt_text
+    assert "raw=90.0" in prompt_text
+    assert "raw=10.0" in prompt_text
+
+
 def test_blackbox_refine_only_end_to_end_prompt_only(tmp_path, monkeypatch):
     categories_path = tmp_path / "categories.csv"
     categories_path.write_text(
