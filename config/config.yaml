@@ -44,10 +44,10 @@ prompt:
 
   blackbox_refine:
     enabled: true
-    iterations: 4
+    iterations: 6
     algorithm: hillclimb  # hillclimb|beam
     beam_width: 3
-    branching_factor: 6
+    branching_factor: 3
     include_parents_as_candidates: true
 
     generator_model: null
@@ -99,9 +99,6 @@ context:
   enabled: true
   injection_location: both  # system|prompt|both
   injectors: ["season", "holiday"]
-
-context:
-  enabled: false
 
 # Optional: label runs for lightweight A/B testing and discovery.
 experiment:
