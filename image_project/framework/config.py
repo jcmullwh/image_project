@@ -1126,6 +1126,20 @@ class RunConfig:
                 f"{raw_judge_profile_source!r} (expected: raw|generator_hints|generator_hints_plus_dislikes)"
             )
 
+        raw_idea_profile_source: Any = scoring_cfg.get("idea_profile_source", "generator_hints")
+        if raw_idea_profile_source is None:
+            raise ValueError("Invalid config value for prompt.scoring.idea_profile_source: None")
+        if not isinstance(raw_idea_profile_source, str):
+            raise ValueError(
+                "Invalid config type for prompt.scoring.idea_profile_source: expected string"
+            )
+        idea_profile_source = raw_idea_profile_source.strip().lower()
+        if idea_profile_source not in ("raw", "generator_hints", "none"):
+            raise ValueError(
+                "Unknown prompt.scoring.idea_profile_source: "
+                f"{raw_idea_profile_source!r} (expected: raw|generator_hints|none)"
+            )
+
         raw_final_profile_source: Any = scoring_cfg.get("final_profile_source", "raw")
         if raw_final_profile_source is None:
             raise ValueError("Invalid config value for prompt.scoring.final_profile_source: None")
