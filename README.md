@@ -12,6 +12,26 @@ Uses tree-of-thought prompting, experiments with iterative improvement and ident
 - Run: `pdm run generate`
 - Customize: create `config/config.local.yaml` (deep-merged over the base). Reference: `config/config.full_example.yaml`.
 
+### Shared artifacts (Windows + Google Drive Desktop)
+
+If you want multiple machines to share the same `_artifacts/` location (without passing `--output-root` to experiment tools), you can point the repo’s `_artifacts/` directory at your Google Drive Desktop folder via a Windows directory junction.
+
+From the repo root:
+
+```powershell
+$cloud = "M:\My Drive\image_project\_artifacts"   # adjust to your Drive letter/path
+New-Item -ItemType Directory -Force -Path $cloud | Out-Null
+
+# Optional: keep any existing repo-local artifacts.
+if (Test-Path .\_artifacts) {
+  Rename-Item .\_artifacts ("_artifacts.bak_" + (Get-Date -Format yyyyMMdd_HHmmss))
+}
+
+cmd /c mklink /J _artifacts "$cloud"
+```
+
+To remove the junction later (does not delete the cloud contents): `cmd /c rmdir _artifacts`.
+
 ## Step-Driven Prompt Pipeline
 
 The generation workflow is implemented as a small, declarative chat pipeline built from **Steps** (`ChatStep`) and nested **Blocks** (`Block`). Each step records `{name, path, prompt, response, params, created_at}` into a JSON transcript for later inspection.
