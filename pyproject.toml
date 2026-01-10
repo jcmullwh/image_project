@@ -12,7 +12,7 @@ dependencies = [
     "pillow>=12.0.0",
     "openai>=2.8.1",
     "ffmpeg>=1.4",
-    "ai-backend @ file:///${PROJECT_ROOT}/../ai_backend",
+    "ai-backend @ git+https://github.com/jcmullwh/ai_backend.git@main",
 ]
 requires-python = "==3.13.*"
 readme = "README.md"
@@ -28,6 +28,16 @@ dev = [
 ]
 
 [tool.pdm.scripts]
-generate = "main.py"
+generate = "python -m image_project generate"
 test = "pytest"
-manual-upscale = "python scripts/manual_upscale.py"
+manual-upscale = "python tools/manual_upscale.py"
+list-plans = "python -m image_project list-plans"
+list-stages = "python -m image_project list-stages"
+update-stages-docs = "python tools/generate_stages_doc.py"
+run-review = "python -m image_project run-review"
+index-artifacts = "python -m image_project index-artifacts"
+experiment-3x3 = "python tools/run_experiment_3x3.py"
+experiment-profile-v5-3x3 = "python tools/run_experiment_profile_v5_3x3.py"
+experiment-ab-refinement-block = "python tools/run_experiment_ab_refinement_block.py"
+experiment-ab-scenespec-json-intermediary = "python tools/run_experiment_ab_scenespec_json_intermediary.py"
+scores-by-iteration = "python tools/write_scores_by_iteration.py"

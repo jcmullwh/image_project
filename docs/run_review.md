@@ -1,0 +1,39 @@
+# run_review
+
+`run_review` is an offline analyzer that turns pipeline artifacts into a structured JSON summary and a human-friendly HTML report. It works even as pipeline schemas evolve by joining data on step paths instead of relying on indices.
+
+## Usage
+
+```bash
+python -m image_project run-review --generation-id <id> [--logs-dir <artifact_dir>]
+python -m image_project run-review --most-recent
+python -m image_project run-review  # defaults to --most-recent (prints what it's doing)
+python -m image_project run-review --oplog /path/to/oplog.log --transcript /path/to/transcript.json [--generation-id <id>]
+python -m image_project run-review --best-effort --generation-id <id> --logs-dir <artifact_dir>
+python -m image_project run-review --compare <runA> <runB> --logs-dir <artifact_dir>
+```
+
+When `--logs-dir` (and `--images-dir`) are omitted, the tool loads the pipeline config (`config/config.yaml` by default) and uses `image.log_path` (and `image.generation_path` / `image.upscale_path`) as defaults, printing the config path it used.
+
+The tool writes `<generation_id>_run_report.json` and `<generation_id>_run_report.html` (or `<runA>_vs_<runB>_run_compare.*` in compare mode) to the current directory by default. Use `--output-dir` to change the destination.
+
+## Behavior
+
+- **Discovery:** When only a generation ID is supplied, the tool looks for `<id>_oplog.log` and `<id>_transcript.json` inside `--logs-dir`.
+- **Most recent:** `--most-recent` picks the most recently modified run in `--logs-dir`. If no run selector is provided, the CLI defaults to `--most-recent` and prints a message describing the behavior.
+- **Best effort:** By default the tool requires both oplog + transcript; when `--best-effort` is set, missing artifacts produce warnings instead of hard failures.
+- **Oplog formats:** Both `YYYY-mm-dd HH:MM:SS,mmm LEVEL message` and `YYYY-mm-dd HH:MM:SS,mmm | LEVEL | message` headers are supported.
+- **Parsing:** The oplog parser extracts run boundaries, config defaults, seed selection, context injection, step start/end markers, image generation, upscaling, manifest appends, uploads, and file writes. Unrecognized lines are retained under `unknown_events`.
+- **Transcript:** The transcript parser tolerates older schemas and surfaces optional fields like `context`, `title_generation`, and `concept_filter_log` when present.
+- **Experiment + plan metadata:** When present in the transcript, `experiment` and `outputs.prompt_pipeline` are included in both the JSON and HTML reports.
+- **Joining & ordering:** Step ordering is driven by transcript order (when present). Oplog timing is merged onto steps by path and occurrence.
+- **Parser health:** `metadata.oplog_stats` includes coverage stats and detected oplog framing format. When coverage is low or semantic parsing yields no events, `issues[]` includes `oplog_parse_failed` / `oplog_low_coverage`, and the HTML shows a prominent banner.
+- **Issues:** The JSON report includes structured `issues[]` for missing artifacts, unmatched steps, missing start/end markers, empty responses, large contexts, config defaults, concept filter no-ops, and other anomalies.
+- **Side effects:** Image generation, upscaling, manifest, and upload events are surfaced in both HTML and JSON outputs.
+- **Comparison:** `--compare` produces a schema-tolerant diff that highlights added/removed steps, shifts in metadata presence (e.g., `concept_filter_log`), experiment label changes, plan/stage metadata changes (requested/resolved plan, resolved stages, capture stage), injector messaging changes, and post-processing log format changes (e.g., upscaling).
+
+## Files produced
+
+- `*_run_report.json`: machine-readable run summary
+- `*_run_report.html`: human-friendly report for manual review
+- `*_run_compare.json` / `*_run_compare.html`: diff artifacts when `--compare` is used

@@ -4,7 +4,7 @@ from pathlib import Path
 
 from PIL import Image
 
-from upscaling import UpscaleConfig, upscale_image_to_4k
+from image_project.framework.media import UpscaleConfig, upscale_image_to_4k
 
 
 def _make_fake_realesrgan(root: Path) -> Path:

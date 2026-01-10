@@ -1,0 +1,158 @@
+run:
+  mode: full # full|prompt_only
+
+# Prompt-only mode needs only a logs directory; image output paths are optional.
+image:
+  log_path: "M:/My Drive/image_project/logs"
+  generation_path: "M:/My Drive/image_project/generated"  # required for run.mode=full
+  upscale_path: "M:/My Drive/image_project/upscaled"      # required when upscale.enabled=true
+
+run-review:
+  enabled: true
+  review_path: "M:/My Drive/image_project/reviews"
+
+prompt:
+  categories_path: "M:/My Drive/image_project/data/category_list_v1.csv"
+  profile_path: "M:/My Drive/image_project/data/user_profile_v4.csv"
+  generations_path: "M:/My Drive/image_project/logs/generations_v2.csv"  # required for run.mode=full
+  titles_manifest_path: "M:/My Drive/image_project/generated/titles_manifest.csv"
+
+  # Prompt Plans + Stage Modifiers (config-driven experimentation)
+  # See docs/experiments.md for examples and available plans (including plan_plugins/*).
+  plan: blackbox_refine  # blackbox_refine|blackbox_refine_only
+  refinement:
+    policy: tot  # tot|none
+  stages:
+    include: []
+    exclude: []
+    overrides: {}
+  output:
+    capture_stage: null
+  scoring:
+    enabled: true
+    num_ideas: 6
+    exploration_rate: 0.15
+    judge_temperature: 0.0
+    judge_model: null
+    judge_profile_source: generator_hints_plus_dislikes  # raw|generator_hints|generator_hints_plus_dislikes
+    idea_profile_source: none  # raw|generator_hints|generator_hints_plus_dislikes|none
+    final_profile_source: raw  # raw|generator_hints
+    generator_profile_abstraction: true
+    novelty:
+      enabled: true
+      window: 25
+
+  blackbox_refine:
+    enabled: true
+    iterations: 6
+    algorithm: hillclimb  # hillclimb|beam
+    beam_width: 3
+    branching_factor: 3
+    include_parents_as_candidates: true
+
+    generator_model: null
+    generator_temperature: 0.9
+    max_prompt_chars: 1500
+
+    variation_prompt:
+      template: v2
+      include_concepts: true
+      include_context_guidance: true
+      include_profile: false
+      profile_source: likes_dislikes  # raw|generator_hints|likes_dislikes|dislikes_only|combined
+      include_novelty_summary: true
+      include_mutation_directive: true
+      include_scoring_rubric: true
+      score_feedback: best_worst  # none|best_worst
+      score_feedback_max_chars: 1500
+
+    mutation_directives:
+      mode: random  # none|random|cycle|fixed
+      directives:
+      - "Change composition and framing (distance, angle, crop, negative space, foreground/background layering) while preserving the core subject(s) and intent."
+      - "Change the viewer’s viewpoint or vantage (eye-level vs elevated, close vs far, inside vs outside) while keeping the same underlying scene identity."
+      - "Change the spatial organization (symmetry/asymmetry, centered/off-center, clustered/distributed) without changing the cast of main elements."
+      - "Change scale relationships (intimate vs monumental, macro vs wide) while keeping the same core concept and primary subjects."
+      - "Change the setting/context (location type, era, weather/season, situational backdrop) in a compatible way that supports the same idea."
+      - "Change time-of-day and lighting design (source direction, softness, shadow language, contrast) while keeping the same narrative premise."
+      - "Change motion/energy (still vs dynamic, implied motion vs frozen moment) without introducing a different scenario."
+      - "Change the emotional/atmospheric register (serene, ominous, playful, austere, etc.) while keeping the same core story."
+      - "Change visual density and complexity (minimal vs ornate, sparse vs layered) while preserving the key motifs and readability."
+      - "Change material/texture language (smooth/rough, organic/mechanical, polished/weathered) while keeping objects and roles consistent."
+      - "Change color strategy (temperature, saturation, limited palette vs broad palette, harmony approach) while keeping content stable."
+      - "Change tonal strategy (high-key/low-key, soft vs punchy contrast, muted vs vivid) without changing what the scene *is*."
+      - "Change realism/stylization level (naturalistic vs stylized, simplified vs highly rendered) while preserving semantic content."
+      - "Change the medium/genre of depiction (photo-like, illustration, painting-like, collage-like, 3D-render-like) while keeping the same intent."
+      - "Change lens/camera semantics (wide vs tele feel, depth-of-field behavior, perspective distortion) while keeping the same subject identity."
+      - "Change focus hierarchy (what is emphasized vs deemphasized) while keeping the same elements present and consistent."
+      - "Swap secondary details for role-equivalent alternatives (props, background cues, micro-details) without changing the primary concept."
+      - "Introduce a constraint-driven transformation (e.g., enforce strong geometry, enforce soft organic forms, enforce strict minimalism) while keeping the same idea."
+      - "Express the same concept via an alternative but equivalent visual metaphor, without adding new plot points or changing the core subject."
+      - "Produce a meaningfully different realization that a human would still judge as 'the same prompt' given the core constraints."
+      per_axis:
+        enabled: false
+        axes: []
+
+    judging:
+      judges:
+        - id: j1
+          model: null
+          temperature: null
+          weight: 1.0
+          rubric: default
+        - id: j2
+          model: null
+          temperature: null
+          weight: 1.0
+          rubric: strict
+        - id: j3
+          model: null
+          temperature: null
+          weight: 1.0
+          rubric: novelty_heavy
+      aggregation: mean  # mean|median|min|max|trimmed_mean
+      trimmed_mean_drop: 0
+
+    selection:
+      exploration_rate_override: null
+      group_by_beam: false
+      tie_breaker: stable_id  # stable_id|prefer_shorter|prefer_novel
+
+context:
+  enabled: true
+  injection_location: both  # system|prompt|both
+  injectors: ["season", "holiday"]
+
+# Optional: label runs for lightweight A/B testing and discovery.
+experiment:
+  id: null          # string | null
+  variant: null     # string | null
+  notes: null       # string | null
+  tags: []          # list[string]
+
+rclone:
+  enabled: false
+  # Setup guide: docs/rclone-google-photos.md
+  remote: null
+  album: null
+
+upscale:
+  enabled: false
+  target_long_edge_px: 3840
+  target_aspect_ratio: "16:9"
+  engine: realesrgan-ncnn-vulkan
+  # Optional. If omitted, PATH + REALESRGAN_NCNN_VULKAN_PATH are checked.
+  realesrgan_binary: null
+  # Optional. Directory containing the *.param/*.bin model files.
+  model_path: null
+  model_name: realesrgan-x4plus
+  tile_size: 0
+  tta: false
+  allow_fallback_resize: false
+
+# Tool/runner-specific configuration (not consumed by the main pipeline config parser).
+experiment_runners:
+  profile_v5_3x3:
+    profile_like_dislike_path: "M:/My Drive/image_project/data/user_profile_v5_like_dislike.csv"
+    profile_love_like_dislike_hate_path: "M:/My Drive/image_project/data/user_profile_v5_love_like_dislike_hate.csv"
+    generator_profile_hints_path: "M:/My Drive/image_project/data/user_profile_v5_abstraction.csv"

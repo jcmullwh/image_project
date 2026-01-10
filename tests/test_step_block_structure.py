@@ -3,9 +3,10 @@ import random
 
 import pytest
 
-from message_handling import MessageHandler
-from pipeline import Block, ChatRunner, ChatStep, RunContext
-from run_config import RunConfig
+from image_project.foundation.messages import MessageHandler
+from image_project.foundation.pipeline import Block, ChatRunner, ChatStep
+from image_project.framework.config import RunConfig
+from image_project.framework.runtime import RunContext
 
 
 def _make_ctx(tmp_path) -> RunContext:

@@ -9,12 +9,15 @@ from datetime import date
 import pandas as pd
 import pytest
 
-from context_injectors import ContextManager
-from message_handling import MessageHandler
-from pipeline import RunContext
-from prompts import DEFAULT_SYSTEM_PROMPT, generate_first_prompt
-from run_config import RunConfig
-from transcript import write_transcript
+from image_project.framework.context import ContextManager
+from image_project.foundation.messages import MessageHandler
+from image_project.framework.runtime import RunContext
+from image_project.impl.current import context_plugins as _context_plugins
+from image_project.impl.current.prompting import DEFAULT_SYSTEM_PROMPT, generate_first_prompt
+from image_project.framework.config import RunConfig
+from image_project.framework.transcript import write_transcript
+
+_context_plugins.discover()
 
 
 CALENDAR_NOT_IMPLEMENTED = (
