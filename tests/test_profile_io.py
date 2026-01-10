@@ -44,6 +44,24 @@ def test_load_user_profile_row_based_love_like_dislike_hate(tmp_path):
     assert df["Hates"].dropna().tolist() == ["Horror — no jump scares"]
 
 
+def test_load_user_profile_row_based_strength_conditionals(tmp_path):
+    path = tmp_path / "user_profile_v5_strength_conditionals.csv"
+    pd.DataFrame(
+        {
+            "strength": ["loves", "likes", "dislikes", "hates"],
+            "item": ["Symmetry", "Gardens", "Boring frames", "Horror"],
+            "conditionals": ["strong preference", "", "", "no jump scares"],
+        }
+    ).to_csv(path, index=False)
+
+    df = load_user_profile(str(path))
+    assert list(df.columns) == ["Loves", "Likes", "Dislikes", "Hates"]
+    assert df["Loves"].dropna().tolist() == ["Symmetry — strong preference"]
+    assert df["Likes"].dropna().tolist() == ["Gardens"]
+    assert df["Dislikes"].dropna().tolist() == ["Boring frames"]
+    assert df["Hates"].dropna().tolist() == ["Horror — no jump scares"]
+
+
 def test_extract_dislikes_includes_hates():
     profile = pd.DataFrame({"Dislikes": ["x", None], "Hates": ["y", "x"]})
     assert extract_dislikes(profile) == ["x", "y"]
@@ -151,4 +169,4 @@ def test_blackbox_refine_legacy_plan_adds_final_refinement_stage(tmp_path):
 
     stage_ids = [spec.stage_id for spec in resolved.plan.stage_specs(inputs)]
     assert "blackbox_refine.init_state" in stage_ids
-    assert stage_ids[-1] == "blackbox_refine.finalize"
+    assert stage_ids[-1] == "postprompt.openai_format"

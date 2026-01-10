@@ -237,7 +237,7 @@ class BlackboxPromptPlan(LinearStagePlan):
             [
                 StageCatalog.build("blackbox.idea_cards_judge_score", inputs),
                 StageCatalog.build("blackbox.select_idea_card", inputs),
-                StageCatalog.build("blackbox.image_prompt_openai", inputs),
+                StageCatalog.build("blackbox.image_prompt_creation", inputs),
             ]
         )
         return sequence

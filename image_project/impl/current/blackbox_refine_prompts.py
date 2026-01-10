@@ -64,7 +64,8 @@ def profile_representation_from_guidance(
             blocks.append("Hates:\n" + hates_section)
         if dislikes_section:
             blocks.append("Dislikes:\n" + dislikes_section)
-        return "\n\n".join(blocks).strip() or "<none>"
+        rendered = "\n\n".join(blocks).strip()
+        return rendered or "<none>"
 
     if source == "dislikes_only":
         blocks = []
@@ -73,11 +74,13 @@ def profile_representation_from_guidance(
         if dislikes_section:
             blocks.append("Dislikes:\n" + dislikes_section)
         if blocks:
-            return "\n\n".join(blocks).strip()
+            rendered = "\n\n".join(blocks).strip()
+            return rendered
         if dislikes_list:
-            return (
+            rendered = (
                 "Dislikes/Hates:\n" + "\n".join(f"- {item}" for item in dislikes_list)
             ).strip()
+            return rendered
         return "<none>"
 
     if source == "combined":
@@ -108,11 +111,31 @@ def scoring_rubric_text(*, rubric: str) -> str:
             """\
             Score 0-100. Be strict and literal.
 
-            Criteria (in priority order):
-            1) Alignment with selected concepts and explicit constraints.
-            2) Clear, renderable, non-contradictory visual description (subject, setting, style, lighting, composition).
-            3) Strong adherence to user likes/dislikes and avoid-list intent.
-            4) No fluff: avoid vague adjectives, empty hype, and redundant synonyms.
+            Profile handling (format-agnostic):
+            - The profile may be bullets, free text, "generator-safe hints", likes/dislikes lists, or other formats.
+            - Treat DISLIKE/HATE/AVOID/NEVER/DO-NOT signals as high-priority constraints.
+            - Treat LIKE/LOVE/PREFER signals as moderate-positive guidance (helpful, not absolute).
+            - Use judgment: reward adjacent/compatible interpretations of strong likes when plausible (do not keyword-match).
+            - Do NOT give credit for "fixing" a dislike by adding the disliked thing with a positive modifier (e.g., dislike "wrong/incorrect X" does NOT mean adding "correct X" is good).
+
+            Scoring method (apply in order; clamp final to [0,100]):
+            - Start at 70.
+            - Selected concepts + explicit constraints: +0 to +25
+              - Strong: +18 to +25 | Moderate: +10 to +17 | Weak: +0 to +9
+              - If a concept/constraint is contradicted: -15 to -30 instead of adding points
+            - Renderability + internal consistency: +0 to +20
+              - Strong: +14 to +20 | Moderate: +7 to +13 | Weak: +0 to +6
+              - Contradictions / impossible mashups: -10 to -25
+            - Dislikes/Hates (hard penalties; apply once at highest severity):
+              - DISLIKE/AVOID minor brush-by: -15
+              - DISLIKE/AVOID meaningful presence: -35
+              - HATE/NEVER or central/defining violation: -70 and cap total score at 20
+            - Likes/Loves (moderate impact; adjacent matches allowed): +0 to +8
+              - Strong: +6 to +8 | Moderate: +3 to +5 | Weak: +0 to +2
+            - No fluff / high-signal writing:
+              - Dense, concrete, minimal redundancy: +0 to +7
+              - Vague hype / empty adjectives / redundant synonyms: -5 to -15
+
             """
         ).strip()
 
@@ -121,11 +144,32 @@ def scoring_rubric_text(*, rubric: str) -> str:
             """\
             Score 0-100 with a heavy novelty bias.
 
-            Criteria (in priority order):
-            1) Alignment with selected concepts and user preferences.
-            2) Novelty: avoid recently repeated motifs and clichéd combinations.
-            3) Visual specificity and coherence (renderable, concrete, consistent).
-            4) Prompt craftsmanship: concise, high-signal, minimal redundancy.
+            Profile handling (format-agnostic):
+            - The profile may be bullets, free text, "generator-safe hints", likes/dislikes lists, or other formats.
+            - Treat DISLIKE/HATE/AVOID/NEVER/DO-NOT signals as high-priority constraints.
+            - Treat LIKE/LOVE/PREFER signals as moderate-positive guidance (helpful, not absolute).
+            - Use judgment: reward adjacent/compatible interpretations of strong likes when plausible (do not keyword-match).
+            - Do NOT give credit for "fixing" a dislike by adding the disliked thing with a positive modifier (e.g., dislike "wrong/incorrect X" does NOT mean adding "correct X" is good).
+
+            Scoring method (apply in order; clamp final to [0,100]):
+            - Start at 70.
+            - Selected concepts alignment: +0 to +20
+              - Strong: +14 to +20 | Moderate: +7 to +13 | Weak: +0 to +6
+              - If a concept is contradicted: -15 to -30 instead of adding points
+            - Novelty + anti-repetition (use "recent motifs" when present):
+              - Fresh, non-cliche, non-repetitive: +10 to +20
+              - Somewhat fresh: +5 to +9
+              - Generic/cliche: +0 to +4
+              - Repeats recent motifs meaningfully: -10 to -25
+            - Dislikes/Hates (hard penalties; apply once at highest severity):
+              - DISLIKE/AVOID minor brush-by: -15
+              - DISLIKE/AVOID meaningful presence: -35
+              - HATE/NEVER or central/defining violation: -70 and cap total score at 20
+            - Likes/Loves (moderate impact; adjacent matches allowed): +0 to +8
+              - Strong: +5 to +8 | Moderate: +2 to +4 | Weak: +0 to +1
+            - Visual specificity + coherence: +0 to +12; contradictions: -10 to -25
+            - Prompt craftsmanship (concise, high-signal): +0 to +5; vagueness/redundancy: -5 to -12
+
             """
         ).strip()
 
@@ -133,12 +177,28 @@ def scoring_rubric_text(*, rubric: str) -> str:
         """\
         Score 0-100.
 
-        Criteria (in priority order):
-        1) Alignment with selected concepts.
-        2) Alignment with user likes/dislikes.
-        3) Visual specificity and coherence (renderable, concrete, consistent).
-        4) Prompt craftsmanship: concise, high-signal, concrete nouns, minimal redundancy.
-        5) Originality: avoid clichéd combinations and avoid repeating recent motifs when applicable.
+        Profile handling (format-agnostic):
+        - The profile may be bullets, free text, "generator-safe hints", likes/dislikes lists, or other formats.
+        - Treat DISLIKE/HATE/AVOID/NEVER/DO-NOT signals as high-priority constraints.
+        - Treat LIKE/LOVE/PREFER signals as moderate-positive guidance (helpful, not absolute).
+        - Use judgment: reward adjacent/compatible interpretations of strong likes when plausible (do not keyword-match).
+        - Do NOT give credit for "fixing" a dislike by adding the disliked thing with a positive modifier (e.g., dislike "wrong/incorrect X" does NOT mean adding "correct X" is good).
+
+        Scoring method (apply in order; clamp final to [0,100]):
+        - Start at 70.
+        - Selected concepts alignment: +0 to +20
+          - Strong: +14 to +20 | Moderate: +7 to +13 | Weak: +0 to +6
+          - If a concept is contradicted: -15 to -30 instead of adding points
+        - Dislikes/Hates (hard penalties; apply once at highest severity):
+          - DISLIKE/AVOID minor brush-by: -15
+          - DISLIKE/AVOID meaningful presence: -35
+          - HATE/NEVER or central/defining violation: -70 and cap total score at 20
+        - Likes/Loves (moderate impact; adjacent matches allowed): +0 to +10
+          - Strong: +5 to +10 | Moderate: +2 to +4 | Weak: +0 to +1
+        - Visual specificity + coherence: +0 to +15; contradictions: -10 to -25
+        - Prompt craftsmanship (concise, high-signal, concrete nouns): +0 to +8; vagueness/redundancy: -5 to -12
+        - Originality / non-cliche (use "recent motifs" when applicable): +0 to +7; repetition/cliche: -5 to -20
+
         """
     ).strip()
 
@@ -390,5 +450,6 @@ def prompt_variants_judge_prompt(
         - "score" must be an integer in [0, 100].
         - Include exactly one score entry per candidate id (no missing, no extra ids).
         - No additional keys, no explanations, no prose.
+        - Candidate id/order carries no meaning; judge solely on the prompt text.
         """
     ).strip()

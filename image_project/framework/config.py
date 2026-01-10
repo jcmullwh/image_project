@@ -480,6 +480,8 @@ class RunConfig:
                     "include_novelty_summary": None,
                     "include_mutation_directive": None,
                     "include_scoring_rubric": None,
+                    "score_feedback": None,
+                    "score_feedback_max_chars": None,
                 },
                 "mutation_directives": {
                     "mode": None,
@@ -1134,10 +1136,10 @@ class RunConfig:
                 "Invalid config type for prompt.scoring.idea_profile_source: expected string"
             )
         idea_profile_source = raw_idea_profile_source.strip().lower()
-        if idea_profile_source not in ("raw", "generator_hints", "none"):
+        if idea_profile_source not in ("raw", "generator_hints", "generator_hints_plus_dislikes", "none"):
             raise ValueError(
                 "Unknown prompt.scoring.idea_profile_source: "
-                f"{raw_idea_profile_source!r} (expected: raw|generator_hints|none)"
+                f"{raw_idea_profile_source!r} (expected: raw|generator_hints|generator_hints_plus_dislikes|none)"
             )
 
         raw_final_profile_source: Any = scoring_cfg.get("final_profile_source", "raw")
@@ -1284,7 +1286,11 @@ class RunConfig:
         else:
             blackbox_refine_cfg = raw_blackbox_refine
 
-        plan_requires_blackbox_refine = prompt_plan in ("blackbox_refine", "blackbox_refine_only")
+        plan_requires_blackbox_refine = prompt_plan in (
+            "blackbox_refine",
+            "blackbox_refine_only",
+            "blackbox_refine_legacy",
+        )
         prompt_blackbox_refine: PromptBlackboxRefineConfig | None = None
 
         if blackbox_refine_present or plan_requires_blackbox_refine:

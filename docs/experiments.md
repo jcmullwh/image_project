@@ -293,8 +293,10 @@ Compares v5 profile formats and a one-shot prompt path:
 - **A**: `blackbox_refine` + `refinement.policy=none` + v5 `like/dislike` profile
 - **B**: `blackbox_refine` + `refinement.policy=none` + v5 `love/like/dislike/hate` profile
 - **C**: `direct` + `refinement.policy=none` + v5 `love/like/dislike/hate` profile
+- Random concepts: 2 injected per run index (shared across sets)
+- Post-processing: profile nudge + OpenAI (GPT Image 1.5) prompt formatting
 - Concept filters: enabled (see `preprompt.filter_concepts` / `prompt.concepts.filters.*`)
-- Seed prompt formatting: `blackbox.image_prompt_openai` (GPT Image 1.5 prompt text) after idea-card selection
+- Final prompt formatting: `postprompt.openai_format` (GPT Image 1.5 prompt text) after refinement
 
 Run:
 
@@ -302,6 +304,11 @@ Run:
 pdm run experiment-profile-v5-3x3 --dry-run
 pdm run experiment-profile-v5-3x3 --profile-like-dislike-path "M:/My Drive/image_project/data/user_profile_v5_like_dislike.csv" --profile-love-like-dislike-hate-path "M:/My Drive/image_project/data/user_profile_v5_love_like_dislike_hate.csv"
 ```
+
+If you omit the `--profile-*` flags, the runner reads the profile paths from your config:
+`experiment_runners.profile_v5_3x3.profile_like_dislike_path` and
+`experiment_runners.profile_v5_3x3.profile_love_like_dislike_hate_path` (optional:
+`experiment_runners.profile_v5_3x3.generator_profile_hints_path`). It fails fast if required paths are missing.
 
 ## A/B Refinement Block Experiment Runner
 
@@ -322,8 +329,8 @@ pdm run experiment-ab-refinement-block --runs 5
 
 Data:
 
-- Default: `--data sample` uses repo sample CSVs under `image_project/impl/current/data/sample/`.
-- Use `--data config` to use the `prompt.categories_path` / `prompt.profile_path` from your loaded config.
+- Default: `--data config` uses the `prompt.categories_path` / `prompt.profile_path` from your loaded config.
+- Use `--data sample` to use repo sample CSVs under `image_project/impl/current/data/sample/`.
 
 Compare A vs B:
 

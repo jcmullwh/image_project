@@ -42,6 +42,18 @@ def build_preferences_guidance(user_profile: pd.DataFrame) -> str:
                 """
             ).strip()
         )
+
+    sections.append(
+        textwrap.dedent(
+            """\
+            Preference interpretation rules:
+            - Loves/Likes are positive guidance. Do not copy them verbatim; apply them as subtle direction.
+            - Hates/Dislikes are avoid constraints. Do not "satisfy" a dislike by introducing the disliked thing with a positive modifier.
+              Example: if a profile says it dislikes "wrong/incorrect X", that does NOT mean adding "correct X" improves the prompt.
+              Instead, avoid introducing X unnecessarily; if X is already required by the scene, keep it natural, de-emphasized, and non-central (and do NOT call it out as "correct X").
+            """
+        ).strip()
+    )
     for column in user_profile.columns:
         values = [str(value).strip() for value in user_profile[column].dropna().tolist()]
         values = [value for value in values if value]
@@ -281,11 +293,12 @@ This time, provide only the final prompt to the AI. Do not include anything exce
     return seventh_prompt
 
 
-def refine_image_prompt_prompt(draft: str) -> str:
+def refine_image_prompt_prompt(draft: str, *, max_chars: int | None = None) -> str:
     draft_text = (draft or "").strip()
     if not draft_text:
         raise ValueError("Draft image prompt cannot be empty")
 
+    target = int(max_chars) if max_chars is not None else 3500
     return textwrap.dedent(
         f"""\
         Refine the following draft into a high-quality GPT Image 1.5 prompt.
@@ -294,13 +307,63 @@ def refine_image_prompt_prompt(draft: str) -> str:
         - Preserve the original intent and key details.
         - Remove contradictions, redundancies, and vague phrasing.
         - Make the prompt concrete and visually grounded.
-        - Keep it under 3500 characters.
+        - Keep it under {target} characters.
 
         Output rules:
         - Output ONLY the final image prompt (no analysis, no commentary).
         - Use short labeled sections with line breaks (omit sections that don't apply).
 
         Draft:
+        {draft_text}
+        """
+    ).strip()
+
+
+def profile_nudge_image_prompt_prompt(
+    *,
+    draft_prompt: str,
+    preferences_guidance: str,
+    context_guidance: str | None = None,
+    max_chars: int | None = None,
+) -> str:
+    draft_text = (draft_prompt or "").strip()
+    if not draft_text:
+        raise ValueError("Draft image prompt cannot be empty")
+
+    preferences_text = (preferences_guidance or "").strip()
+    if not preferences_text:
+        raise ValueError("preferences_guidance cannot be empty")
+
+    context_text = (context_guidance or "").strip()
+    target = int(max_chars) if max_chars is not None else None
+    limit_line = f"- Keep the output under {target} characters.\n" if target is not None else ""
+
+    return textwrap.dedent(
+        f"""\
+        You will receive:
+        - A draft image generation prompt.
+        - A raw user profile describing preferences (likes/dislikes/loves/hates).
+
+        Task:
+        Make a subtle, non-obvious nudge to the draft prompt so it better matches the user's tastes.
+
+        Hard rules:
+        - Preserve the core intent, subject, setting, and key composition. No major changes.
+        - Do not introduce new major objects, characters, or story beats.
+        - Do not contradict explicit constraints already in the draft prompt (e.g. "no people/no figures/no faces", "no text", "no cityscape").
+        - Do not add preference items verbatim and do not copy profile phrases verbatim.
+        - Do not make changes that feel shoe-horned; edits must feel native to the existing prompt.
+        - Respect avoid constraints implied by dislikes/hates without listing them explicitly.
+        - Prefer subtle nudges via palette, lighting, composition, medium/technique, texture, and mood (not by adding new subjects).
+        {limit_line}- Output ONLY the revised prompt. No commentary, no quotes, no markdown.
+
+        User profile (for guidance only; do not copy phrases verbatim):
+        {preferences_text}
+
+        Context guidance (optional):
+        {context_text if context_text else "<none>"}
+
+        Draft prompt:
         {draft_text}
         """
     ).strip()
@@ -315,6 +378,7 @@ def profile_abstraction_prompt(*, preferences_guidance: str) -> str:
         Rules:
         - Allowed: broad adjectives, high-level style constraints, general "avoid" constraints.
         - Disallowed: explicit colors, named motifs, named artists, and repeated n-grams copied from the raw likes list.
+        - Do NOT "fix" dislikes by turning them into positive prescriptions (e.g., dislike "wrong/incorrect X" does NOT mean you should recommend adding "correct X").
         - Keep it short (3-8 bullet points max). No prose beyond the bullets.
 
         Raw profile (for you only; do not copy phrases verbatim):
@@ -343,6 +407,11 @@ def idea_cards_generate_prompt(
 
         Generator-safe profile hints:
         {hints if hints else "<none>"}
+
+        Preference handling:
+        - Treat any DISLIKE/HATE/AVOID/NEVER/DO-NOT signals as avoid constraints.
+        - Do NOT "fix" a dislike by introducing the disliked thing (or a proxy for it) with a positive modifier.
+          Example: dislike "wrong/incorrect X" does NOT mean adding "correct X" is a good idea.
 
         Output must be STRICT JSON only (no markdown, no commentary), with this exact schema:
         {{
@@ -410,6 +479,11 @@ def idea_card_generate_prompt(
         Generator-safe profile hints:
         {hints if hints else "<none>"}
 
+        Preference handling:
+        - Treat any DISLIKE/HATE/AVOID/NEVER/DO-NOT signals as avoid constraints.
+        - Do NOT "fix" a dislike by introducing the disliked thing (or a proxy for it) with a positive modifier.
+          Example: dislike "wrong/incorrect X" does NOT mean adding "correct X" is a good idea.
+
         Output must be STRICT JSON only (no markdown, no commentary), with this exact schema:
         {{
           "id": "{idea_id}",
@@ -431,7 +505,7 @@ def idea_card_generate_prompt(
         - Palette options should be concrete (named colors + lighting temperature, not just "vibrant").
         - composition and palette lists must have at least 2 items.
         - medium and mood lists must have at least 1 item.
-        - "avoid" may be omitted or an empty list, but if present it should be specific (e.g., overused motifs, compositional pitfalls, disliked vibes).
+        - "avoid" may be omitted or an empty list, but if present it should be specific exclusions (e.g., overused motifs, compositional pitfalls, disliked vibes).
         """.strip()
     )
 
@@ -502,6 +576,10 @@ def final_prompt_from_selected_idea_prompt(
         - Be concrete: subject/action, setting, lighting, composition/framing, medium/style, palette, textures/materials.
         - Avoid generic adjectives and avoid cliché combinations; make it feel like a specific artwork, not a generic scene.
 
+        Preference handling:
+        - Dislikes/Hates are avoid constraints.
+        - Do NOT "fix" a dislike by adding the disliked thing with positive modifiers (e.g., dislike "wrong/incorrect X" does NOT mean adding "correct X" improves the prompt).
+
         Selected concepts (must be integrated thoughtfully):
         {concepts_block}
 
@@ -538,6 +616,10 @@ def openai_image_prompt_from_selected_idea_prompt(
         - Use short labeled sections with line breaks; omit any section that doesn't apply.
         - Prefer concrete nouns + renderable constraints; avoid vague hype and redundant synonyms.
         - Your output MUST be fewer than {target} characters.
+
+        Preference handling:
+        - Dislikes/Hates are avoid constraints.
+        - Do NOT "fix" a dislike by adding the disliked thing with positive modifiers (e.g., dislike "wrong/incorrect X" does NOT mean adding "correct X" improves the prompt).
 
         Use this rough order (rename freely if it reads better):
         1) DELIVERABLE / INTENT
@@ -618,6 +700,7 @@ def refine_draft_prompt_from_selected_idea_prompt(
 
         Refinement block (apply silently; do not output this block):
         - Respect preference strength: Loves are near-mandatory positives; Hates are hard excludes.
+        - Do NOT "fix" a dislike by adding the disliked thing with positive modifiers (e.g., dislike "wrong/incorrect X" does NOT mean adding "correct X" improves the prompt).
         - Keep the core intent; improve specificity, coherence, and visual grounding.
         - Remove contradictions and vague phrasing.
         - Keep it concise and generator-friendly.
@@ -1020,7 +1103,8 @@ def _resolve_blackbox_profile_text(
     config_path: str,
 ) -> str:
     if source == "raw":
-        return str(ctx.outputs.get("preferences_guidance") or "")
+        raw_profile = str(ctx.outputs.get("preferences_guidance") or "").strip()
+        return raw_profile
     if source == "generator_hints":
         hints = ctx.outputs.get("generator_profile_hints")
         if not isinstance(hints, str) or not hints.strip():
@@ -1046,6 +1130,7 @@ def _resolve_blackbox_profile_text(
             )
 
         dislikes_block = "\n".join(f"- {item}" for item in dislikes) if dislikes else "- <none>"
+
         return (
             "Profile extraction (generator-safe hints):\n"
             + hints.strip()
@@ -1739,6 +1824,110 @@ def refine_image_prompt_refine(inputs: PlanInputs) -> StageSpec:
         stage_id="refine.image_prompt_refine",
         prompt=prompt,
         temperature=0.8,
+        is_default_capture=True,
+    )
+
+
+def _resolve_latest_prompt_for_postprompt(ctx: RunContext, *, stage_id: str) -> str:
+    draft = ctx.outputs.get("image_prompt")
+    if isinstance(draft, str) and draft.strip():
+        return draft.strip()
+
+    beams = ctx.outputs.get("bbref.beams")
+    if isinstance(beams, list) and beams:
+        first = beams[0] if isinstance(beams[0], dict) else None
+        prompt = (first or {}).get("prompt") if isinstance(first, dict) else None
+        if isinstance(prompt, str) and prompt.strip():
+            return prompt.strip()
+
+    for record in reversed(ctx.steps):
+        if not isinstance(record, dict) or record.get("type") != "chat":
+            continue
+        response = record.get("response")
+        if isinstance(response, str) and response.strip():
+            return response.strip()
+
+    raise ValueError(f"{stage_id} could not resolve a draft image prompt")
+
+
+@StageCatalog.register(
+    "postprompt.profile_nudge",
+    doc="Nudge the latest image prompt toward the user profile (small changes only).",
+    source="prompts.profile_nudge_image_prompt_prompt",
+    tags=("postprompt",),
+)
+def postprompt_profile_nudge(inputs: PlanInputs) -> StageSpec:
+    max_chars: int | None = None
+    if inputs.cfg.prompt_blackbox_refine is not None:
+        max_chars = inputs.cfg.prompt_blackbox_refine.max_prompt_chars
+
+    def _prompt(ctx: RunContext) -> str:
+        draft = _resolve_latest_prompt_for_postprompt(ctx, stage_id="postprompt.profile_nudge")
+        preferences = str(ctx.outputs.get("preferences_guidance") or "").strip()
+        context_guidance = str(ctx.outputs.get("context_guidance") or "").strip() or None
+        return prompts.profile_nudge_image_prompt_prompt(
+            draft_prompt=draft,
+            preferences_guidance=preferences,
+            context_guidance=context_guidance,
+            max_chars=max_chars,
+        )
+
+    return StageSpec(
+        stage_id="postprompt.profile_nudge",
+        prompt=_prompt,
+        temperature=0.0,
+        refinement_policy="none",
+        merge="none",
+        output_key="postprompt.nudged_prompt",
+    )
+
+
+@StageCatalog.register(
+    "postprompt.openai_format",
+    doc="Format the (nudged) prompt into OpenAI GPT Image 1.5 prompt text.",
+    source="prompts.refine_image_prompt_prompt",
+    tags=("postprompt",),
+)
+def postprompt_openai_format(inputs: PlanInputs) -> StageSpec:
+    max_chars: int | None = None
+    if inputs.cfg.prompt_blackbox_refine is not None:
+        max_chars = inputs.cfg.prompt_blackbox_refine.max_prompt_chars
+
+    def _prompt(ctx: RunContext) -> str:
+        draft = _resolve_latest_prompt_for_postprompt(ctx, stage_id="postprompt.openai_format")
+
+        nudged = ctx.outputs.get("postprompt.nudged_prompt")
+        if isinstance(nudged, str) and nudged.strip():
+            nudged_text = nudged.strip()
+            draft_lower = draft.lower()
+            nudged_lower = nudged_text.lower()
+
+            forbidden_phrases = (
+                "no people",
+                "no person",
+                "no humans",
+                "no human",
+                "no figures",
+                "no figure",
+                "no faces",
+                "no face",
+                "no bodies",
+                "no body",
+            )
+            forbids_people = any(phrase in draft_lower for phrase in forbidden_phrases)
+
+            if forbids_people and not any(phrase in nudged_lower for phrase in forbidden_phrases):
+                nudged_text = ""
+
+            if nudged_text:
+                draft = nudged_text
+        return prompts.refine_image_prompt_prompt(draft, max_chars=max_chars)
+
+    return StageSpec(
+        stage_id="postprompt.openai_format",
+        prompt=_prompt,
+        temperature=0.3,
+        refinement_policy="none",
         is_default_capture=True,
     )
 

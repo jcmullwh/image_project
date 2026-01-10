@@ -628,9 +628,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--data",
         type=str,
-        default="sample",
+        default="config",
         choices=("sample", "config"),
-        help="Data source for categories/profile: sample uses repo sample CSVs; config uses paths from the loaded config.",
+        help="Data source for categories/profile: config uses paths from the loaded config; sample uses repo sample CSVs.",
     )
     parser.add_argument(
         "--enable-upscale",

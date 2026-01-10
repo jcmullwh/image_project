@@ -41,9 +41,9 @@ class BlackboxRefinePromptPlan(LinearStagePlan):
             ]
         )
 
-        seed_stage = StageCatalog.build("blackbox.image_prompt_openai", inputs)
+        seed_stage = StageCatalog.build("blackbox.image_prompt_creation", inputs)
         if not isinstance(seed_stage, StageSpec):
-            raise TypeError("blackbox.image_prompt_openai must be a chat stage")
+            raise TypeError("blackbox.image_prompt_creation must be a chat stage")
 
         base.append(
             StageSpec(
@@ -69,7 +69,12 @@ class BlackboxRefinePromptPlan(LinearStagePlan):
             seed_source="blackbox",
         )
 
-        return [*base, *loop_specs]
+        return [
+            *base,
+            *loop_specs,
+            StageCatalog.build("postprompt.profile_nudge", inputs),
+            StageCatalog.build("postprompt.openai_format", inputs),
+        ]
 
 
 @register_plan
@@ -119,6 +124,13 @@ class BlackboxRefineOnlyPromptPlan(LinearStagePlan):
                 seed_output_key="bbref.seed_prompt",
                 seed_source="draft",
             )
+        )
+
+        specs.extend(
+            [
+                StageCatalog.build("postprompt.profile_nudge", inputs),
+                StageCatalog.build("postprompt.openai_format", inputs),
+            ]
         )
 
         return specs
