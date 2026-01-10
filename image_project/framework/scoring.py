@@ -716,7 +716,6 @@ def novelty_penalties(
         )
     raise ValueError(f"Unknown novelty method: {method!r}")
 
-
 def _idea_card_text_for_novelty(card: Mapping[str, Any]) -> str:
     parts: list[str] = []
 
@@ -793,13 +792,13 @@ def select_candidate(
 
     table: list[dict[str, Any]] = []
     for idea_id, raw_score in scores.items():
-        penalty = int(penalties.get(idea_id, 0))
-        effective = max(0, int(raw_score) - penalty)
+        novelty_penalty = int(penalties.get(idea_id, 0))
+        effective = max(0, int(raw_score) - novelty_penalty)
         table.append(
             {
                 "id": idea_id,
                 "score": int(raw_score),
-                "novelty_penalty": penalty,
+                "novelty_penalty": novelty_penalty,
                 "novelty_detail": novelty_breakdown.get(idea_id),
                 "effective_score": effective,
             }

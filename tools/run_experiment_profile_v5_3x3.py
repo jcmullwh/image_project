@@ -26,6 +26,18 @@ from image_project.framework.config import RunConfig
 
 RunMode = Literal["full", "prompt_only"]
 
+_CONTEXT_PLUGINS_DISCOVERED = False
+
+
+def _discover_context_plugins() -> None:
+    global _CONTEXT_PLUGINS_DISCOVERED
+    if _CONTEXT_PLUGINS_DISCOVERED:
+        return
+    from image_project.impl.current import context_plugins as _context_plugins
+
+    _context_plugins.discover()
+    _CONTEXT_PLUGINS_DISCOVERED = True
+
 
 @dataclass(frozen=True)
 class PlannedRun:
@@ -89,6 +101,61 @@ def _default_output_root() -> str:
     return os.path.join("_artifacts", "experiments", f"{timestamp}_profile_v5_3x3")
 
 
+def _get_runner_cfg(base_cfg: Mapping[str, Any], *, runner_id: str) -> Mapping[str, Any]:
+    runners_cfg = base_cfg.get("experiment_runners")
+    if not isinstance(runners_cfg, Mapping):
+        return {}
+    runner_cfg = runners_cfg.get(runner_id)
+    if not isinstance(runner_cfg, Mapping):
+        return {}
+    return runner_cfg
+
+
+def _require_file_path(value: str, *, label: str) -> str:
+    path = str(value or "").strip()
+    if not path:
+        raise SystemExit(f"{label} is required (got empty).")
+    expanded = os.path.expandvars(os.path.expanduser(path))
+    if not os.path.isabs(expanded):
+        expanded = os.path.join(str(PROJECT_ROOT), expanded)
+    expanded = os.path.abspath(expanded)
+    if not os.path.exists(expanded):
+        raise SystemExit(f"{label} not found: {expanded}")
+    if os.path.isdir(expanded):
+        raise SystemExit(f"{label} is a directory (expected file): {expanded}")
+    if os.path.getsize(expanded) == 0:
+        raise SystemExit(f"{label} is empty: {expanded}")
+    return expanded
+
+
+def _resolve_required_path(
+    *,
+    cli_value: str | None,
+    runner_cfg: Mapping[str, Any],
+    runner_key: str,
+    cli_flag: str,
+    label: str,
+) -> str:
+    if cli_value:
+        return _require_file_path(cli_value, label=label)
+    cfg_value = runner_cfg.get(runner_key)
+    if isinstance(cfg_value, str) and cfg_value.strip():
+        return _require_file_path(cfg_value, label=label)
+    raise SystemExit(
+        f"Missing {label}. Set `experiment_runners.profile_v5_3x3.{runner_key}` in your config "
+        f"or pass `{cli_flag}`."
+    )
+
+
+def _resolve_optional_path(*, cli_value: str | None, runner_cfg: Mapping[str, Any], runner_key: str) -> str | None:
+    if cli_value:
+        return _require_file_path(cli_value, label=f"{runner_key}")
+    cfg_value = runner_cfg.get(runner_key)
+    if isinstance(cfg_value, str) and cfg_value.strip():
+        return _require_file_path(cfg_value, label=f"{runner_key}")
+    return None
+
+
 def _parse_sets(value: str) -> tuple[str, ...]:
     raw = (value or "").strip()
     if not raw:
@@ -142,6 +209,7 @@ def generate_shared_concepts_by_run(
         raise ValueError("runs_per_set must be > 0")
 
     # Resolve + normalize the categories path the same way the pipeline does.
+    _discover_context_plugins()
     cfg_for_paths, _warnings = RunConfig.from_dict(_merge_cfg(base_cfg, {"run": {"mode": "prompt_only"}}))
 
     from image_project.impl.current import prompting as prompt_impl
@@ -154,13 +222,17 @@ def generate_shared_concepts_by_run(
     concepts_by_run: list[tuple[str, ...]] = []
     used: set[tuple[str, ...]] = set()
 
+    # Profile v5 experiment uses a small number of injected random concepts per run index (shared across sets).
+    # Keep it lower than the default 3-concept selection to reduce prompt constraint.
+    max_random_concepts = 2
+
     for idx in range(runs_per_set):
         attempt = 0
         while True:
             concept_seed = int(base_seed) + idx + attempt * 1_000
             rng = random.Random(concept_seed)
             sampled = prompt_impl.select_random_concepts(prompt_data, rng)
-            sampled_clean = _normalize_string_list(sampled)
+            sampled_clean = _normalize_string_list(sampled)[:max_random_concepts]
 
             combined = _dedupe_preserve_order([*pinned, *sampled_clean])
             if combined and combined not in used:
@@ -439,14 +511,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--profile-like-dislike-path",
         type=str,
-        default="./image_project/impl/current/data/sample/user_profile_v5_like_dislike.csv",
-        help="CSV path for the v5 like/dislike profile format (A set).",
+        default=None,
+        help=(
+            "CSV path for the v5 like/dislike profile format (A set). "
+            "If omitted, uses `experiment_runners.profile_v5_3x3.profile_like_dislike_path` from the loaded config."
+        ),
     )
     parser.add_argument(
         "--profile-love-like-dislike-hate-path",
         type=str,
-        default="./image_project/impl/current/data/sample/user_profile_v5_love_like_dislike_hate.csv",
-        help="CSV path for the v5 love/like/dislike/hate profile format (B/C sets).",
+        default=None,
+        help=(
+            "CSV path for the v5 love/like/dislike/hate profile format (B/C sets). "
+            "If omitted, uses `experiment_runners.profile_v5_3x3.profile_love_like_dislike_hate_path` from the loaded config."
+        ),
     )
     parser.add_argument(
         "--generator-profile-hints-path",
@@ -454,7 +532,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         default=None,
         help=(
             "Optional path to a generator-safe profile hints file (e.g. v5 abstraction CSV). "
-            "When set, A/B load hints from this file instead of generating them."
+            "If omitted, uses `experiment_runners.profile_v5_3x3.generator_profile_hints_path` when present; otherwise hints are generated."
         ),
     )
     parser.add_argument(
@@ -483,8 +561,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     enabled_sets = _parse_sets(args.sets)
 
     if not args.dry_run and args.mode != "full":
-        raise SystemExit(
-            "This experiment runner is intended to generate images; use --mode full (or --dry-run)."
+        print(
+            "WARNING: --mode prompt_only skips image generation (useful for debugging / cheaper runs).",
+            file=sys.stderr,
         )
 
     output_root = args.output_root or _default_output_root()
@@ -494,7 +573,33 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     pinned_concepts = _normalize_string_list(args.concept or [])
 
-    base_cfg, cfg_meta = load_config(config_path=args.config_path)
+    raw_cfg, cfg_meta = load_config(config_path=args.config_path)
+    _discover_context_plugins()
+
+    runner_cfg = _get_runner_cfg(raw_cfg, runner_id="profile_v5_3x3")
+
+    profile_like_dislike_path = _resolve_required_path(
+        cli_value=args.profile_like_dislike_path,
+        runner_cfg=runner_cfg,
+        runner_key="profile_like_dislike_path",
+        cli_flag="--profile-like-dislike-path",
+        label="v5 like/dislike profile CSV (set A)",
+    )
+    profile_love_like_dislike_hate_path = _resolve_required_path(
+        cli_value=args.profile_love_like_dislike_hate_path,
+        runner_cfg=runner_cfg,
+        runner_key="profile_love_like_dislike_hate_path",
+        cli_flag="--profile-love-like-dislike-hate-path",
+        label="v5 love/like/dislike/hate profile CSV (sets B/C)",
+    )
+    generator_profile_hints_path = _resolve_optional_path(
+        cli_value=args.generator_profile_hints_path,
+        runner_cfg=runner_cfg,
+        runner_key="generator_profile_hints_path",
+    )
+
+    base_cfg = dict(raw_cfg)
+    base_cfg.pop("experiment_runners", None)
 
     concept_seeds_by_run, concepts_by_run = generate_shared_concepts_by_run(
         base_cfg=base_cfg,
@@ -515,9 +620,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         concepts_by_run=concepts_by_run,
         enable_upscale=bool(args.enable_upscale),
         enable_upload=bool(args.enable_upload),
-        profile_like_dislike_path=str(args.profile_like_dislike_path),
-        profile_love_like_dislike_hate_path=str(args.profile_love_like_dislike_hate_path),
-        generator_profile_hints_path=(str(args.generator_profile_hints_path) if args.generator_profile_hints_path else None),
+        profile_like_dislike_path=profile_like_dislike_path,
+        profile_love_like_dislike_hate_path=profile_love_like_dislike_hate_path,
+        generator_profile_hints_path=generator_profile_hints_path,
     )
 
     os.makedirs(output_root, exist_ok=True)
@@ -553,11 +658,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             for idx in range(len(concepts_by_run))
         ],
         "profiles": {
-            "like_dislike": str(args.profile_like_dislike_path),
-            "love_like_dislike_hate": str(args.profile_love_like_dislike_hate_path),
-            "generator_profile_hints_path": str(args.generator_profile_hints_path)
-            if args.generator_profile_hints_path
-            else None,
+            "like_dislike": profile_like_dislike_path,
+            "love_like_dislike_hate": profile_love_like_dislike_hate_path,
+            "generator_profile_hints_path": generator_profile_hints_path,
         },
         "enable_upscale": bool(args.enable_upscale),
         "enable_upload": bool(args.enable_upload),

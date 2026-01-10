@@ -161,11 +161,15 @@ def test_direct_plan_creates_final_prompt_in_one_stage(tmp_path, monkeypatch):
         "preprompt.select_concepts",
         "preprompt.filter_concepts",
         "direct.image_prompt_creation",
+        "postprompt.profile_nudge",
+        "postprompt.openai_format",
     ]
-    assert transcript["outputs"]["prompt_pipeline"]["capture_stage"] == "direct.image_prompt_creation"
+    assert transcript["outputs"]["prompt_pipeline"]["capture_stage"] == "postprompt.openai_format"
 
     recorded_step_paths = [step.get("path") for step in transcript.get("steps", [])]
     assert "pipeline/direct.image_prompt_creation/draft" in recorded_step_paths
+    assert "pipeline/postprompt.profile_nudge/draft" in recorded_step_paths
+    assert "pipeline/postprompt.openai_format/draft" in recorded_step_paths
 
 
 def test_profile_only_forces_context_injection_off(tmp_path, monkeypatch):

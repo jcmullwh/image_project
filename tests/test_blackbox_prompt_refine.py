@@ -7,7 +7,11 @@ import pytest
 
 from image_project.app import generate as app_generate
 from image_project.foundation.messages import MessageHandler
-from image_project.framework.blackbox_refine_loop import _aggregate_scores, build_blackbox_refine_loop_specs
+from image_project.framework.blackbox_refine_loop import (
+    _aggregate_scores,
+    _resolve_blackbox_profile_text,
+    build_blackbox_refine_loop_specs,
+)
 from image_project.framework.config import PromptBlackboxRefineJudgeConfig, RunConfig
 from image_project.framework.prompting import PlanInputs
 from image_project.framework.runtime import RunContext
@@ -176,6 +180,52 @@ def test_judge_aggregation_methods():
         method="max",
         trimmed_mean_drop=0,
     ) == {"A": 100.0, "B": 100.0}
+
+
+def test_blackbox_refine_profile_text_passthrough(tmp_path):
+    (tmp_path / "logs").mkdir()
+    (tmp_path / "categories.csv").write_text(
+        "Subject Matter,Narrative,Mood,Composition,Perspective,Style,Time Period_Context,Color Scheme\n"
+        "Cat,Quest,Moody,Wide,Top-down,Baroque,Renaissance,Vibrant\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "profile.csv").write_text("Likes,Dislikes\ncolorful,boring\n", encoding="utf-8")
+
+    cfg_dict = _base_cfg_dict(tmp_path)
+    cfg, _warnings = RunConfig.from_dict(cfg_dict)
+
+    ctx = RunContext(
+        generation_id="unit_test",
+        cfg=cfg,
+        logger=_make_logger("test.bbref.profile"),
+        rng=random.Random(0),
+        seed=123,
+        created_at="2025-01-01T00:00:00Z",
+        messages=MessageHandler("system"),
+        selected_concepts=["X"],
+    )
+    ctx.outputs["preferences_guidance"] = "Likes:\n- cozy\n\nDislikes:\n- Anatomy or AI artifacts — Wrong hands"
+    ctx.outputs["generator_profile_hints"] = "Avoid ambiguity; keep it cozy."
+    ctx.outputs["dislikes"] = ["Anatomy or AI artifacts — Wrong hands odd legs stray limbs"]
+
+    raw_profile = _resolve_blackbox_profile_text(
+        ctx,
+        source="raw",
+        stage_id="test",
+        config_path="prompt.scoring.judge_profile_source",
+    )
+    assert raw_profile == ctx.outputs["preferences_guidance"].strip()
+    assert "Derived avoid constraints:" not in raw_profile
+
+    hints_profile = _resolve_blackbox_profile_text(
+        ctx,
+        source="generator_hints_plus_dislikes",
+        stage_id="test",
+        config_path="prompt.scoring.judge_profile_source",
+    )
+    assert "Profile extraction (generator-safe hints):" in hints_profile
+    assert "Dislikes:" in hints_profile
+    assert "Derived avoid constraints:" not in hints_profile
 
 
 def test_novelty_penalty_applied_in_selection(tmp_path):
@@ -407,6 +457,10 @@ def test_blackbox_refine_only_end_to_end_prompt_only(tmp_path, monkeypatch):
                 out = generation_outputs[self._gen_idx]
                 self._gen_idx += 1
                 return out
+            if "Make a subtle, non-obvious nudge" in last_user:
+                return "PROMPT_B2_NUDGED"
+            if "Refine the following draft into a high-quality GPT Image 1.5 prompt." in last_user:
+                return "PROMPT_B2_OPENAI"
             return "resp"
 
     fake_text = FakeTextAI()
@@ -416,11 +470,12 @@ def test_blackbox_refine_only_end_to_end_prompt_only(tmp_path, monkeypatch):
 
     transcript_path = logs_dir / f"{generation_id}_transcript.json"
     transcript = json.loads(transcript_path.read_text(encoding="utf-8"))
-    assert transcript["final_image_prompt"] == "PROMPT_B2"
+    assert transcript["final_image_prompt"] == "PROMPT_B2_OPENAI"
     assert transcript["blackbox_scoring"]["prompt_refine"]["seed_prompt"] == "DRAFT_SEED"
+    assert transcript["blackbox_scoring"]["prompt_refine"]["final_prompt"] == "PROMPT_B2"
     assert len(transcript["blackbox_scoring"]["prompt_refine"]["iterations"]) == 2
     assert transcript["outputs"]["prompt_pipeline"]["plan"] == "blackbox_refine_only"
-    assert transcript["outputs"]["prompt_pipeline"]["capture_stage"] == "blackbox_refine.finalize"
+    assert transcript["outputs"]["prompt_pipeline"]["capture_stage"] == "postprompt.openai_format"
 
     generation_calls = [
         call
@@ -545,6 +600,10 @@ def test_blackbox_refine_seed_from_blackbox(tmp_path, monkeypatch):
             if "Generate one improved image prompt variant" in last_user:
                 self.calls += 1
                 return "REFINED_B" if self.calls == 2 else "REFINED_A"
+            if "Make a subtle, non-obvious nudge" in last_user:
+                return "REFINED_B_NUDGED"
+            if "Refine the following draft into a high-quality GPT Image 1.5 prompt." in last_user:
+                return "REFINED_B_OPENAI"
             return "resp"
 
     monkeypatch.setattr(app_generate, "TextAI", FakeTextAI)
@@ -556,7 +615,8 @@ def test_blackbox_refine_seed_from_blackbox(tmp_path, monkeypatch):
 
     transcript_path = logs_dir / f"{generation_id}_transcript.json"
     transcript = json.loads(transcript_path.read_text(encoding="utf-8"))
-    assert transcript["final_image_prompt"] == "REFINED_B"
+    assert transcript["final_image_prompt"] == "REFINED_B_OPENAI"
     assert transcript["blackbox_scoring"]["prompt_refine"]["seed_prompt"] == "SEED_FROM_BLACKBOX"
+    assert transcript["blackbox_scoring"]["prompt_refine"]["final_prompt"] == "REFINED_B"
     assert transcript["outputs"]["prompt_pipeline"]["plan"] == "blackbox_refine"
-    assert transcript["outputs"]["prompt_pipeline"]["capture_stage"] == "blackbox_refine.finalize"
+    assert transcript["outputs"]["prompt_pipeline"]["capture_stage"] == "postprompt.openai_format"

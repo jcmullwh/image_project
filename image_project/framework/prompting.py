@@ -338,7 +338,9 @@ def resolve_stage_specs(
         chosen_capture_stage = capture
     else:
         # Default capture: plan default if present, otherwise last resolved stage.
-        plan_default = next((spec.stage_id for spec in stage_specs if spec.is_default_capture), None)
+        plan_default_candidates = [spec.stage_id for spec in stage_specs if spec.is_default_capture]
+        # If multiple stages mark themselves as default capture, prefer the last one in the plan definition.
+        plan_default = plan_default_candidates[-1] if plan_default_candidates else None
         chosen_capture_stage = (
             plan_default if plan_default in {spec.stage_id for spec in resolved} else resolved[-1].stage_id
         )

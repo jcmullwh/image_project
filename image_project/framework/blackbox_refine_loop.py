@@ -332,10 +332,13 @@ def _judge_stage(
                 {
                     "id": cand.candidate_id,
                     "prompt": text,
-                    "parent_beam": cand.parent_beam_index,
-                    "kind": cand.kind,
                 }
             )
+
+        # Mitigate positional/label bias by shuffling candidate order deterministically.
+        shuffle_material = f"{int(ctx.seed)}|{int(iteration)}|{judge.id}".encode("utf-8")
+        shuffle_seed = int.from_bytes(hashlib.sha256(shuffle_material).digest()[:8], "big")
+        random.Random(shuffle_seed).shuffle(candidate_rows)
 
         raw_profile = _resolve_blackbox_profile_text(
             ctx,
@@ -502,14 +505,14 @@ def _select_stage(
         scored: list[dict[str, Any]] = []
         for cid in expected_ids:
             raw_score = float(aggregate.get(cid, 0.0))
-            penalty = int(penalty_by_id.get(cid, 0))
-            effective = max(0.0, raw_score - float(penalty))
+            novelty_penalty = int(penalty_by_id.get(cid, 0))
+            effective = max(0.0, raw_score - float(novelty_penalty))
             cand = candidate_by_id.get(cid)
             scored.append(
                 {
                     "id": cid,
                     "score": raw_score,
-                    "novelty_penalty": penalty,
+                    "novelty_penalty": novelty_penalty,
                     "novelty_detail": novelty_breakdown_by_id.get(cid),
                     "effective_score": effective,
                     "prompt_chars": len(candidate_prompts.get(cid, "")),
@@ -840,7 +843,8 @@ def _resolve_blackbox_profile_text(
     config_path: str,
 ) -> str:
     if source == "raw":
-        return str(ctx.outputs.get("preferences_guidance") or "")
+        raw_profile = str(ctx.outputs.get("preferences_guidance") or "").strip()
+        return raw_profile
     if source == "generator_hints":
         hints = ctx.outputs.get("generator_profile_hints")
         if not isinstance(hints, str) or not hints.strip():
@@ -866,6 +870,7 @@ def _resolve_blackbox_profile_text(
             )
 
         dislikes_block = "\n".join(f"- {item}" for item in dislikes) if dislikes else "- <none>"
+
         return (
             "Profile extraction (generator-safe hints):\n"
             + hints.strip()
@@ -1028,6 +1033,11 @@ def _select_candidates(
         return scored[:k]
 
     pool_size = max(k, int(math.ceil(len(scored) / 4)))
+    # Ensure exploration has a chance to pick something other than the top candidate
+    # when k < len(scored).
+    if len(scored) > k:
+        pool_size = max(pool_size, k + 1)
+    pool_size = min(pool_size, len(scored))
     pool = list(scored[:pool_size])
 
     if cfg.algorithm == "beam" and cfg.selection.group_by_beam:

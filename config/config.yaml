@@ -69,13 +69,26 @@ prompt:
     mutation_directives:
       mode: random  # none|random|cycle|fixed
       directives:
-        - "Reinterpret spatial structure or scale in a meaningful way (e.g., intimacy vs monumentality, focused vs expansive) while preserving subject identity."
-        - "Reframe the setting or context (environment, time, or situational backdrop) in a compatible way that supports the same underlying idea."
-        - "Vary the emotional or atmospheric register of the scene (e.g., calm vs tense, playful vs solemn) without changing the core scenario."
-        - "Alter the visual language used to express the idea (e.g., literal vs suggestive, sparse vs dense, clean vs textured) while keeping intent intact."
-        - "Rework the color or tonal strategy where applicable (e.g., warm vs cool, high-key vs low-key, monochrome vs restrained color) without assuming escalation."
-        - "Apply an alternative realization of the same concept that is meaningfully different but still clearly the same idea and consistent with prior constraints."
-        - "Create a significant variation of this prompt while retaining the core concepts."
+      - "Change composition and framing (distance, angle, crop, negative space, foreground/background layering) while preserving the core subject(s) and intent."
+      - "Change the viewer’s viewpoint or vantage (eye-level vs elevated, close vs far, inside vs outside) while keeping the same underlying scene identity."
+      - "Change the spatial organization (symmetry/asymmetry, centered/off-center, clustered/distributed) without changing the cast of main elements."
+      - "Change scale relationships (intimate vs monumental, macro vs wide) while keeping the same core concept and primary subjects."
+      - "Change the setting/context (location type, era, weather/season, situational backdrop) in a compatible way that supports the same idea."
+      - "Change time-of-day and lighting design (source direction, softness, shadow language, contrast) while keeping the same narrative premise."
+      - "Change motion/energy (still vs dynamic, implied motion vs frozen moment) without introducing a different scenario."
+      - "Change the emotional/atmospheric register (serene, ominous, playful, austere, etc.) while keeping the same core story."
+      - "Change visual density and complexity (minimal vs ornate, sparse vs layered) while preserving the key motifs and readability."
+      - "Change material/texture language (smooth/rough, organic/mechanical, polished/weathered) while keeping objects and roles consistent."
+      - "Change color strategy (temperature, saturation, limited palette vs broad palette, harmony approach) while keeping content stable."
+      - "Change tonal strategy (high-key/low-key, soft vs punchy contrast, muted vs vivid) without changing what the scene *is*."
+      - "Change realism/stylization level (naturalistic vs stylized, simplified vs highly rendered) while preserving semantic content."
+      - "Change the medium/genre of depiction (photo-like, illustration, painting-like, collage-like, 3D-render-like) while keeping the same intent."
+      - "Change lens/camera semantics (wide vs tele feel, depth-of-field behavior, perspective distortion) while keeping the same subject identity."
+      - "Change focus hierarchy (what is emphasized vs deemphasized) while keeping the same elements present and consistent."
+      - "Swap secondary details for role-equivalent alternatives (props, background cues, micro-details) without changing the primary concept."
+      - "Introduce a constraint-driven transformation (e.g., enforce strong geometry, enforce soft organic forms, enforce strict minimalism) while keeping the same idea."
+      - "Express the same concept via an alternative but equivalent visual metaphor, without adding new plot points or changing the core subject."
+      - "Produce a meaningfully different realization that a human would still judge as 'the same prompt' given the core constraints."
       per_axis:
         enabled: false
         axes: []
@@ -87,6 +100,16 @@ prompt:
           temperature: null
           weight: 1.0
           rubric: default
+        - id: j2
+          model: null
+          temperature: null
+          weight: 1.0
+          rubric: strict
+        - id: j3
+          model: null
+          temperature: null
+          weight: 1.0
+          rubric: novelty_heavy
       aggregation: mean  # mean|median|min|max|trimmed_mean
       trimmed_mean_drop: 0
 
@@ -126,3 +149,10 @@ upscale:
   tile_size: 0
   tta: false
   allow_fallback_resize: false
+
+# Tool/runner-specific configuration (not consumed by the main pipeline config parser).
+experiment_runners:
+  profile_v5_3x3:
+    profile_like_dislike_path: "M:/My Drive/image_project/data/user_profile_v5_like_dislike.csv"
+    profile_love_like_dislike_hate_path: "M:/My Drive/image_project/data/user_profile_v5_love_like_dislike_hate.csv"
+    generator_profile_hints_path: "M:/My Drive/image_project/data/user_profile_v5_abstraction.csv"

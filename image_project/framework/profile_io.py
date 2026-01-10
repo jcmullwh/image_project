@@ -53,8 +53,18 @@ def normalize_user_profile_df(df: pd.DataFrame) -> pd.DataFrame:
     columns = [str(col).strip() for col in df.columns]
     column_map = {col.lower(): col for col in columns}
 
-    if "category" in column_map and "item" in column_map:
-        return _normalize_row_based_profile(df, column_map=column_map)
+    if "item" in column_map:
+        if "category" in column_map:
+            return _normalize_row_based_profile(df, column_map=column_map)
+
+        # v5 profiles may label the strength/category column differently.
+        # Support: strength,item,(conditionals|notes)
+        if "strength" in column_map:
+            mapped = dict(column_map)
+            mapped["category"] = column_map["strength"]
+            if "notes" not in mapped and "conditionals" in mapped:
+                mapped["notes"] = column_map["conditionals"]
+            return _normalize_row_based_profile(df, column_map=mapped)
 
     return _normalize_column_based_profile(df)
 
