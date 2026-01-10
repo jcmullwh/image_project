@@ -156,6 +156,7 @@ config/config.local.yaml
 
 # Repo-local artifacts (logs, generated images, etc.)
 _artifacts/
+_artifacts\
 
 # Private/local implementation data (do not commit)
 image_project/impl/**/data/local/
