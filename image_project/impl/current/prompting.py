@@ -15,7 +15,7 @@ DEFAULT_SYSTEM_PROMPT = (
     "You are a highly skilled enclave of Artists trained to generate meaningful, edgy, artistic images on par "
     "with the greatest artists of any time, anywhere, past or future, Earth or any other planet. The enclave "
     "invents unique images that weave together seemingly disparate elements into cohesive wholes that push "
-    "boundaries and elicit deep emotions in a human viewer. Keep your responses concise and focused on the task at hand."
+    "boundaries. Keep your responses concise and focused on the task at hand."
 )
 
 CONCEPT_GROUPS: tuple[tuple[str, ...], ...] = (
@@ -199,7 +199,7 @@ Use Action and Emotion Words: When describing scenes or elements, use verbs and 
 def generate_image_prompt():
     image_prompt = textwrap.dedent(
         """\
-        You are writing the *image prompt text* for GPT Image 1.5. Output ONLY the prompt (no analysis, no YAML/JSON unless asked). Use short labeled sections with line breaks; omit any section that doesnâ€™t apply (do not force a â€œsubjectâ€ if the request is abstract or pattern-based). Follow the guidance but do not over-fit if it clashes with your specific image.
+        You are writing the *image prompt text* for GPT Image 1.5. Output ONLY the prompt (no analysis, no YAML/JSON unless asked). Use short labeled sections with line breaks; omit any section that doesn’t apply (do not force a “subject” if the request is abstract or pattern-based). Follow the guidance but do not over-fit if it clashes with your specific image.
 
         Your output MUST be fewer than 3500 characters.
 
@@ -207,7 +207,7 @@ def generate_image_prompt():
 
         1. DELIVERABLE / INTENT
 
-        * What kind of image this is (e.g., â€œeditorial photoâ€, â€œabstract paintingâ€, â€œUI mockupâ€, â€œinfographicâ€, â€œlogoâ€) and what it should feel like (1 sentence).
+        * What kind of image this is (e.g., "editorial photo", "abstract painting", "UI mockup", "infographic", "logo") and what it should feel like (1 sentence).
 
         2. CONTENT (works for representational or abstract)
 
@@ -221,18 +221,18 @@ def generate_image_prompt():
         4. STYLE / MEDIUM
 
         * Specify the medium (photo, watercolor, vector, 3D render, ink, collage, generative pattern).
-        * Add 2â€“5 concrete style cues tied to visuals (materials, texture, line quality, grain).
+        * Add 2–5 concrete style cues tied to visuals (materials, texture, line quality, grain).
 
         5. COMPOSITION / GEOMETRY
 
         * Framing/viewpoint (close-up/wide/top-down), perspective/angle, and lighting/mood when relevant.
-        * If layout matters, specify placement explicitly (â€œcenteredâ€, â€œnegative space leftâ€, â€œtext top-rightâ€, â€œbalanced marginsâ€, â€œgrid with 3 columnsâ€).
+        * If layout matters, specify placement explicitly (“centered”, “negative space left”, “text top-right”, “balanced margins”, “grid with 3 columns”).
 
         6. CONSTRAINTS (be explicit and minimal)
 
         * MUST INCLUDE: short bullets for non-negotiables.
         * MUST PRESERVE: identity/geometry/layout/brand elements that cannot change (if relevant).
-        * MUST NOT INCLUDE: short bullets for exclusions (e.g., â€œno watermarkâ€, â€œno extra textâ€, â€œno logos/trademarksâ€).
+        * MUST NOT INCLUDE: short bullets for exclusions (e.g., “no watermark”, “no extra text”, “no logos/trademarks”).
 
         7. TEXT IN IMAGE (only if required)
 
@@ -242,14 +242,14 @@ def generate_image_prompt():
 
         8. MULTI-IMAGE REFERENCES (only if applicable)
 
-        * â€œImage 1: â€¦â€, â€œImage 2: â€¦â€ describing what each input is.
-        * State precisely how they interact (â€œapply Image 2â€™s style to Image 1â€; â€œplace the object from Image 1 into Image 2 at â€¦â€; â€œmatch lighting/perspective/scaleâ€).
+        * “Image 1: …”, “Image 2: …” describing what each input is.
+        * State precisely how they interact (“apply Image 2’s style to Image 1”; “place the object from Image 1 into Image 2 at …”; “match lighting/perspective/scale”).
 
         General rules:
 
-        * Prefer concrete nouns + measurable adjectives (â€œmatte ceramicâ€, â€œsoft diffuse lightâ€, â€œthin ink lineâ€) over vague hype (â€œstunningâ€, â€œmasterpieceâ€).
+        * Prefer concrete nouns + measurable adjectives (matte ceramic, soft diffuse light, thin ink line) over vague hype (stunning, masterpiece).
         * Avoid long grab-bags of synonyms. One requirement per line; no contradictions.
-        * If you need â€œclean/minimal,â€ specify what that means visually (few elements, large negative space, limited palette, simple shapes).
+        * If you need “clean/minimal,” specify what that means visually (few elements, large negative space, limited palette, simple shapes).
         """
     ).strip()
     return image_prompt
@@ -345,7 +345,7 @@ def profile_nudge_image_prompt_prompt(
         - A raw user profile describing preferences (likes/dislikes/loves/hates).
 
         Task:
-        Make a subtle, non-obvious nudge to the draft prompt so it better matches the user's tastes.
+        Make a subtle, nudge to the draft prompt so it better matches the user's tastes where possible.
 
         Hard rules:
         - Preserve the core intent, subject, setting, and key composition. No major changes.
@@ -354,7 +354,7 @@ def profile_nudge_image_prompt_prompt(
         - Do not add preference items verbatim and do not copy profile phrases verbatim.
         - Do not make changes that feel shoe-horned; edits must feel native to the existing prompt.
         - Respect avoid constraints implied by dislikes/hates without listing them explicitly.
-        - Prefer subtle nudges via palette, lighting, composition, medium/technique, texture, and mood (not by adding new subjects).
+        - Do not "fix" a dislike by adding the disliked thing with positive modifiers (e.g., dislike "wrong/incorrect X" does NOT mean adding "correct X" improves the prompt).
         {limit_line}- Output ONLY the revised prompt. No commentary, no quotes, no markdown.
 
         User profile (for guidance only; do not copy phrases verbatim):
@@ -622,15 +622,52 @@ def openai_image_prompt_from_selected_idea_prompt(
         - Do NOT "fix" a dislike by adding the disliked thing with positive modifiers (e.g., dislike "wrong/incorrect X" does NOT mean adding "correct X" improves the prompt).
 
         Use this rough order (rename freely if it reads better):
-        1) DELIVERABLE / INTENT
-        2) CONTENT
-        3) CONTEXT / WORLD (optional)
-        4) STYLE / MEDIUM
-        5) COMPOSITION / GEOMETRY
-        6) CONSTRAINTS
-           - MUST INCLUDE:
-           - MUST NOT INCLUDE:
-        7) TEXT IN IMAGE (only if required)
+        
+        1. DELIVERABLE / INTENT
+
+        * What kind of image this is (e.g., “editorial photo”, “abstract painting”, “UI mockup”, “infographic”, “logo”) and what it should feel like (1 sentence).
+
+        2. CONTENT (works for representational or abstract)
+
+        * If representational: the main entities + actions/poses + key attributes.
+        * If abstract/non-representational: the primary forms/motifs (geometry, strokes, textures), relationships (layering, symmetry, repetition, flow), and whether there is *no* recognizable subject matter.
+
+        3. CONTEXT / WORLD (optional)
+
+        * Setting, time, atmosphere, environment rules; or for abstract work: canvas/material, spatial depth, background treatment.
+
+        4. STYLE / MEDIUM
+
+        * Specify the medium (photo, watercolor, vector, 3D render, ink, collage, generative pattern).
+        * Add 2–5 concrete style cues tied to visuals (materials, texture, line quality, grain).
+
+        5. COMPOSITION / GEOMETRY
+
+        * Framing/viewpoint (close-up/wide/top-down), perspective/angle, and lighting/mood when relevant.
+        * If layout matters, specify placement explicitly (“centered”, “negative space left”, “text top-right”, “balanced margins”, “grid with 3 columns”).
+
+        6. CONSTRAINTS (be explicit and minimal)
+
+        * MUST INCLUDE: short bullets for non-negotiables.
+        * MUST PRESERVE: identity/geometry/layout/brand elements that cannot change (if relevant).
+        * MUST NOT INCLUDE: short bullets for exclusions (e.g., “no watermark”, “no extra text”, “no logos/trademarks”).
+
+        7. TEXT IN IMAGE (only if required)
+
+        * Put exact copy in quotes or ALL CAPS.
+        * Specify typography constraints (font style, weight, color, size, placement) and demand verbatim rendering with no extra characters.
+        * For tricky spellings/brand names: optionally spell the word letter-by-letter.
+
+        8. MULTI-IMAGE REFERENCES (only if applicable)
+
+        * “Image 1: …”, “Image 2: …” describing what each input is.
+        * State precisely how they interact (“apply Image 2’s style to Image 1”; “place the object from Image 1 into Image 2 at …”; “match lighting/perspective/scale”).
+
+        General rules:
+
+        * Prefer concrete nouns + measurable adjectives (“matte ceramic”, “soft diffuse light”, “thin ink line”) over vague hype (“stunning”, “masterpiece”).
+        * Avoid long grab-bags of synonyms. One requirement per line; no contradictions.
+        * If you need “clean/minimal,” specify what that means visually (few elements, large negative space, limited palette, simple shapes).
 
         Selected concepts (must be integrated thoughtfully):
         {concepts_block}
