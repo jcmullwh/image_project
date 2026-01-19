@@ -3,19 +3,19 @@ run:
 
 # Prompt-only mode needs only a logs directory; image output paths are optional.
 image:
-  log_path: "M:/My Drive/image_project/logs"
-  generation_path: "M:/My Drive/image_project/generated"  # required for run.mode=full
-  upscale_path: "M:/My Drive/image_project/upscaled"      # required when upscale.enabled=true
+  log_path: "_artifacts/logs"
+  generation_path: "_artifacts/generated"  # required for run.mode=full
+  upscale_path: "_artifacts/upscaled"      # required when upscale.enabled=true
 
 run-review:
   enabled: true
-  review_path: "M:/My Drive/image_project/reviews"
-
+  review_path: "_artifacts/reviews"
+  
 prompt:
-  categories_path: "M:/My Drive/image_project/data/category_list_v1.csv"
-  profile_path: "M:/My Drive/image_project/data/user_profile_v4.csv"
-  generations_path: "M:/My Drive/image_project/logs/generations_v2.csv"  # required for run.mode=full
-  titles_manifest_path: "M:/My Drive/image_project/generated/titles_manifest.csv"
+  categories_path: "_artifacts/data/category_list_v1.csv"
+  profile_path: "_artifacts/data/user_profile_v4.csv"
+  generations_path: "_artifacts/logs/generations_v2.csv"  # required for run.mode=full
+  titles_manifest_path: "_artifacts/generated/titles_manifest.csv"
 
   # Prompt Plans + Stage Modifiers (config-driven experimentation)
   # See docs/experiments.md for examples and available plans (including plan_plugins/*).
