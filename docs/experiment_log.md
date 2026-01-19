@@ -18,9 +18,9 @@ This file summarizes experiments that have been planned and/or executed in this 
 - **Runner:** `tools/run_experiment_3x3.py`
 - **Goal:** Replace the old `standard` baseline with a materially different blackbox configuration and remove ToT refinement everywhere; isolate whether profile routing (`raw` vs `generator_hints`) changes blackbox outputs.
 - **Distinct differences (variants):**
-  - **A**: `prompt.plan=blackbox`, scoring on, `prompt.scoring.{judge,final}_profile_source=generator_hints`, `prompt.refinement.policy=none`
-  - **B**: `prompt.plan=blackbox`, scoring on, `prompt.scoring.{judge,final}_profile_source=raw`, `prompt.refinement.policy=none`
-  - **C**: `prompt.plan=simple_no_concepts`, scoring off, `prompt.refinement.policy=none` (concept selection is ignored by this plan)
+  - **A**: `prompt.plan=blackbox`, scoring on, `prompt.scoring.{judge,final}_profile_source=generator_hints`, `prompt.stages.exclude=["refine.tot_enclave"]`
+  - **B**: `prompt.plan=blackbox`, scoring on, `prompt.scoring.{judge,final}_profile_source=raw`, `prompt.stages.exclude=["refine.tot_enclave"]`
+  - **C**: `prompt.plan=simple_no_concepts`, scoring off, `prompt.stages.exclude=["refine.tot_enclave"]` (concept selection is ignored by this plan)
 - **Status:** dry-run only (no `experiment_results.json`).
 
 ### 2025-12-26/25: A/B refinement-block (prompt-only) smoke runs
@@ -30,7 +30,7 @@ This file summarizes experiments that have been planned and/or executed in this 
 - **Distinct differences (variants):**
   - **A** (`no_refinement_block`): middle stage is `ab.scene_refine_no_block`
   - **B** (`with_refinement_block`): middle stage is `ab.scene_refine_with_block`
-  - Everything else is held constant (same token generation, same draft stage, same final formatting stage, `prompt.refinement.policy=none`, `prompt.plan=custom`, `run.mode=prompt_only`, `context.enabled=false`, scoring off).
+  - Everything else is held constant (same token generation, same draft stage, same final formatting stage, `prompt.stages.exclude=["refine.tot_enclave"]`, `prompt.plan=custom`, `run.mode=prompt_only`, `context.enabled=false`, scoring off).
 - **Runs executed (all 2/2 success):**
   - `_artifacts/experiments/_smoke_ab_run/` - `exp_ab_refinement_block_20251225_191749`
   - `_artifacts/experiments/_smoke_ab_run2/` - `exp_ab_refinement_block_20251225_191816`
@@ -46,7 +46,7 @@ This file summarizes experiments that have been planned and/or executed in this 
 - **Distinct differences (variants):**
   - **A** (`prose_refine`): `ab.scene_refine_with_block` -> `ab.final_prompt_format` (captures `ab.final_prompt_format`)
   - **B** (`scenespec_json`): `ab.scene_spec_json` -> `ab.final_prompt_format_from_scenespec` (captures `ab.final_prompt_format_from_scenespec`)
-  - Common: starts with `ab.random_token` -> `ab.scene_draft`, `prompt.plan=custom`, `prompt.refinement.policy=none`, scoring off, `run.mode=prompt_only`, `context.enabled=false`.
+  - Common: starts with `ab.random_token` -> `ab.scene_draft`, `prompt.plan=custom`, `prompt.stages.exclude=["refine.tot_enclave"]`, scoring off, `run.mode=prompt_only`, `context.enabled=false`.
 - **Status:** no artifacts currently found under `_artifacts/experiments/*_ab_scenespec_json_intermediary/` (they may have been deleted/cleaned).
 
 ### 2025-12-25: 3x3 (full image runs) - baseline vs blackbox vs simple_no_concepts
@@ -59,9 +59,9 @@ These runs predate the current `tools/run_experiment_3x3.py` variant definitions
 - **Runner:** `tools/run_experiment_3x3.py`
 - **Goal:** Compare three prompt pipeline variants against the same fixed concepts and seeds to assess impact on final prompt quality and resulting images.
 - **Distinct differences (variants):**
-  - **A**: `prompt.plan=standard`, scoring off, `prompt.refinement.policy=tot`
-  - **B**: `prompt.plan=blackbox`, scoring on (`num_ideas=8`), `prompt.refinement.policy=tot`
-  - **C**: `prompt.plan=simple_no_concepts`, scoring off, `prompt.refinement.policy=none` (skips concept selection/filtering)
+  - **A**: `prompt.plan=standard`, scoring off, ToT refinement enabled (`refine.tot_enclave`)
+  - **B**: `prompt.plan=blackbox`, scoring on (`num_ideas=8`), ToT refinement enabled (legacy behavior)
+  - **C**: `prompt.plan=simple_no_concepts`, scoring off, ToT refinement disabled (no `refine.tot_enclave` stage)
 - **Shared concepts (fixed):** bioluminescent koi pond; secret romance; optimistic serenity; minimalist courtyard installation; three-quarter angle; stylized digital illustration; winter golden hour; neon complementary palette
 - **Result:** 9/9 success (see `_artifacts/experiments/20251225_103121_3x3/experiment_results.json`).
 

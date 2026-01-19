@@ -13,13 +13,14 @@ import pytest
 from PIL import Image
 
 from image_project.app import generate as app_generate
-from image_project.impl.current import prompting as prompts
-from image_project.foundation.messages import MessageHandler
-from image_project.foundation.pipeline import ChatRunner, ChatStep
+from image_project.prompts import standard as standard_prompts
+from image_project.prompts.preprompt import select_random_concepts
+from pipelinekit.engine.messages import MessageHandler
+from pipelinekit.engine.pipeline import ChatRunner, ChatStep
 from image_project.framework.artifacts import append_generation_row
 from image_project.framework.config import RunConfig
 from image_project.framework.runtime import RunContext
-from image_project.framework.transcript import write_transcript
+from image_project.framework.artifacts import write_transcript
 
 
 def test_config_validation_missing_prompt_categories_path_raises():
@@ -225,8 +226,8 @@ def test_seeded_randomness_is_deterministic_for_selected_concepts():
     rng1 = random.Random(123)
     rng2 = random.Random(123)
 
-    selected1 = prompts.select_random_concepts(categories, rng1)
-    selected2 = prompts.select_random_concepts(categories, rng2)
+    selected1 = select_random_concepts(categories, rng1)
+    selected2 = select_random_concepts(categories, rng2)
 
     assert selected1 == selected2
 
@@ -622,7 +623,7 @@ def test_integration_offline_run_generation_writes_artifacts(tmp_path, monkeypat
 
     monkeypatch.setattr(app_generate, "TextAI", FakeTextAI)
     monkeypatch.setattr(app_generate, "ImageAI", FakeImageAI)
-    monkeypatch.setattr(prompts, "generate_image_prompt", lambda: image_prompt_request)
+    monkeypatch.setattr(standard_prompts, "generate_image_prompt", lambda: image_prompt_request)
     monkeypatch.setattr(
         app_generate,
         "generate_title",
@@ -643,8 +644,8 @@ def test_integration_offline_run_generation_writes_artifacts(tmp_path, monkeypat
     assert transcript["generation_id"] == generation_id
     assert transcript["outputs"]["prompt_pipeline"]["requested_plan"] == "auto"
     assert transcript["outputs"]["prompt_pipeline"]["plan"] == "standard"
-    assert transcript["outputs"]["prompt_pipeline"]["refinement_policy"] == "tot"
-    assert transcript["outputs"]["prompt_pipeline"]["capture_stage"] == "standard.image_prompt_creation"
+    assert transcript["outputs"]["prompt_pipeline"]["refinement_mode"] == "explicit_stages"
+    assert transcript["outputs"]["prompt_pipeline"]["capture_stage"] == "refine.tot_enclave"
     assert transcript["outputs"]["prompt_pipeline"]["resolved_stages"]
 
     with open(generations_csv, newline="", encoding="utf-8") as file:
@@ -705,7 +706,6 @@ def test_integration_prompt_only_mode_skips_media_pipeline(tmp_path, monkeypatch
             "profile_path": str(profile_path),
             "random_seed": 123,
             "plan": "simple",
-            "refinement": {"policy": "none"},
         },
         "image": {
             "log_path": str(log_dir),
@@ -719,7 +719,7 @@ def test_integration_prompt_only_mode_skips_media_pipeline(tmp_path, monkeypatch
 
     monkeypatch.setattr(app_generate, "TextAI", FakeTextAI)
     monkeypatch.setattr(app_generate, "ImageAI", BoomImageAI)
-    monkeypatch.setattr(prompts, "generate_image_prompt", lambda: image_prompt_request)
+    monkeypatch.setattr(standard_prompts, "generate_image_prompt", lambda: image_prompt_request)
 
     app_generate.run_generation(cfg_dict, generation_id=generation_id)
 
@@ -792,7 +792,6 @@ def test_run_review_runs_at_end_of_prompt_only_run(tmp_path, monkeypatch):
             "profile_path": str(profile_path),
             "random_seed": 123,
             "plan": "simple",
-            "refinement": {"policy": "none"},
         },
         "image": {
             "log_path": str(log_dir),
@@ -805,7 +804,7 @@ def test_run_review_runs_at_end_of_prompt_only_run(tmp_path, monkeypatch):
     generation_id = "unit_test_prompt_only_review"
 
     monkeypatch.setattr(app_generate, "TextAI", FakeTextAI)
-    monkeypatch.setattr(prompts, "generate_image_prompt", lambda: image_prompt_request)
+    monkeypatch.setattr(standard_prompts, "generate_image_prompt", lambda: image_prompt_request)
 
     app_generate.run_generation(cfg_dict, generation_id=generation_id)
 
@@ -883,7 +882,7 @@ def test_transcript_written_on_pipeline_failure(tmp_path, monkeypatch):
     generation_id = "unit_test_failure"
 
     monkeypatch.setattr(app_generate, "TextAI", FakeTextAI)
-    monkeypatch.setattr(prompts, "generate_second_prompt", lambda: fail_sentinel)
+    monkeypatch.setattr(standard_prompts, "generate_second_prompt", lambda: fail_sentinel)
 
     with pytest.raises(RuntimeError, match="boom"):
         app_generate.run_generation(cfg_dict, generation_id=generation_id)
@@ -963,7 +962,7 @@ def test_run_review_runs_on_pipeline_failure(tmp_path, monkeypatch):
     generation_id = "unit_test_failure_review"
 
     monkeypatch.setattr(app_generate, "TextAI", FakeTextAI)
-    monkeypatch.setattr(prompts, "generate_second_prompt", lambda: fail_sentinel)
+    monkeypatch.setattr(standard_prompts, "generate_second_prompt", lambda: fail_sentinel)
 
     with pytest.raises(RuntimeError, match="boom"):
         app_generate.run_generation(cfg_dict, generation_id=generation_id)

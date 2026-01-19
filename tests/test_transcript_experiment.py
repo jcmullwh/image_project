@@ -2,10 +2,10 @@ import json
 import logging
 import random
 
-from image_project.foundation.messages import MessageHandler
+from pipelinekit.engine.messages import MessageHandler
 from image_project.framework.config import RunConfig
 from image_project.framework.runtime import RunContext
-from image_project.framework.transcript import write_transcript
+from image_project.framework.artifacts import write_transcript
 
 
 def test_write_transcript_includes_experiment_metadata(tmp_path):

@@ -22,9 +22,10 @@ See `docs/pipeline.md` for the execution model, merge modes, and the ToT/enclave
 
 The prompt pipeline is selected by `prompt.plan` and then modified by stage selectors/overrides (include/exclude/temperature/refinement/capture stage). This enables quick experiments without editing orchestration code.
 
+- Repo layering + boundaries: `docs/where_things_live.md`.
 - Docs + examples: `docs/experiments.md`
 - Built-in plans live in `image_project/impl/current/plans.py`.
-- Stage wiring + prompt builders live in `image_project/impl/current/prompting.py`. See `docs/stages.md`.
+- Stage wiring lives in `image_project/stages/*/*.py`; prompt text helpers live in `image_project/prompts/*`. See `docs/stages.md` (generated).
 - New plans can be added by dropping a module under `image_project/impl/current/plan_plugins/` (no changes to `image_project/app/generate.py` required).
 
 Discoverability helpers:
@@ -45,7 +46,7 @@ Discoverability helpers:
 
 - Canonical entrypoint: `python -m image_project generate`.
 - Canonical orchestration: `image_project/app/generate.py` (`run_generation()`).
-- Root `main.py` is a deprecated compatibility shim; older experiments are under `legacy/`.
+- Older experiments are under `legacy/`.
 
 ## Configuration
 
@@ -72,7 +73,7 @@ Config loading:
 `run.mode: full`:
 
 - Required:
-  - `image.generation_path` (preferred) or `image.save_path` (deprecated alias)
+  - `image.generation_path`
   - `image.log_path`
   - `prompt.categories_path`
   - `prompt.profile_path`
@@ -86,7 +87,7 @@ Config loading:
 - `prompt.random_seed` (int): makes concept selection deterministic; if omitted, a seed is generated and logged.
 - Prompt plan selection:
   - `prompt.plan: auto|standard|blackbox|blackbox_refine|blackbox_refine|blackbox_refine_only|refine_only|baseline|simple|simple_no_concepts|direct|profile_only|profile_only_simple`
-  - `prompt.refinement.policy: tot|none`
+  - Refinement is an explicit stage (e.g. `refine.tot_enclave`) included by specific plans; disable by excluding it via `prompt.stages.exclude`.
   - `prompt.stages.include` / `prompt.stages.exclude` / `prompt.stages.overrides`
   - `prompt.output.capture_stage`
   - `prompt.refine_only.draft` / `prompt.refine_only.draft_path`

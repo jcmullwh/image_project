@@ -49,10 +49,12 @@ To keep the model context small while still logging full internal reasoning, wra
 Use the stable inner name `draft` for the stage's main step so transcript paths stay readable (e.g. `pipeline/standard.section_2_choice/draft`).
 
 ```python
-tot_enclave = Block(
+from pipelinekit.engine.pipeline import Block, ChatStep
+from pipelinekit.engine.patterns import fanout_then_reduce
+
+tot_enclave = fanout_then_reduce(
     name="tot_enclave",
-    merge="all_messages",
-    nodes=[
+    fanout=[
         # "Thread" steps: run and are recorded, but do not write into the conversation.
         ChatStep(
             name="thread_1",
@@ -68,9 +70,9 @@ tot_enclave = Block(
             prompt=...,
             temperature=0.8,
         ),
-        # Consensus: reads captured thread outputs and writes the refined result into the conversation.
-        ChatStep(name="consensus", prompt=..., temperature=0.8),
     ],
+    # Consensus: reads captured thread outputs and writes the refined result into the conversation.
+    reduce=[ChatStep(name="consensus", prompt=..., temperature=0.8)],
 )
 
 stage = Block(
@@ -91,31 +93,55 @@ Result:
 - model context stays minimal (parent only sees the refined stage output)
 - transcript still contains all internal steps with unique paths
 
-### Refinement policies
+### Refinement as an explicit stage
 
-Stage wrapping is handled by a `RefinementPolicy`. Pick a policy when building the stage list:
+In this repo, refinement is represented as an explicit stage block in the plan flow (e.g. `refine.tot_enclave`), rather than a hidden wrapper. This keeps `prompt_pipeline.resolved_stages` and transcript paths honest about what ran.
+
+The ToT enclave itself is just a reusable block builder:
 
 ```python
-from image_project.framework.refinement import NoRefinement, TotEnclaveRefinement
+from pipelinekit.engine.pipeline import Block
+from image_project.framework.prompt_pipeline import make_chat_stage_block
+from image_project.stages.refine.tot_enclave_prompts import make_tot_enclave_block
 
-refinement = TotEnclaveRefinement()  # default Tree-of-Thought enclave
-# refinement = NoRefinement()        # draft-only, merge last response
-
-pipeline = Block(
-    name="pipeline",
-    merge="all_messages",
-    nodes=[
-        refinement.stage("stage_one", prompt="...", temperature=0.8),
-        refinement.stage("final_stage", prompt="...", temperature=0.8, capture_key="image_prompt"),
-    ],
+stage = make_chat_stage_block("standard.section_2_choice", prompt="...", temperature=0.8)
+refine = Block(
+    name="refine.tot_enclave",
+    merge="last_response",
+    nodes=[make_tot_enclave_block("refine.tot_enclave")],
 )
+pipeline = Block(name="pipeline", merge="all_messages", nodes=[stage, refine])
 ```
 
-Policies always name the draft step `draft` and wrap the stage block with the provided stage merge mode (default `merge="last_response"`). Only the final assistant message from each stage is merged into the parent conversation; the transcript still records every internal step.
+## Layering + Stage Configs
 
-Stages can also be marked as internal-only by setting the stage merge mode to `merge="none"` (useful for scoring/judging steps that should not contaminate downstream context).
+- Structural patterns live in `pipelinekit/engine/patterns.py` (generic, reusable).
+- Stage-local prompt policy (persona catalogs, prompt templates) lives with the stage under `image_project/stages/` (often in `*_prompts.py`).
+- Stages consume stage-owned config keys via `ConfigNamespace` and unknown keys fail loudly.
 
-Flows should only call `refinement.stage(...)`; do not import the ToT/enclave block builder directly. The enclave pipeline construction lives in the refinement module; the current implementation's stage + prompt content lives in `image_project/impl/current/prompting.py`.
+### Example: override ToT critics
+
+```yaml
+prompt:
+  stage_configs:
+    instances:
+      refine.tot_enclave:
+        critics: ["hemingway", "representative"]
+        max_critics: 2
+```
+
+### Example: override blackbox refine iteration settings
+
+```yaml
+prompt:
+  stage_configs:
+    defaults:
+      blackbox_refine.iter:
+        judges: ["j1"]
+        candidates_per_iter: 2
+```
+
+Stages that consume config keys record the small “effective” values under `outputs.prompt_pipeline.stage_configs_effective`.
 
 ## Step Parameters
 
@@ -129,7 +155,7 @@ Flows should only call `refinement.stage(...)`; do not import the ToT/enclave bl
   - unnamed blocks: `block_01`, `block_02`, ...
 - Sibling name collisions are errors (no silent disambiguation).
 
-The transcript includes a `path` for every step (e.g. `pipeline/standard.section_2_choice/tot_enclave/consensus`) so repeated sub-blocks remain uniquely identifiable.
+The transcript includes a `path` for every step (e.g. `pipeline/standard.section_2_choice/tot_enclave/reduce/consensus`) so repeated sub-blocks remain uniquely identifiable.
 
 ## Step recording
 
@@ -143,7 +169,7 @@ Step telemetry is injected via a `StepRecorder`:
 Provide a recorder when constructing `ChatRunner`:
 
 ```python
-from image_project.foundation.pipeline import ChatRunner, NullStepRecorder
+from pipelinekit.engine.pipeline import ChatRunner, NullStepRecorder
 
 runner = ChatRunner(ai_text=fake_ai)  # default recorder
 # runner = ChatRunner(ai_text=fake_ai, recorder=NullStepRecorder())
@@ -153,4 +179,3 @@ Transcript step records include:
 
 - `type`: `chat` or `action`
 - `meta` (optional): metadata such as `stage_id` and a `source` identifier for traceability
-

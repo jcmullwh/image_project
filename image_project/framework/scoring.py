@@ -300,7 +300,6 @@ def parse_judge_scores_json(text: str, *, expected_ids: Iterable[str]) -> dict[s
     return scores
 
 
-_WORD_RE = re.compile(r"[a-zA-Z][a-zA-Z']+")
 _STOPWORDS: frozenset[str] = frozenset(
     {
         "a",
@@ -342,11 +341,6 @@ _STOPWORDS: frozenset[str] = frozenset(
 )
 
 
-def tokenize(text: str) -> list[str]:
-    tokens = [t.lower() for t in _WORD_RE.findall(text or "")]
-    return [t for t in tokens if len(t) >= 3 and t not in _STOPWORDS]
-
-
 def _load_recent_final_prompts(*, generations_csv_path: str, window: int) -> deque[str]:
     if not generations_csv_path:
         raise ValueError("generations_csv_path is empty")
@@ -362,33 +356,6 @@ def _load_recent_final_prompts(*, generations_csv_path: str, window: int) -> deq
             prompts.append(str(row.get("final_image_prompt", "") or ""))
 
     return prompts
-
-
-def _extract_recent_motif_summary_legacy_v0(
-    *, generations_csv_path: str, window: int
-) -> dict[str, Any]:
-    if window <= 0:
-        return {"enabled": False, "window": window, "rows_considered": 0, "top_tokens": []}
-
-    prompts = _load_recent_final_prompts(generations_csv_path=generations_csv_path, window=window)
-
-    counts: Counter[str] = Counter()
-    for prompt in prompts:
-        counts.update(tokenize(prompt))
-
-    top = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
-    top_tokens = [{"token": token, "count": count} for token, count in top[:30] if count >= 2]
-
-    motif_watchlist = ("sunset", "sunrise", "tree", "trees", "ocean", "moon")
-    motif_counts = {m: counts.get(m, 0) for m in motif_watchlist if counts.get(m, 0) > 0}
-
-    return {
-        "enabled": True,
-        "window": window,
-        "rows_considered": len(prompts),
-        "top_tokens": top_tokens,
-        "motif_counts": motif_counts,
-    }
 
 
 _TOKEN_ALPHA_RE_V1 = re.compile(r"[a-zA-Z]+")
@@ -540,64 +507,11 @@ def extract_recent_motif_summary(
     *, generations_csv_path: str, novelty_cfg: PromptNoveltyConfig
 ) -> dict[str, Any]:
     method = str(getattr(novelty_cfg, "method", "") or "").strip().lower()
-    if method == "legacy_v0":
-        return _extract_recent_motif_summary_legacy_v0(
-            generations_csv_path=generations_csv_path, window=int(novelty_cfg.window)
-        )
     if method == "df_overlap_v1":
         return _extract_recent_motif_summary_df_overlap_v1(
             generations_csv_path=generations_csv_path, cfg=novelty_cfg
         )
     raise ValueError(f"Unknown novelty method: {method!r}")
-
-
-def _novelty_penalties_legacy_v0(
-    idea_cards: list[Mapping[str, Any]], novelty_summary: Mapping[str, Any]
-) -> tuple[dict[str, int], dict[str, dict[str, Any]]]:
-    if not novelty_summary or not novelty_summary.get("enabled"):
-        penalties = {str(card.get("id")): 0 for card in idea_cards}
-        breakdown = {card_id: {"penalty": 0, "reason": "novelty_disabled"} for card_id in penalties}
-        return penalties, breakdown
-
-    top_tokens = novelty_summary.get("top_tokens")
-    if not isinstance(top_tokens, list):
-        penalties = {str(card.get("id")): 0 for card in idea_cards}
-        breakdown = {card_id: {"penalty": 0, "reason": "invalid_novelty_summary"} for card_id in penalties}
-        return penalties, breakdown
-
-    repeated: dict[str, int] = {}
-    for item in top_tokens:
-        if not isinstance(item, Mapping):
-            continue
-        token = item.get("token")
-        count = item.get("count")
-        if isinstance(token, str) and isinstance(count, int) and count >= 2:
-            repeated[token] = count
-
-    penalties: dict[str, int] = {}
-    breakdown: dict[str, dict[str, Any]] = {}
-    for card in idea_cards:
-        card_id = str(card.get("id"))
-        blob = json.dumps(card, ensure_ascii=False)
-        card_tokens = set(tokenize(blob))
-        points = 0
-        contributing: list[dict[str, Any]] = []
-        for token, count in repeated.items():
-            if token in card_tokens:
-                add = min(count, 5)
-                points += add
-                contributing.append({"token": token, "count": int(count), "points": int(add)})
-        penalty = min(20, points)
-        penalties[card_id] = penalty
-        contributing.sort(key=lambda row: (-int(row["points"]), str(row["token"])))
-        breakdown[card_id] = {
-            "penalty": int(penalty),
-            "points": int(points),
-            "max_penalty": 20,
-            "top_tokens": contributing[:10],
-        }
-
-    return penalties, breakdown
 
 
 def _novelty_penalties_df_overlap_v1(
@@ -705,8 +619,6 @@ def novelty_penalties(
     text_field: str,
 ) -> tuple[dict[str, int], dict[str, dict[str, Any]]]:
     method = str(getattr(novelty_cfg, "method", "") or "").strip().lower()
-    if method == "legacy_v0":
-        return _novelty_penalties_legacy_v0(candidates, novelty_summary or {})
     if method == "df_overlap_v1":
         return _novelty_penalties_df_overlap_v1(
             candidates,
@@ -771,24 +683,19 @@ def select_candidate(
         card_id: {"penalty": 0, "reason": "novelty_disabled"} for card_id in penalties
     }
     if novelty_enabled:
-        if novelty_method == "df_overlap_v1":
-            novelty_cards = [
-                {"id": str(card.get("id")), "text": _idea_card_text_for_novelty(card)}
-                for card in idea_cards
-            ]
-            penalties, novelty_breakdown = novelty_penalties(
-                novelty_cards,
-                effective_novelty_cfg,
-                novelty_summary,
-                text_field="text",
-            )
-        else:
-            penalties, novelty_breakdown = novelty_penalties(
-                idea_cards,
-                effective_novelty_cfg,
-                novelty_summary,
-                text_field="prompt",
-            )
+        if novelty_method != "df_overlap_v1":
+            raise ValueError(f"Unknown novelty method: {novelty_method!r}")
+
+        novelty_cards = [
+            {"id": str(card.get("id")), "text": _idea_card_text_for_novelty(card)}
+            for card in idea_cards
+        ]
+        penalties, novelty_breakdown = novelty_penalties(
+            novelty_cards,
+            effective_novelty_cfg,
+            novelty_summary,
+            text_field="text",
+        )
 
     table: list[dict[str, Any]] = []
     for idea_id, raw_score in scores.items():
@@ -834,4 +741,3 @@ def select_candidate(
         selection_mode=selection_mode,
         score_table=table,
     )
-

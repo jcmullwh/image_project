@@ -1,10 +1,31 @@
-# PROJECT_SPEC_TEMPLATE.md
 
-Project-specific spec template and guidance for this repo (the “image_project” pipeline).
+## Basic principles
 
-Use this when writing implementation specs or working on or with the repo. It is tuned to the actual architecture and recurring failure modes in this codebase.
+If you are an implementer (human or agent), treat this file as **binding**. If you think it conflicts with another doc, stop and escalate.
 
----
+This project is a novel experimental prototype. This inherently means that we don't know what will or won't work. Importantly, we also don't know what small asuumptions will have asymmetric impact to our prototype performance. We MUST take a first-principles approach and only grudgingly make assumptions. We MUST focus on accuracy and quality first. We cannot assume that generic or typical approaches are sufficient to achieve our goals.
+
+We don't care about "scalability" or "shipping" or "user experience" in the traditional sense. 
+
+Adding a half-thought stand-in or stub to the system adds noise and unknown impacts. This is unacceptable.
+
+Any system is a chain parts. Unlike a typical system, every piece of the chain matters because we cannot know what will break it.
+
+- All planning files should be found, retained, and updated in .plans/1 - ideas, .plans/2 - ready, .plans/3 - in_progress, .plans/4 - for_review, and .plans/5 - complete. 
+
+- All todos should be found, retained, and updated in .todos/1 - ideas, .todos/2 - ready, .todos/3 - in_progress, .todos/4 - for_review, and .todos/5 - complete.
+
+- Always update location of plans and todos
+
+- "fallbacks" should be avoided. NEVER allow a silent "fallback". Prefer loud over quiet. We are working on experiments and prototypes. Silent fallbacks hide problems and make our work harder.
+
+- Avoid defaults and NEVER allow a silent default. In some cases it is necessary but just like fallbacks, defaults hide decisions that impact the functioning of our experiments and prototypes. This is unacceptable.
+
+- Log heavily.
+
+- ALL functions should have clear docstrings.
+
+- Always check and update docs.
 
 ## What this repo is
 

@@ -43,3 +43,25 @@ def test_unknown_config_keys_strict_mode_raises(tmp_path):
 
     with pytest.raises(ValueError, match=r"Unknown config keys: prompt\.unknown_prompt_key"):
         RunConfig.from_dict(cfg_dict)
+
+
+def test_stage_configs_allowed_in_strict_unknown_key_mode(tmp_path):
+    cfg_dict = _base_cfg_dict(tmp_path)
+    cfg_dict["strict"] = True
+    cfg_dict["prompt"]["stage_configs"] = {
+        "instances": {"standard.initial_prompt": {"typo_key": True}}
+    }
+
+    cfg, _warnings = RunConfig.from_dict(cfg_dict)
+    assert cfg.prompt_stage_configs_instances["standard.initial_prompt"]["typo_key"] is True
+
+
+@pytest.mark.parametrize("strict", [False, True])
+def test_image_save_path_is_rejected(tmp_path, strict):
+    cfg_dict = _base_cfg_dict(tmp_path)
+    if strict:
+        cfg_dict["strict"] = True
+    cfg_dict["image"]["save_path"] = str(tmp_path / "legacy")
+
+    with pytest.raises(ValueError, match=r"Config key image\.save_path has been removed"):
+        RunConfig.from_dict(cfg_dict)

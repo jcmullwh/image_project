@@ -1,15 +1,13 @@
 from __future__ import annotations
 
-import json
 import os
-import re
-import textwrap
 from collections.abc import Iterable
 from dataclasses import asdict
 from dataclasses import dataclass
 from typing import Any, Callable
 
 from image_project.framework.config import RunConfig
+from image_project.prompts import concept_filters as concept_filter_prompts
 
 
 @dataclass(frozen=True)
@@ -176,34 +174,13 @@ def make_dislike_rewrite_filter(
                 note="skipped: ai_text unavailable",
             )
 
-        prompt = textwrap.dedent(
-            f"""\
-            Selected concepts (keep length and order): 
-            {json.dumps(input_concepts, ensure_ascii=False)}
-
-            User dislikes (avoid conflicts): 
-            {json.dumps(clean_dislikes, ensure_ascii=False)}
-
-            If any selected concept conflicts with a dislike, rewrite just that concept so it no longer conflicts but still fits the original creative intent and variety. If there is no conflict, keep the concept unchanged.
-
-            Return ONLY a JSON array of the revised concepts (strings), same length and order as provided. Do not add commentary or keys.
-            """
-        ).strip()
+        messages = concept_filter_prompts.build_dislike_rewrite_messages(
+            selected_concepts=input_concepts,
+            dislikes=clean_dislikes,
+        )
 
         try:
-            response = ai_text.text_chat(
-                [
-                    {
-                        "role": "system",
-                        "content": (
-                            "You rewrite selected creative concepts so none of them conflict with the user's dislikes. "
-                            "Keep variety, keep count, and avoid over-censoring."
-                        ),
-                    },
-                    {"role": "user", "content": prompt},
-                ],
-                temperature=temperature,
-            )
+            response = ai_text.text_chat(messages, temperature=temperature)
         except Exception as exc:  # pragma: no cover - defensive
             return ConceptFilterOutcome(
                 name="dislike_rewrite",
@@ -212,7 +189,7 @@ def make_dislike_rewrite_filter(
                 error=str(exc),
             )
 
-        parsed = _parse_concept_list(response)
+        parsed = concept_filter_prompts.parse_concept_list_response(response)
         if not parsed:
             return ConceptFilterOutcome(
                 name="dislike_rewrite",
@@ -230,36 +207,3 @@ def make_dislike_rewrite_filter(
         )
 
     return _filter
-
-
-def _parse_concept_list(response: Any) -> list[str]:
-    """
-    Try to coerce the model response into a clean list of concept strings.
-    """
-    if not isinstance(response, str):
-        return []
-
-    cleaned = response.strip()
-    if cleaned.startswith("```"):
-        cleaned = "\n".join(
-            line for line in cleaned.splitlines() if not line.strip().startswith("```")
-        ).strip()
-
-    candidates = [cleaned]
-
-    bracket_match = re.search(r"\\[.*\\]", cleaned, flags=re.DOTALL)
-    if bracket_match:
-        candidates.insert(0, bracket_match.group(0).strip())
-
-    for candidate in candidates:
-        try:
-            parsed = json.loads(candidate)
-        except Exception:
-            continue
-
-        if isinstance(parsed, list):
-            coerced = [str(item).strip() for item in parsed if str(item).strip()]
-            if coerced:
-                return coerced
-
-    return []

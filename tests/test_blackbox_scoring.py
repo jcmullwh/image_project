@@ -12,7 +12,7 @@ from PIL import Image
 from image_project.app import generate as app_generate
 from image_project.framework.config import PromptNoveltyConfig
 from image_project.framework import scoring as blackbox_scoring
-from image_project.impl.current import prompting as prompts
+from image_project.prompts import blackbox as blackbox_prompts
 
 
 def test_parse_idea_cards_json_valid():
@@ -201,20 +201,6 @@ def test_df_overlap_scaffolding_stopwords_filtered(tmp_path):
     assert "lighting" not in motif_tokens
 
 
-def test_legacy_v0_penalties_unchanged():
-    candidates = [{"id": "A", "prompt": "sunset ocean"}, {"id": "B", "prompt": "ocean only"}]
-    summary = {
-        "enabled": True,
-        "top_tokens": [{"token": "sunset", "count": 3}, {"token": "ocean", "count": 10}],
-    }
-    cfg = PromptNoveltyConfig(enabled=True, window=25, method="legacy_v0")  # type: ignore[arg-type]
-    penalties, breakdown = blackbox_scoring.novelty_penalties(
-        candidates, cfg, summary, text_field="prompt"
-    )
-    assert penalties == {"A": 8, "B": 5}
-    assert breakdown["A"]["penalty"] == 8
-
-
 def test_integration_scoring_enabled_isolated_from_downstream(tmp_path, monkeypatch):
     profile_sentinel = "__TEST_PROFILE_ABSTRACT__"
     idea_sentinel_a = "__TEST_IDEA_CARD_A__"
@@ -354,11 +340,13 @@ def test_integration_scoring_enabled_isolated_from_downstream(tmp_path, monkeypa
     fake_text = FakeTextAI()
     monkeypatch.setattr(app_generate, "TextAI", lambda *args, **kwargs: fake_text)
     monkeypatch.setattr(app_generate, "ImageAI", FakeImageAI)
-    monkeypatch.setattr(prompts, "profile_abstraction_prompt", fake_profile_abstraction_prompt)
-    monkeypatch.setattr(prompts, "idea_card_generate_prompt", fake_idea_card_generate_prompt)
-    monkeypatch.setattr(prompts, "idea_cards_judge_prompt", fake_idea_cards_judge_prompt)
     monkeypatch.setattr(
-        prompts,
+        blackbox_prompts, "profile_abstraction_prompt", fake_profile_abstraction_prompt
+    )
+    monkeypatch.setattr(blackbox_prompts, "idea_card_generate_prompt", fake_idea_card_generate_prompt)
+    monkeypatch.setattr(blackbox_prompts, "idea_cards_judge_prompt", fake_idea_cards_judge_prompt)
+    monkeypatch.setattr(
+        blackbox_prompts,
         "final_prompt_from_selected_idea_prompt",
         fake_final_prompt_from_selected_idea_prompt,
     )
@@ -378,7 +366,7 @@ def test_integration_scoring_enabled_isolated_from_downstream(tmp_path, monkeypa
     transcript = json.loads(transcript_path.read_text(encoding="utf-8"))
     assert transcript["outputs"]["prompt_pipeline"]["requested_plan"] == "auto"
     assert transcript["outputs"]["prompt_pipeline"]["plan"] == "blackbox"
-    assert transcript["outputs"]["prompt_pipeline"]["refinement_policy"] == "tot"
+    assert transcript["outputs"]["prompt_pipeline"]["refinement_mode"] == "explicit_stages"
     assert transcript["outputs"]["prompt_pipeline"]["capture_stage"] == "blackbox.image_prompt_creation"
     assert transcript["outputs"]["prompt_pipeline"]["blackbox_profile_sources"] == {
         "judge_profile_source": "raw",

@@ -79,8 +79,8 @@ def _load_image_ai_cls():
         ) from exc
 
 from image_project.foundation.config_io import load_config
-from image_project.foundation.messages import MessageHandler
-from image_project.foundation.pipeline import ChatRunner
+from pipelinekit.engine.messages import MessageHandler
+from pipelinekit.engine.pipeline import ChatRunner
 from image_project.framework.artifacts import (
     append_generation_row,
     append_manifest_row,
@@ -93,21 +93,27 @@ from image_project.framework.artifacts import (
     read_manifest,
     utc_now_iso8601,
 )
-from image_project.framework.artifacts_index import maybe_update_artifacts_index
+from image_project.framework.artifacts import maybe_update_artifacts_index
 from image_project.framework.config import RunConfig
 from image_project.framework.context import ContextManager
 from image_project.framework.inputs import extract_dislikes, resolve_prompt_inputs
 from image_project.framework.profile_io import load_user_profile
 from image_project.framework.media import UpscaleConfig, save_image, upscale_image_to_4k
-from image_project.framework.prompting import PlanInputs, resolve_stage_specs
+from image_project.framework.prompt_pipeline import (
+    PlanInputs,
+    compile_stage_nodes,
+    make_pipeline_root_block,
+    resolve_stage_blocks,
+)
 from image_project.framework.runtime import RunContext
-from image_project.framework.transcript import write_transcript
-from image_project.impl.current.prompting import (
+from image_project.framework.artifacts import write_transcript
+from image_project.prompts.preprompt import (
     DEFAULT_SYSTEM_PROMPT,
     build_preferences_guidance,
     load_prompt_data,
 )
 from image_project.impl.current.plans import PromptPlanManager
+from image_project.stages.registry import get_stage_registry
 
 def configure_stdio_utf8():
     """Force stdout/stderr to UTF-8 so Unicode responses never crash on Windows consoles."""
@@ -416,19 +422,33 @@ def run_generation(cfg_dict, *, generation_id: str | None = None, config_meta: d
             draft_prompt=draft_prompt,
         )
 
-        stage_specs = plan.stage_specs(inputs)
-        resolved_stages = resolve_stage_specs(
-            stage_specs,
+        stage_nodes = plan.stage_nodes(inputs)
+        compiled = compile_stage_nodes(
+            stage_nodes,
             plan_name=plan.name,
             include=cfg.prompt_stages_include,
             exclude=cfg.prompt_stages_exclude,
             overrides=cfg.prompt_stages_overrides,
+            stage_configs_defaults=cfg.prompt_stage_configs_defaults,
+            stage_configs_instances=cfg.prompt_stage_configs_instances,
+            initial_outputs=tuple(ctx.outputs.keys()),
+            stage_registry=get_stage_registry(),
+            inputs=inputs,
+        )
+
+        resolved_stages = resolve_stage_blocks(
+            list(compiled.blocks),
+            plan_name=plan.name,
+            include=(),
+            exclude=(),
+            overrides=compiled.overrides,
             capture_stage=cfg.prompt_output_capture_stage,
         )
 
         prompt_pipeline = dict(resolved_stages.metadata)
+        prompt_pipeline.update(compiled.metadata)
         prompt_pipeline["requested_plan"] = requested_plan
-        prompt_pipeline["refinement_policy"] = cfg.prompt_refinement_policy
+        prompt_pipeline["refinement_mode"] = "explicit_stages"
         prompt_pipeline["context_injection"] = context_injection_mode
         prompt_pipeline["context_injection_location"] = cfg.context_injection_location
         prompt_pipeline["context_enabled"] = bool(effective_context_enabled)
@@ -443,16 +463,15 @@ def run_generation(cfg_dict, *, generation_id: str | None = None, config_meta: d
         ctx.outputs["prompt_pipeline"] = prompt_pipeline
 
         logger.info(
-            "Prompt plan requested=%s resolved=%s stages=%s refinement=%s capture=%s context=%s",
+            "Prompt plan requested=%s resolved=%s stages=%s capture=%s context=%s",
             requested_plan,
             plan.name,
             list(resolved_stages.stage_ids),
-            cfg.prompt_refinement_policy,
             resolved_stages.capture_stage,
             context_injection_mode,
         )
 
-        plan.execute(ctx, runner, resolved_stages, inputs)
+        runner.run(ctx, make_pipeline_root_block(resolved_stages))
 
         phase = "capture"
         image_prompt = ctx.outputs.get("image_prompt")

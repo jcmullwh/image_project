@@ -21,7 +21,7 @@ from image_project.app.generate import run_generation
 from image_project.app.experiment_dry_run import write_experiment_plan_full
 from image_project.foundation.config_io import load_config
 from image_project.framework.artifacts import generate_unique_id
-from image_project.framework.artifacts_index import maybe_update_artifacts_index
+from image_project.framework.artifacts import maybe_update_artifacts_index
 from image_project.framework.config import RunConfig
 from tools.experiment_manifest import build_pairs_payload, record_pair_error, write_pairs_manifest
 

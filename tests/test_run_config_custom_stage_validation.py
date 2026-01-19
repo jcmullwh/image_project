@@ -1,6 +1,11 @@
+import random
+
+import pandas as pd
 import pytest
 
 from image_project.framework.config import RunConfig
+from image_project.framework.prompt_pipeline import PlanInputs
+from image_project.impl.current.plans import PromptPlanManager
 
 
 def _base_cfg_dict(tmp_path) -> dict:
@@ -25,12 +30,22 @@ def test_custom_plan_unknown_stage_ids_fail_fast_with_suggestions(tmp_path):
     cfg_dict["prompt"]["plan"] = "custom"
     cfg_dict["prompt"]["stages"] = {"sequence": ["ab.scene_draf"]}
 
+    cfg, _warnings = RunConfig.from_dict(cfg_dict)
+    inputs = PlanInputs(
+        cfg=cfg,
+        ai_text=None,
+        prompt_data=pd.DataFrame(),
+        user_profile=pd.DataFrame(),
+        preferences_guidance="",
+        context_guidance=None,
+        rng=random.Random(0),
+    )
+
     with pytest.raises(ValueError) as excinfo:
-        RunConfig.from_dict(cfg_dict)
+        PromptPlanManager.get("custom").stage_nodes(inputs)
 
     msg = str(excinfo.value)
     assert "prompt.stages.sequence[0]" in msg
     assert "ab.scene_draf" in msg
     assert "did you mean" in msg
     assert "ab.scene_draft" in msg
-

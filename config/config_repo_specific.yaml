@@ -16,12 +16,15 @@ prompt:
   # Prompt Plans + Stage Modifiers (config-driven experimentation)
   # See docs/experiments.md for examples and available plans (including plan_plugins/*).
   plan: auto  # auto -> blackbox when scoring.enabled=true; otherwise standard
-  refinement:
-    policy: tot  # tot|none
   stages:
     include: []
+    # To disable ToT refinement for plans that include it, exclude `refine.tot_enclave`.
     exclude: []
     overrides: {}
+  # Optional: stage-owned configuration (validated by each stage; unknown keys fail fast).
+  stage_configs:
+    defaults: {}
+    instances: {}
   output:
     capture_stage: null
   scoring:

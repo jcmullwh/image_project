@@ -20,7 +20,7 @@ from image_project.app.generate import run_generation
 from image_project.app.experiment_dry_run import write_experiment_plan_full
 from image_project.foundation.config_io import load_config
 from image_project.framework.artifacts import generate_unique_id
-from image_project.framework.artifacts_index import maybe_update_artifacts_index
+from image_project.framework.artifacts import maybe_update_artifacts_index
 from image_project.framework.config import RunConfig
 
 
@@ -212,9 +212,9 @@ def generate_shared_concepts_by_run(
     _discover_context_plugins()
     cfg_for_paths, _warnings = RunConfig.from_dict(_merge_cfg(base_cfg, {"run": {"mode": "prompt_only"}}))
 
-    from image_project.impl.current import prompting as prompt_impl
+    from image_project.prompts.preprompt import load_prompt_data, select_random_concepts
 
-    prompt_data = prompt_impl.load_prompt_data(cfg_for_paths.categories_path)
+    prompt_data = load_prompt_data(cfg_for_paths.categories_path)
 
     pinned = _normalize_string_list(pinned_concepts)
 
@@ -231,7 +231,7 @@ def generate_shared_concepts_by_run(
         while True:
             concept_seed = int(base_seed) + idx + attempt * 1_000
             rng = random.Random(concept_seed)
-            sampled = prompt_impl.select_random_concepts(prompt_data, rng)
+            sampled = select_random_concepts(prompt_data, rng)
             sampled_clean = _normalize_string_list(sampled)[:max_random_concepts]
 
             combined = _dedupe_preserve_order([*pinned, *sampled_clean])

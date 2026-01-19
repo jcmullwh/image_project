@@ -1,14 +1,12 @@
 from __future__ import annotations
 
 import argparse
-import ast
 import os
 import sys
 from collections import defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 
 @dataclass(frozen=True)
@@ -18,112 +16,62 @@ class StageDocRow:
     doc: str | None
     source: str | None
     tags: tuple[str, ...]
+    requires: tuple[str, ...]
+    provides: tuple[str, ...]
+    captures: tuple[str, ...]
 
 
-def _infer_stage_kind_from_return_annotation(annotation: ast.expr | None) -> str | None:
-    if annotation is None:
+def _normalize_str(value: object) -> str | None:
+    if not isinstance(value, str):
         return None
-
-    if isinstance(annotation, ast.Name):
-        if annotation.id == "ActionStageSpec":
-            return "action"
-        if annotation.id == "StageSpec":
-            return "chat"
-        return None
-
-    if isinstance(annotation, ast.Attribute):
-        if annotation.attr == "ActionStageSpec":
-            return "action"
-        if annotation.attr == "StageSpec":
-            return "chat"
-        return None
-
-    if isinstance(annotation, ast.Subscript):
-        return _infer_stage_kind_from_return_annotation(annotation.value)
-
-    return None
+    trimmed = value.strip()
+    return trimmed or None
 
 
-def _normalize_str_constant(value: Any) -> str | None:
-    if isinstance(value, str):
-        return value.strip() or None
-    return None
-
-
-def _extract_string_tuple(node: ast.AST) -> tuple[str, ...]:
-    if not isinstance(node, (ast.Tuple, ast.List)):
+def _normalize_str_items(value: object) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, (list, tuple)):
         return ()
     items: list[str] = []
-    for elt in node.elts:
-        if isinstance(elt, ast.Constant) and isinstance(elt.value, str):
-            item = elt.value.strip()
-            if item:
-                items.append(item)
+    for item in value:
+        if isinstance(item, str):
+            trimmed = item.strip()
+            if trimmed:
+                items.append(trimmed)
     return tuple(items)
-
-
-def _stage_rows_from_ast(prompting_path: Path) -> list[StageDocRow]:
-    source = prompting_path.read_text(encoding="utf-8-sig")
-    tree = ast.parse(source, filename=str(prompting_path))
-
-    rows: list[StageDocRow] = []
-    for node in tree.body:
-        if not isinstance(node, ast.FunctionDef):
-            continue
-
-        for decorator in node.decorator_list:
-            if not isinstance(decorator, ast.Call):
-                continue
-            func = decorator.func
-            if not (
-                isinstance(func, ast.Attribute)
-                and isinstance(func.value, ast.Name)
-                and func.value.id == "StageCatalog"
-                and func.attr == "register"
-            ):
-                continue
-
-            stage_id: str | None = None
-            if decorator.args and isinstance(decorator.args[0], ast.Constant):
-                stage_id = _normalize_str_constant(decorator.args[0].value)
-            if not stage_id:
-                continue
-
-            doc: str | None = None
-            source_ref: str | None = None
-            tags: tuple[str, ...] = ()
-            for kw in decorator.keywords:
-                if not isinstance(kw, ast.keyword) or kw.arg is None:
-                    continue
-                if kw.arg == "doc" and isinstance(kw.value, ast.Constant):
-                    doc = _normalize_str_constant(kw.value.value)
-                elif kw.arg == "source" and isinstance(kw.value, ast.Constant):
-                    source_ref = _normalize_str_constant(kw.value.value)
-                elif kw.arg == "tags":
-                    tags = _extract_string_tuple(kw.value)
-
-            kind = _infer_stage_kind_from_return_annotation(node.returns)
-            rows.append(
-                StageDocRow(
-                    stage_id=stage_id,
-                    kind=kind,
-                    doc=doc,
-                    source=source_ref,
-                    tags=tags,
-                )
-            )
-
-    rows.sort(key=lambda r: r.stage_id)
-    return rows
 
 
 def _stage_rows() -> list[StageDocRow]:
     project_root = Path(__file__).resolve().parent.parent
-    prompting_path = project_root / "image_project" / "impl" / "current" / "prompting.py"
-    if not prompting_path.exists():
-        raise RuntimeError(f"Prompting module not found: {prompting_path}")
+    sys.path.insert(0, str(project_root))
 
-    return _stage_rows_from_ast(prompting_path)
+    from image_project.stages.registry import get_stage_registry  # noqa: PLC0415
+
+    rows: list[StageDocRow] = []
+    for entry in get_stage_registry().describe():
+        stage_id = _normalize_str(entry.get("stage_id")) if isinstance(entry, dict) else None
+        if not stage_id:
+            continue
+
+        io = entry.get("io") if isinstance(entry, dict) else None
+        io = io if isinstance(io, dict) else {}
+
+        rows.append(
+            StageDocRow(
+                stage_id=stage_id,
+                kind=_normalize_str(entry.get("kind")),
+                doc=_normalize_str(entry.get("doc")),
+                source=_normalize_str(entry.get("source")),
+                tags=_normalize_str_items(entry.get("tags")),
+                requires=_normalize_str_items(io.get("requires")),
+                provides=_normalize_str_items(io.get("provides")),
+                captures=_normalize_str_items(io.get("captures")),
+            )
+        )
+
+    rows.sort(key=lambda r: r.stage_id)
+    return rows
 
 
 def generate_markdown(*, rows: Iterable[StageDocRow]) -> str:
@@ -136,7 +84,7 @@ def generate_markdown(*, rows: Iterable[StageDocRow]) -> str:
     lines: list[str] = []
     lines.append("# Prompt Stage Catalog")
     lines.append("")
-    lines.append("This file is generated from `image_project.impl.current.prompting.StageCatalog`.")
+    lines.append("This file is generated from `image_project.stages.registry.get_stage_registry()`.")
     lines.append("")
     lines.append("Regenerate with:")
     lines.append("")
@@ -155,13 +103,20 @@ def generate_markdown(*, rows: Iterable[StageDocRow]) -> str:
         for row in sorted(groups[group], key=lambda r: r.stage_id):
             kind = f" ({row.kind})" if row.kind else ""
             doc = row.doc or ""
-            suffix = ""
-            if row.source:
-                suffix = f" `({row.source})`"
+            source_suffix = f" `({row.source})`" if row.source else ""
+            io_parts: list[str] = []
+            if row.requires:
+                io_parts.append("requires=" + ", ".join(row.requires))
+            if row.provides:
+                io_parts.append("provides=" + ", ".join(row.provides))
+            if row.captures:
+                io_parts.append("captures=" + ", ".join(row.captures))
+            io_suffix = f" [io: {'; '.join(io_parts)}]" if io_parts else ""
+
             if doc:
-                lines.append(f"- `{row.stage_id}`{kind}: {doc}{suffix}")
+                lines.append(f"- `{row.stage_id}`{kind}: {doc}{source_suffix}{io_suffix}")
             else:
-                lines.append(f"- `{row.stage_id}`{kind}{suffix}")
+                lines.append(f"- `{row.stage_id}`{kind}{source_suffix}{io_suffix}")
         lines.append("")
 
     return "\n".join(lines).rstrip() + "\n"

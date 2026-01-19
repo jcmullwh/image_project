@@ -24,7 +24,7 @@ prompt:
     novelty:
       enabled: true
       window: 25
-      method: df_overlap_v1   # df_overlap_v1 | legacy_v0
+      method: df_overlap_v1   # df_overlap_v1
       df_min: 3
       max_motifs: 200
       min_token_len: 3
@@ -37,8 +37,7 @@ prompt:
 
 ## Novelty Methods
 
-- `df_overlap_v1` (default): builds a weighted motif set from recent history using **document frequency** and applies a **normalized overlap** penalty so a handful of generic overlaps won’t instantly saturate to the max penalty.
-- `legacy_v0`: preserves the older term-frequency-based behavior for A/B comparisons (can saturate quickly).
+- `df_overlap_v1` (default): builds a weighted motif set from recent history using **document frequency** and applies a **normalized overlap** penalty so a handful of generic overlaps won't instantly saturate to the max penalty.
 
 ## Flow
 

@@ -6,16 +6,19 @@ import pandas as pd
 import pytest
 
 from image_project.app import generate as app_generate
-from image_project.foundation.messages import MessageHandler
-from image_project.framework.blackbox_refine_loop import (
+from pipelinekit.config_namespace import ConfigNamespace
+from pipelinekit.engine.messages import MessageHandler
+from pipelinekit.engine.pipeline import ActionStep, Block, ChatStep
+from image_project.stages.blackbox_refine.loop import (
     _aggregate_scores,
     _resolve_blackbox_profile_text,
-    build_blackbox_refine_loop_specs,
+    build_blackbox_refine_loop_instances,
 )
 from image_project.framework.config import PromptBlackboxRefineJudgeConfig, RunConfig
-from image_project.framework.prompting import PlanInputs
+from image_project.framework.prompt_pipeline import PlanInputs
 from image_project.framework.runtime import RunContext
-from image_project.impl.current import prompting as prompts
+from image_project.prompts import blackbox as blackbox_prompts
+from pipelinekit.stage_types import StageInstance
 
 
 def _make_logger(name: str) -> logging.Logger:
@@ -25,6 +28,42 @@ def _make_logger(name: str) -> logging.Logger:
     logger.setLevel(logging.DEBUG)
     logger.propagate = False
     return logger
+
+
+def _iter_chat_steps(block: Block, *, prefix: str) -> list[tuple[str, ChatStep]]:
+    items: list[tuple[str, ChatStep]] = []
+    for node in block.nodes:
+        if isinstance(node, ChatStep):
+            items.append((f"{prefix}/{node.name}", node))
+        elif isinstance(node, Block):
+            items.extend(_iter_chat_steps(node, prefix=f"{prefix}/{node.name}"))
+    return items
+
+
+def _materialize_stage_nodes(stage_nodes: list[object], *, inputs: PlanInputs) -> list[Block]:
+    blocks: list[Block] = []
+    for node in stage_nodes:
+        if isinstance(node, Block):
+            blocks.append(node)
+            continue
+        if isinstance(node, StageInstance):
+            cfg_ns = ConfigNamespace.empty(path=f"prompt.stage_configs.resolved.{node.instance_id}")
+            blocks.append(node.stage.build(inputs, instance_id=node.instance_id, cfg=cfg_ns))
+            continue
+        raise TypeError(f"Unexpected stage node type: {type(node).__name__}")
+    return blocks
+
+
+def _find_action_step(block: Block, *, name: str) -> ActionStep:
+    for node in block.nodes:
+        if isinstance(node, ActionStep) and node.name == name:
+            return node
+        if isinstance(node, Block):
+            try:
+                return _find_action_step(node, name=name)
+            except LookupError:
+                continue
+    raise LookupError(f"ActionStep not found: {name}")
 
 
 def _base_cfg_dict(tmp_path) -> dict:
@@ -94,9 +133,10 @@ def test_directive_determinism(tmp_path):
     )
 
     def build_map() -> dict[str, str]:
-        loop_specs = build_blackbox_refine_loop_specs(inputs, seed_output_key="bbref.seed_prompt")
-        init_stage = loop_specs[0]
-        assert init_stage.stage_id == "blackbox_refine.init_state"
+        loop_nodes = build_blackbox_refine_loop_instances(inputs)
+        loop_blocks = _materialize_stage_nodes(loop_nodes, inputs=inputs)
+        init_stage = loop_blocks[0]
+        assert init_stage.name == "blackbox_refine.init_state"
 
         ctx = RunContext(
             generation_id="unit_test",
@@ -109,21 +149,22 @@ def test_directive_determinism(tmp_path):
             selected_concepts=["X"],
         )
         ctx.outputs["bbref.seed_prompt"] = "SEED"
-        init_stage.fn(ctx)  # type: ignore[attr-defined]
+        init_action = _find_action_step(init_stage, name="action")
+        init_action.fn(ctx)
 
         mapping: dict[str, str] = {}
-        for spec in loop_specs:
-            if getattr(spec, "stage_id", "").startswith("blackbox_refine.iter_01") and "cand_" in getattr(
-                spec, "stage_id", ""
-            ):
-                prompt_text = spec.prompt(ctx)  # type: ignore[attr-defined]
-                directive = "<missing>"
-                lines = prompt_text.splitlines()
-                for idx, line in enumerate(lines):
-                    if line.strip() == "Mutation directive:" and idx + 1 < len(lines):
-                        directive = lines[idx + 1].strip()
-                        break
-                mapping[spec.stage_id] = directive  # type: ignore[attr-defined]
+        iter_stage = next(block for block in loop_blocks if block.name == "blackbox_refine.iter_01")
+        for path, step in _iter_chat_steps(iter_stage, prefix=str(iter_stage.name)):
+            if not (step.name or "").startswith("cand_"):
+                continue
+            prompt_text = step.render_prompt(ctx)
+            directive = "<missing>"
+            lines = prompt_text.splitlines()
+            for idx, line in enumerate(lines):
+                if line.strip() == "Mutation directive:" and idx + 1 < len(lines):
+                    directive = lines[idx + 1].strip()
+                    break
+            mapping[path] = directive
         return mapping
 
     assert build_map() == build_map()
@@ -269,12 +310,12 @@ def test_novelty_penalty_applied_in_selection(tmp_path):
         rng=random.Random(0),
         draft_prompt="seed",
     )
-    loop_specs = build_blackbox_refine_loop_specs(inputs, seed_output_key="bbref.seed_prompt")
+    loop_nodes = build_blackbox_refine_loop_instances(inputs)
+    loop_blocks = _materialize_stage_nodes(loop_nodes, inputs=inputs)
 
-    init_stage = loop_specs[0]
-    select_stage = next(
-        spec for spec in loop_specs if getattr(spec, "stage_id", "") == "blackbox_refine.iter_01.select"
-    )
+    init_stage = loop_blocks[0]
+    iter_stage = next(block for block in loop_blocks if block.name == "blackbox_refine.iter_01")
+    select_step = _find_action_step(iter_stage, name="select")
 
     ctx = RunContext(
         generation_id="unit_test",
@@ -301,15 +342,15 @@ def test_novelty_penalty_applied_in_selection(tmp_path):
             "total_weight": 17,
         },
     }
-    init_stage.fn(ctx)  # type: ignore[attr-defined]
+    _find_action_step(init_stage, name="action").fn(ctx)
 
     ctx.outputs["bbref.iter_01.beam_01.cand_A.prompt"] = "A prompt with sunset"
     ctx.outputs["bbref.iter_01.beam_01.cand_B.prompt"] = "A prompt without repetition"
-    ctx.outputs["bbref.iter_01.judge_j1.scores_json"] = json.dumps(
+    ctx.outputs["bbref.iter_01.judge.j1.scores_json"] = json.dumps(
         {"scores": [{"id": "A", "score": 10}, {"id": "B", "score": 10}]}
     )
 
-    select_stage.fn(ctx)  # type: ignore[attr-defined]
+    select_step.fn(ctx)
     assert ctx.outputs["bbref.beams"][0]["candidate_id"] == "B"
 
     iteration_log = ctx.blackbox_scoring["prompt_refine"]["iterations"][0]
@@ -368,15 +409,14 @@ def test_best_worst_score_feedback_is_injected_into_next_iteration_generation_pr
         draft_prompt="seed",
     )
 
-    loop_specs = build_blackbox_refine_loop_specs(inputs, seed_output_key="bbref.seed_prompt")
-    init_stage = loop_specs[0]
-    select_stage = next(
-        spec for spec in loop_specs if getattr(spec, "stage_id", "") == "blackbox_refine.iter_01.select"
-    )
-    gen_stage_iter2 = next(
-        spec
-        for spec in loop_specs
-        if getattr(spec, "stage_id", "") == "blackbox_refine.iter_02.beam_01.cand_A"
+    loop_nodes = build_blackbox_refine_loop_instances(inputs)
+    loop_blocks = _materialize_stage_nodes(loop_nodes, inputs=inputs)
+    init_stage = loop_blocks[0]
+    iter_stage_01 = next(block for block in loop_blocks if block.name == "blackbox_refine.iter_01")
+    iter_stage_02 = next(block for block in loop_blocks if block.name == "blackbox_refine.iter_02")
+    select_step = _find_action_step(iter_stage_01, name="select")
+    gen_step_iter2 = next(
+        step for _path, step in _iter_chat_steps(iter_stage_02, prefix=str(iter_stage_02.name)) if step.name == "cand_A"
     )
 
     ctx = RunContext(
@@ -390,17 +430,17 @@ def test_best_worst_score_feedback_is_injected_into_next_iteration_generation_pr
         selected_concepts=["X"],
     )
     ctx.outputs["bbref.seed_prompt"] = "SEED"
-    init_stage.fn(ctx)  # type: ignore[attr-defined]
+    _find_action_step(init_stage, name="action").fn(ctx)
 
     ctx.outputs["bbref.iter_01.beam_01.cand_A.prompt"] = "PROMPT_A"
     ctx.outputs["bbref.iter_01.beam_01.cand_B.prompt"] = "PROMPT_B"
-    ctx.outputs["bbref.iter_01.judge_j1.scores_json"] = json.dumps(
+    ctx.outputs["bbref.iter_01.judge.j1.scores_json"] = json.dumps(
         {"scores": [{"id": "A", "score": 10}, {"id": "B", "score": 90}]}
     )
 
-    select_stage.fn(ctx)  # type: ignore[attr-defined]
+    select_step.fn(ctx)
 
-    prompt_text = gen_stage_iter2.prompt(ctx)  # type: ignore[attr-defined]
+    prompt_text = gen_step_iter2.render_prompt(ctx)
     assert "SCORE FEEDBACK EXAMPLES" in prompt_text
     assert "BEST" in prompt_text and "WORST" in prompt_text
     assert "PROMPT_A" in prompt_text
@@ -607,9 +647,13 @@ def test_blackbox_refine_seed_from_blackbox(tmp_path, monkeypatch):
             return "resp"
 
     monkeypatch.setattr(app_generate, "TextAI", FakeTextAI)
-    monkeypatch.setattr(prompts, "idea_card_generate_prompt", fake_idea_card_generate_prompt)
-    monkeypatch.setattr(prompts, "idea_cards_judge_prompt", fake_idea_cards_judge_prompt)
-    monkeypatch.setattr(prompts, "final_prompt_from_selected_idea_prompt", fake_final_prompt_from_selected_idea_prompt)
+    monkeypatch.setattr(blackbox_prompts, "idea_card_generate_prompt", fake_idea_card_generate_prompt)
+    monkeypatch.setattr(blackbox_prompts, "idea_cards_judge_prompt", fake_idea_cards_judge_prompt)
+    monkeypatch.setattr(
+        blackbox_prompts,
+        "final_prompt_from_selected_idea_prompt",
+        fake_final_prompt_from_selected_idea_prompt,
+    )
 
     app_generate.run_generation(cfg_dict, generation_id=generation_id)
 

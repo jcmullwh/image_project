@@ -6,12 +6,18 @@ import pandas as pd
 import pytest
 
 from image_project.app import generate as app_generate
-from image_project.foundation.messages import MessageHandler
-from image_project.foundation.pipeline import ChatRunner
+from pipelinekit.engine.messages import MessageHandler
+from pipelinekit.engine.pipeline import Block, ChatRunner, ChatStep
 from image_project.framework.config import RunConfig
-from image_project.framework.prompting import PlanInputs, resolve_stage_specs
+from image_project.framework.prompt_pipeline import (
+    PlanInputs,
+    compile_stage_nodes,
+    make_pipeline_root_block,
+    resolve_stage_blocks,
+)
 from image_project.framework.runtime import RunContext
 from image_project.impl.current.plans import PromptPlanManager
+from image_project.stages.registry import get_stage_registry
 
 
 def _base_cfg_dict(tmp_path) -> dict:
@@ -50,8 +56,19 @@ def _make_ctx(cfg: RunConfig, *, generation_id: str = "gen_test") -> RunContext:
     )
 
 
-def _make_standard_stage_specs(cfg: RunConfig) -> tuple[list, PlanInputs]:
-    prompt_data = pd.DataFrame()
+def _make_standard_stage_nodes(cfg: RunConfig) -> tuple[list, PlanInputs]:
+    prompt_data = pd.DataFrame(
+        {
+            "Subject Matter": ["Cat"],
+            "Narrative": ["Quest"],
+            "Mood": ["Moody"],
+            "Composition": ["Wide"],
+            "Perspective": ["Top-down"],
+            "Style": ["Baroque"],
+            "Time Period_Context": ["Renaissance"],
+            "Color Scheme": ["Vibrant"],
+        }
+    )
     user_profile = pd.DataFrame({"Likes": ["x"], "Dislikes": [None]})
     inputs = PlanInputs(
         cfg=cfg,
@@ -63,7 +80,7 @@ def _make_standard_stage_specs(cfg: RunConfig) -> tuple[list, PlanInputs]:
         rng=random.Random(0),
     )
     plan = PromptPlanManager.get("standard")
-    return plan.stage_specs(inputs), inputs
+    return plan.stage_nodes(inputs), inputs
 
 
 def test_unknown_plan_fails_fast(tmp_path, monkeypatch):
@@ -101,117 +118,73 @@ def test_unknown_plan_fails_fast(tmp_path, monkeypatch):
 
 def test_unknown_stage_id_in_include_fails_fast(tmp_path):
     cfg, _warnings = RunConfig.from_dict(_base_cfg_dict(tmp_path))
-    stage_specs, _inputs = _make_standard_stage_specs(cfg)
+    stage_nodes, inputs = _make_standard_stage_nodes(cfg)
 
     with pytest.raises(ValueError, match="prompt\\.stages\\.include"):
-        resolve_stage_specs(
-            stage_specs,
+        compile_stage_nodes(
+            stage_nodes,
             plan_name="standard",
             include=("nope",),
             exclude=(),
             overrides={},
-            capture_stage=None,
+            stage_configs_defaults=cfg.prompt_stage_configs_defaults,
+            stage_configs_instances=cfg.prompt_stage_configs_instances,
+            stage_registry=get_stage_registry(),
+            inputs=inputs,
         )
 
 
 def test_capture_stage_not_in_resolved_stages_fails_fast(tmp_path):
     cfg, _warnings = RunConfig.from_dict(_base_cfg_dict(tmp_path))
-    stage_specs, _inputs = _make_standard_stage_specs(cfg)
+    stage_nodes, inputs = _make_standard_stage_nodes(cfg)
 
     with pytest.raises(ValueError, match="prompt\\.output\\.capture_stage"):
-        resolve_stage_specs(
-            stage_specs,
+        compiled = compile_stage_nodes(
+            stage_nodes,
             plan_name="standard",
-            include=("initial_prompt",),
+            include=("select_concepts", "filter_concepts", "initial_prompt"),
             exclude=(),
             overrides={},
+            stage_configs_defaults=cfg.prompt_stage_configs_defaults,
+            stage_configs_instances=cfg.prompt_stage_configs_instances,
+            stage_registry=get_stage_registry(),
+            inputs=inputs,
+        )
+        resolve_stage_blocks(
+            list(compiled.blocks),
+            plan_name="standard",
+            include=(),
+            exclude=(),
+            overrides=compiled.overrides,
             capture_stage="image_prompt_creation",
         )
 
 
-def test_refinement_policy_none_produces_no_tot_enclave_steps(tmp_path):
+def test_refine_tot_enclave_stage_produces_tot_enclave_steps(tmp_path):
     cfg_dict = _base_cfg_dict(tmp_path)
-    cfg_dict["prompt"]["refinement"] = {"policy": "none"}
-    cfg_dict["prompt"]["stages"] = {"include": ["initial_prompt"]}
-    cfg_dict["prompt"]["output"] = {"capture_stage": "initial_prompt"}
     cfg, _warnings = RunConfig.from_dict(cfg_dict)
 
     plan = PromptPlanManager.get("standard")
-    stage_specs, inputs = _make_standard_stage_specs(cfg)
+    stage_nodes, inputs = _make_standard_stage_nodes(cfg)
 
-    resolved = resolve_stage_specs(
-        stage_specs,
+    compiled = compile_stage_nodes(
+        stage_nodes,
         plan_name=plan.name,
-        include=cfg.prompt_stages_include,
-        exclude=cfg.prompt_stages_exclude,
-        overrides=cfg.prompt_stages_overrides,
-        capture_stage=cfg.prompt_output_capture_stage,
+        include=("select_concepts", "initial_prompt", "refine.tot_enclave"),
+        exclude=(),
+        overrides={},
+        stage_configs_defaults=cfg.prompt_stage_configs_defaults,
+        stage_configs_instances=cfg.prompt_stage_configs_instances,
+        stage_registry=get_stage_registry(),
+        inputs=inputs,
     )
-
-    class FakeTextAI:
-        def text_chat(self, messages, **kwargs):
-            return "resp_none"
-
-    ctx = _make_ctx(cfg, generation_id="none")
-    runner = ChatRunner(ai_text=FakeTextAI())
-    plan.execute(ctx, runner, resolved, inputs)
-
-    assert all("tot_enclave" not in (step.get("path") or "") for step in ctx.steps)
-
-
-def test_refinement_policy_tot_produces_tot_enclave_steps(tmp_path):
-    cfg_dict = _base_cfg_dict(tmp_path)
-    cfg_dict["prompt"]["refinement"] = {"policy": "tot"}
-    cfg_dict["prompt"]["stages"] = {"include": ["initial_prompt"]}
-    cfg_dict["prompt"]["output"] = {"capture_stage": "initial_prompt"}
-    cfg, _warnings = RunConfig.from_dict(cfg_dict)
-
-    plan = PromptPlanManager.get("standard")
-    stage_specs, inputs = _make_standard_stage_specs(cfg)
-
-    resolved = resolve_stage_specs(
-        stage_specs,
+    resolved = resolve_stage_blocks(
+        list(compiled.blocks),
         plan_name=plan.name,
-        include=cfg.prompt_stages_include,
-        exclude=cfg.prompt_stages_exclude,
-        overrides=cfg.prompt_stages_overrides,
-        capture_stage=cfg.prompt_output_capture_stage,
-    )
-
-    class FakeTextAI:
-        def __init__(self):
-            self.calls = 0
-
-        def text_chat(self, messages, **kwargs):
-            self.calls += 1
-            return f"resp_tot_{self.calls}"
-
-    ctx = _make_ctx(cfg, generation_id="tot")
-    runner = ChatRunner(ai_text=FakeTextAI())
-    plan.execute(ctx, runner, resolved, inputs)
-
-    assert any("tot_enclave" in (step.get("path") or "") for step in ctx.steps)
-
-
-def test_per_stage_refinement_override_works(tmp_path):
-    cfg_dict = _base_cfg_dict(tmp_path)
-    cfg_dict["prompt"]["refinement"] = {"policy": "tot"}
-    cfg_dict["prompt"]["stages"] = {
-        "include": ["initial_prompt", "section_2_choice"],
-        "overrides": {"initial_prompt": {"refinement_policy": "none"}},
-    }
-    cfg, _warnings = RunConfig.from_dict(cfg_dict)
-
-    plan = PromptPlanManager.get("standard")
-    stage_specs, inputs = _make_standard_stage_specs(cfg)
-
-    resolved = resolve_stage_specs(
-        stage_specs,
-        plan_name=plan.name,
-        include=cfg.prompt_stages_include,
-        exclude=cfg.prompt_stages_exclude,
-        overrides=cfg.prompt_stages_overrides,
-        capture_stage=cfg.prompt_output_capture_stage,
+        include=(),
+        exclude=(),
+        overrides=compiled.overrides,
+        capture_stage=None,
     )
 
     class FakeTextAI:
@@ -222,43 +195,81 @@ def test_per_stage_refinement_override_works(tmp_path):
             self.calls += 1
             return f"resp_{self.calls}"
 
-    ctx = _make_ctx(cfg, generation_id="override")
+    ctx = _make_ctx(cfg, generation_id="with_refine")
     runner = ChatRunner(ai_text=FakeTextAI())
-    plan.execute(ctx, runner, resolved, inputs)
+    runner.run(ctx, make_pipeline_root_block(resolved))
 
-    initial_paths = [
-        step.get("path") or ""
+    assert any(
+        (step.get("path") or "")
+        == "pipeline/refine.tot_enclave/tot_enclave/reduce/consensus/select/final_consensus"
         for step in ctx.steps
-        if (step.get("path") or "").startswith("pipeline/standard.initial_prompt/")
-    ]
-    section2_paths = [
-        step.get("path") or ""
-        for step in ctx.steps
-        if (step.get("path") or "").startswith("pipeline/standard.section_2_choice/")
-    ]
+    )
 
-    assert initial_paths
-    assert all("tot_enclave" not in path for path in initial_paths)
 
-    assert section2_paths
-    assert any("tot_enclave" in path for path in section2_paths)
+def test_excluding_refine_tot_enclave_removes_tot_enclave_steps(tmp_path):
+    cfg_dict = _base_cfg_dict(tmp_path)
+    cfg, _warnings = RunConfig.from_dict(cfg_dict)
+
+    plan = PromptPlanManager.get("standard")
+    stage_nodes, inputs = _make_standard_stage_nodes(cfg)
+
+    compiled = compile_stage_nodes(
+        stage_nodes,
+        plan_name=plan.name,
+        include=("select_concepts", "initial_prompt", "refine.tot_enclave"),
+        exclude=("refine.tot_enclave",),
+        overrides={},
+        stage_configs_defaults=cfg.prompt_stage_configs_defaults,
+        stage_configs_instances=cfg.prompt_stage_configs_instances,
+        stage_registry=get_stage_registry(),
+        inputs=inputs,
+    )
+    resolved = resolve_stage_blocks(
+        list(compiled.blocks),
+        plan_name=plan.name,
+        include=(),
+        exclude=(),
+        overrides=compiled.overrides,
+        capture_stage=None,
+    )
+
+    class FakeTextAI:
+        def text_chat(self, messages, **kwargs):
+            return "resp"
+
+    ctx = _make_ctx(cfg, generation_id="exclude_refine")
+    runner = ChatRunner(ai_text=FakeTextAI())
+    runner.run(ctx, make_pipeline_root_block(resolved))
+
+    assert all("pipeline/refine.tot_enclave/" not in (step.get("path") or "") for step in ctx.steps)
 
 
 def test_baseline_capture_first_stage_output(tmp_path):
     cfg_dict = _base_cfg_dict(tmp_path)
-    cfg_dict["prompt"]["refinement"] = {"policy": "none"}
     cfg_dict["prompt"]["stages"] = {"include": ["initial_prompt"]}
     cfg_dict["prompt"]["output"] = {"capture_stage": "initial_prompt"}
     cfg, _warnings = RunConfig.from_dict(cfg_dict)
 
     plan = PromptPlanManager.get("standard")
-    stage_specs, inputs = _make_standard_stage_specs(cfg)
-    resolved = resolve_stage_specs(
-        stage_specs,
+    stage_nodes, inputs = _make_standard_stage_nodes(cfg)
+    compiled = compile_stage_nodes(
+        stage_nodes,
         plan_name=plan.name,
         include=cfg.prompt_stages_include,
         exclude=cfg.prompt_stages_exclude,
         overrides=cfg.prompt_stages_overrides,
+        stage_configs_defaults=cfg.prompt_stage_configs_defaults,
+        stage_configs_instances=cfg.prompt_stage_configs_instances,
+        initial_outputs=("selected_concepts",),
+        stage_registry=get_stage_registry(),
+        inputs=inputs,
+    )
+    resolved = resolve_stage_blocks(
+        list(compiled.blocks),
+        plan_name=plan.name,
+        include=(),
+        exclude=(),
+        overrides=compiled.overrides,
         capture_stage=cfg.prompt_output_capture_stage,
     )
 
@@ -272,7 +283,68 @@ def test_baseline_capture_first_stage_output(tmp_path):
 
     ctx = _make_ctx(cfg, generation_id="baseline")
     runner = ChatRunner(ai_text=FakeTextAI())
-    plan.execute(ctx, runner, resolved, inputs)
+    runner.run(ctx, make_pipeline_root_block(resolved))
 
     assert ctx.outputs["image_prompt"] == "FIRST_STAGE_RESPONSE"
 
+
+def test_capture_stage_must_produce_assistant_output(tmp_path):
+    cfg, _warnings = RunConfig.from_dict(_base_cfg_dict(tmp_path))
+
+    stage_blocks = [
+        Block(
+            name="stage_a",
+            merge="none",
+            nodes=[ChatStep(name="cand", prompt="p", temperature=0.0, merge="none")],
+        )
+    ]
+
+    with pytest.raises(ValueError, match=r"capture_stage='stage_a'.*produces no assistant output"):
+        resolve_stage_blocks(
+            stage_blocks,
+            plan_name="test",
+            include=(),
+            exclude=(),
+            overrides={},
+            capture_stage="stage_a",
+        )
+
+
+def test_default_capture_skips_nonproducing_chat_stages(tmp_path):
+    cfg, _warnings = RunConfig.from_dict(_base_cfg_dict(tmp_path))
+
+    stage_blocks = [
+        Block(
+            name="stage_a",
+            merge="none",
+            nodes=[ChatStep(name="draft", prompt="p1", temperature=0.0)],
+        ),
+        Block(
+            name="stage_b",
+            merge="none",
+            nodes=[ChatStep(name="cand", prompt="p2", temperature=0.0, merge="none")],
+        ),
+    ]
+
+    resolved = resolve_stage_blocks(
+        stage_blocks,
+        plan_name="test",
+        include=(),
+        exclude=(),
+        overrides={},
+        capture_stage=None,
+    )
+    assert resolved.capture_stage == "stage_a"
+
+    class FakeTextAI:
+        def __init__(self):
+            self.calls = 0
+
+        def text_chat(self, messages, **kwargs):
+            self.calls += 1
+            return "A" if self.calls == 1 else "B"
+
+    ctx = _make_ctx(cfg, generation_id="capture_skip_nonproducing")
+    runner = ChatRunner(ai_text=FakeTextAI())
+    runner.run(ctx, make_pipeline_root_block(resolved))
+    assert ctx.outputs["image_prompt"] == "A"

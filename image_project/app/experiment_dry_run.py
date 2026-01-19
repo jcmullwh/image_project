@@ -8,16 +8,17 @@ from datetime import datetime, timezone
 from typing import Any
 
 from image_project.app.generate import generation_defaults
+from pipelinekit.engine.pipeline import ActionStep, Block, ChatStep
 from image_project.framework.config import RunConfig
 from image_project.framework.inputs import resolve_prompt_inputs
-from image_project.framework.prompting import (
-    ActionStageSpec,
+from image_project.framework.prompt_pipeline import (
     PlanInputs,
     ResolvedStages,
-    StageSpec,
-    resolve_stage_specs,
+    compile_stage_nodes,
+    resolve_stage_blocks,
 )
 from image_project.impl.current.plans import PromptPlanManager
+from image_project.stages.registry import get_stage_registry
 
 
 def _utc_now_iso8601() -> str:
@@ -36,46 +37,89 @@ def _callable_ref(value: Any) -> str | None:
     return None
 
 
-def _stage_spec_to_dict(spec: StageSpec | ActionStageSpec) -> dict[str, Any]:
-    if isinstance(spec, ActionStageSpec):
-        return {
-            "type": "action",
-            "stage_id": spec.stage_id,
-            "fn": _callable_ref(spec.fn),
-            "merge": spec.merge,
-            "tags": list(spec.tags),
-            "output_key": spec.output_key,
-            "doc": spec.doc,
-            "source": spec.source,
-            "is_default_capture": bool(spec.is_default_capture),
+def _block_contains_chat_step(block: Block) -> bool:
+    for node in block.nodes:
+        if isinstance(node, ChatStep):
+            return True
+        if isinstance(node, Block) and _block_contains_chat_step(node):
+            return True
+    return False
+
+
+def _block_contains_action_step(block: Block) -> bool:
+    for node in block.nodes:
+        if isinstance(node, ActionStep):
+            return True
+        if isinstance(node, Block) and _block_contains_action_step(node):
+            return True
+    return False
+
+
+def _stage_block_to_dict(block: Block) -> dict[str, Any]:
+    kind: str
+    has_chat = _block_contains_chat_step(block)
+    has_action = _block_contains_action_step(block)
+    if has_chat and not has_action:
+        kind = "chat"
+    elif has_action and not has_chat:
+        kind = "action"
+    else:
+        kind = "composite"
+
+    summary: dict[str, Any] = {
+        "stage_id": block.name,
+        "kind": kind,
+        "merge": block.merge,
+        "capture_key": block.capture_key,
+        "meta": dict(block.meta),
+    }
+
+    draft = next(
+        (
+            node
+            for node in block.nodes
+            if isinstance(node, ChatStep)
+            and node.name == "draft"
+            and isinstance(node.meta, dict)
+            and node.meta.get("role") == "primary"
+        ),
+        None,
+    )
+    if isinstance(draft, ChatStep):
+        prompt_text: str | None = draft.prompt if isinstance(draft.prompt, str) else None
+        prompt_fn: str | None = _callable_ref(draft.prompt) if prompt_text is None else None
+        summary["primary_draft"] = {
+            "temperature": draft.temperature,
+            "params": dict(draft.params),
+            "allow_empty_prompt": bool(draft.allow_empty_prompt),
+            "allow_empty_response": bool(draft.allow_empty_response),
+            "capture_key": draft.capture_key,
+            "prompt": prompt_text,
+            "prompt_fn": prompt_fn,
         }
 
-    prompt_text: str | None = spec.prompt if isinstance(spec.prompt, str) else None
-    prompt_fn: str | None = _callable_ref(spec.prompt) if prompt_text is None else None
+    action_step = next((node for node in block.nodes if isinstance(node, ActionStep)), None)
+    if isinstance(action_step, ActionStep):
+        summary["action"] = {
+            "fn": _callable_ref(action_step.fn),
+            "capture_key": action_step.capture_key,
+        }
 
-    return {
-        "type": "prompt",
-        "stage_id": spec.stage_id,
-        "prompt": prompt_text,
-        "prompt_fn": prompt_fn,
-        "temperature": spec.temperature,
-        "params": dict(spec.params),
-        "merge": spec.merge,
-        "allow_empty_prompt": bool(spec.allow_empty_prompt),
-        "allow_empty_response": bool(spec.allow_empty_response),
-        "tags": list(spec.tags),
-        "refinement_policy": spec.refinement_policy,
-        "output_key": spec.output_key,
-        "doc": spec.doc,
-        "source": spec.source,
-        "is_default_capture": bool(spec.is_default_capture),
-    }
+    summary["nodes_preview"] = [
+        {"type": "block", "name": node.name}
+        if isinstance(node, Block)
+        else {"type": "chat", "name": node.name}
+        if isinstance(node, ChatStep)
+        else {"type": "action", "name": node.name}
+        for node in block.nodes
+    ]
+    return summary
 
 
 def _resolved_stages_to_dict(resolved: ResolvedStages) -> dict[str, Any]:
     return {
         "metadata": dict(resolved.metadata),
-        "stages": [_stage_spec_to_dict(spec) for spec in resolved.stages],
+        "stages": [_stage_block_to_dict(block) for block in resolved.stages],
     }
 
 
@@ -110,13 +154,24 @@ def _build_prompt_pipeline_details(cfg: RunConfig, *, seed: int) -> dict[str, An
         draft_prompt=draft_prompt,
     )
 
-    stage_specs = resolved_plan.plan.stage_specs(inputs)
-    resolved_stages = resolve_stage_specs(
-        stage_specs,
+    stage_nodes = resolved_plan.plan.stage_nodes(inputs)
+    compiled = compile_stage_nodes(
+        stage_nodes,
         plan_name=resolved_plan.plan.name,
         include=cfg.prompt_stages_include,
         exclude=cfg.prompt_stages_exclude,
         overrides=cfg.prompt_stages_overrides,
+        stage_configs_defaults=cfg.prompt_stage_configs_defaults,
+        stage_configs_instances=cfg.prompt_stage_configs_instances,
+        stage_registry=get_stage_registry(),
+        inputs=inputs,
+    )
+    resolved_stages = resolve_stage_blocks(
+        list(compiled.blocks),
+        plan_name=resolved_plan.plan.name,
+        include=(),
+        exclude=(),
+        overrides=compiled.overrides,
         capture_stage=cfg.prompt_output_capture_stage,
     )
 
@@ -177,4 +232,3 @@ def write_experiment_plan_full(
     with open(output_path, "w", encoding="utf-8") as handle:
         json.dump(payload, handle, ensure_ascii=False, indent=2)
         handle.write("\n")
-

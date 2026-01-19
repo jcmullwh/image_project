@@ -4,21 +4,27 @@ import argparse
 import json
 import random
 import sys
+from pathlib import Path
 from typing import Any
 
 import pandas as pd
 
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 from image_project.foundation.config_io import load_config
+from pipelinekit.engine.pipeline import ActionStep, Block, ChatStep
 from image_project.framework.config import RunConfig
 from image_project.framework.inputs import resolve_prompt_inputs
-from image_project.framework.prompting import (
-    ActionStageSpec,
+from image_project.framework.prompt_pipeline import (
     PlanInputs,
-    StageSpec,
-    resolve_stage_specs,
+    compile_stage_nodes,
+    resolve_stage_blocks,
 )
+from pipelinekit.config_namespace import ConfigNamespace
 from image_project.impl.current.plans import PromptPlanManager, SequencePromptPlan
-from image_project.impl.current.prompting import StageCatalog
+from image_project.stages.registry import get_stage_registry
 
 
 def _print_json(value: Any) -> None:
@@ -55,6 +61,48 @@ def _plan_summary(name: str) -> dict[str, Any]:
         summary["required_inputs"] = list(required_inputs)
 
     return summary
+
+
+def _callable_ref(value: Any) -> str | None:
+    if not callable(value):
+        return None
+    module = getattr(value, "__module__", None)
+    qualname = getattr(value, "__qualname__", None) or getattr(value, "__name__", None)
+    if isinstance(module, str) and module and isinstance(qualname, str) and qualname:
+        return f"{module}.{qualname}"
+    if isinstance(qualname, str) and qualname:
+        return qualname
+    return None
+
+
+def _block_contains_chat_step(block: Block) -> bool:
+    for node in block.nodes:
+        if isinstance(node, ChatStep):
+            return True
+        if isinstance(node, Block) and _block_contains_chat_step(node):
+            return True
+    return False
+
+
+def _block_contains_action_step(block: Block) -> bool:
+    for node in block.nodes:
+        if isinstance(node, ActionStep):
+            return True
+        if isinstance(node, Block) and _block_contains_action_step(node):
+            return True
+    return False
+
+
+def _primary_draft_step(block: Block) -> ChatStep | None:
+    for node in block.nodes:
+        if (
+            isinstance(node, ChatStep)
+            and node.name == "draft"
+            and isinstance(node.meta, dict)
+            and node.meta.get("role") == "primary"
+        ):
+            return node
+    return None
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -105,7 +153,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "stages":
-        stages = list(StageCatalog.describe())
+        stages = list(get_stage_registry().describe())
         if getattr(args, "verbose", False):
             dummy_cfg_dict = {
                 "run": {"mode": "prompt_only"},
@@ -133,7 +181,12 @@ def main(argv: list[str] | None = None) -> int:
                     enriched.append(entry)
                     continue
                 try:
-                    spec = StageCatalog.build(stage_id, inputs)
+                    ref = get_stage_registry().resolve(stage_id)
+                    block = ref.build(
+                        inputs,
+                        instance_id=stage_id,
+                        cfg=ConfigNamespace.empty(path=f"tools.list_prompt_catalog.stage[{stage_id}]"),
+                    )
                 except Exception as exc:  # noqa: BLE001
                     next_entry = dict(entry)
                     next_entry["verbose_error"] = f"{exc.__class__.__name__}: {exc}"
@@ -141,18 +194,28 @@ def main(argv: list[str] | None = None) -> int:
                     continue
 
                 next_entry = dict(entry)
-                if isinstance(spec, ActionStageSpec):
-                    next_entry["type"] = "action"
-                    next_entry["merge"] = spec.merge
-                    next_entry["output_key"] = spec.output_key
-                    next_entry["is_default_capture"] = bool(spec.is_default_capture)
-                elif isinstance(spec, StageSpec):
+                has_chat = _block_contains_chat_step(block)
+                has_action = _block_contains_action_step(block)
+                if has_chat and not has_action:
                     next_entry["type"] = "chat"
-                    next_entry["merge"] = spec.merge
-                    next_entry["output_key"] = spec.output_key
-                    next_entry["is_default_capture"] = bool(spec.is_default_capture)
-                    if spec.refinement_policy is not None:
-                        next_entry["refinement_policy"] = spec.refinement_policy
+                elif has_action and not has_chat:
+                    next_entry["type"] = "action"
+                else:
+                    next_entry["type"] = "composite"
+
+                next_entry["merge"] = block.merge
+                next_entry["capture_key"] = block.capture_key
+
+                draft = _primary_draft_step(block)
+                if draft is not None:
+                    prompt_text: str | None = draft.prompt if isinstance(draft.prompt, str) else None
+                    next_entry["primary_temperature"] = draft.temperature
+                    next_entry["primary_params"] = dict(draft.params)
+                    next_entry["primary_step_capture_key"] = draft.capture_key
+                    if prompt_text is not None:
+                        next_entry["primary_prompt"] = prompt_text
+                    else:
+                        next_entry["primary_prompt_fn"] = _callable_ref(draft.prompt)
                 enriched.append(next_entry)
             stages = enriched
 
@@ -167,17 +230,14 @@ def main(argv: list[str] | None = None) -> int:
                 if getattr(args, "verbose", False):
                     stype = entry.get("type") or "?"
                     merge = entry.get("merge") or "?"
-                    output_key = entry.get("output_key")
-                    capture = entry.get("is_default_capture")
-                    refinement = entry.get("refinement_policy")
+                    capture_key = entry.get("capture_key")
+                    primary_capture = entry.get("primary_step_capture_key")
                     verbose_bits = [
                         f"type={stype}",
                         f"merge={merge}",
-                        f"output_key={output_key}",
-                        f"default_capture={capture}",
+                        f"capture_key={capture_key}",
+                        f"primary_capture={primary_capture}",
                     ]
-                    if refinement is not None:
-                        verbose_bits.append(f"refinement_policy={refinement}")
                     if entry.get("verbose_error"):
                         verbose_bits.append(f"verbose_error={entry['verbose_error']}")
                     print(
@@ -223,13 +283,24 @@ def main(argv: list[str] | None = None) -> int:
             draft_prompt=resolved_inputs.draft_prompt,
         )
 
-        stage_specs = plan.stage_specs(inputs)
-        resolved_stages = resolve_stage_specs(
-            stage_specs,
+        stage_nodes = plan.stage_nodes(inputs)
+        compiled = compile_stage_nodes(
+            stage_nodes,
             plan_name=plan.name,
             include=cfg.prompt_stages_include,
             exclude=cfg.prompt_stages_exclude,
             overrides=cfg.prompt_stages_overrides,
+            stage_configs_defaults=cfg.prompt_stage_configs_defaults,
+            stage_configs_instances=cfg.prompt_stage_configs_instances,
+            stage_registry=get_stage_registry(),
+            inputs=inputs,
+        )
+        resolved_stages = resolve_stage_blocks(
+            list(compiled.blocks),
+            plan_name=plan.name,
+            include=(),
+            exclude=(),
+            overrides=compiled.overrides,
             capture_stage=cfg.prompt_output_capture_stage,
         )
 

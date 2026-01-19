@@ -45,9 +45,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     if args.command == "list-stages":
-        from .impl.current.prompting import list_stages
+        from .stages.registry import get_stage_registry
 
-        list_stages()
+        for entry in get_stage_registry().describe():
+            stage_id = entry.get("stage_id")
+            if not isinstance(stage_id, str) or not stage_id.strip():
+                continue
+            doc = entry.get("doc") if isinstance(entry, dict) else None
+            doc_str = (doc or "").strip() if isinstance(doc, str) else ""
+            print(f"{stage_id}\t{doc_str}".rstrip())
         return 0
 
     if args.command == "list-plans":
@@ -62,7 +68,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return int(run_review_main(args.args))
 
     if args.command == "index-artifacts":
-        from .framework.artifacts_index import update_artifacts_index, update_artifacts_index_combined
+        from .framework.artifacts import update_artifacts_index, update_artifacts_index_combined
 
         roots = list(getattr(args, "artifacts_root", []) or [])
         if not roots:
@@ -85,6 +91,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(json.dumps(counts, ensure_ascii=False, indent=2))
         if isinstance(registries, dict):
             print(json.dumps(registries, ensure_ascii=False, indent=2))
+        warnings = payload.get("warnings") if isinstance(payload, dict) else None
+        if isinstance(warnings, dict):
+            nonempty = {k: v for k, v in warnings.items() if v}
+            if nonempty:
+                sys.stderr.write("index-artifacts warnings:\n")
+                sys.stderr.write(json.dumps(nonempty, ensure_ascii=False, indent=2))
+                sys.stderr.write("\n")
+                return 1
         return 0
 
     raise AssertionError(f"Unhandled command: {args.command}")

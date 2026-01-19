@@ -2,7 +2,7 @@
 
 The prompt pipeline is selected via `prompt.plan` and then modified via a single, explicit set of stage selectors/overrides. This enables fast experimentation (baseline, blackbox, refine-only, no-ToT, partial stage runs) without editing `image_project/app/generate.py`.
 
-Stage wiring (prompt builder, temperatures, merge/capture behavior, default refinement policy, provenance) is defined once in `image_project/impl/current/prompting.py`.
+Stage wiring (stage composition, merge/capture behavior, provenance, IO contracts, stage-local config parsing) lives in `image_project/stages/*/*.py` as `STAGE: StageRef` exports. Prompt text helpers live in `image_project/prompts/*`.
 
 ## Run Mode (Prompt-Only)
 
@@ -57,16 +57,13 @@ Set `prompt.plan` to one of:
 
 Unknown plan values fail fast with `ValueError("Unknown prompt plan: ...")`.
 
-## Refinement Policy
+## Refinement Stages
 
-Set `prompt.refinement.policy`:
-
-- `tot`: Tree-of-Thought enclave refinement (default)
-- `none`: no enclave; each stage is a single draft step
+Refinement is represented as explicit stages in the plan flow (e.g. `refine.tot_enclave`). To disable ToT refinement for plans that include it, add it to `prompt.stages.exclude`.
 
 ## Stage Modifiers
 
-Stage ids are stable strings defined in the Stage Catalog (`image_project/impl/current/prompting.py`). Canonical ids are namespaced (e.g. `standard.initial_prompt`, `blackbox.idea_cards_generate`).
+Stage ids are stable strings defined by `StageRef.id` (canonical ids are namespaced, e.g. `standard.initial_prompt`, `blackbox.idea_cards_generate`). The config boundary registry is `image_project.stages.registry.get_stage_registry()` (also see `docs/stages.md`).
 
 For convenience, `prompt.stages.include/exclude/overrides` and `prompt.output.capture_stage` also accept an unambiguous suffix (e.g. `initial_prompt` will resolve to `standard.initial_prompt` when running the standard plan). If a suffix is ambiguous, resolution fails fast.
 
@@ -75,9 +72,33 @@ For convenience, `prompt.stages.include/exclude/overrides` and `prompt.output.ca
 - `prompt.stages.overrides.<stage_id>`:
   - `temperature: float`
   - `params: dict` (must not contain `temperature`)
-  - `refinement_policy: tot|none`
+  - overrides apply only to the stage's primary `ChatStep(name=\"draft\", meta.role=\"primary\")`
 
 Unknown stage ids or unknown override keys fail fast.
+
+## Stage Configs (Stage-Owned)
+
+Stage-specific config is validated by the stage that consumes it (typed getters + unknown-key enforcement). It is separate from `prompt.stages.overrides` (which only changes the primary draft step's `temperature`/`params`).
+
+```yaml
+prompt:
+  stage_configs:
+    defaults:
+      # stage-kind defaults applied to all instances of this kind
+      # (stage-specific keys; unknown keys are errors)
+      standard.initial_prompt: {}
+    instances:
+      # per-instance overrides (instance id is usually the same as kind id)
+      # (stage-specific keys; unknown keys are errors)
+      standard.initial_prompt: {}
+```
+
+Notes:
+
+- `defaults` keys are **stage kinds** (resolved via StageRegistry; suffixes allowed if unambiguous).
+- `instances` keys are **stage instance ids** (after `prompt.stages.include/exclude` filtering; suffixes allowed if unambiguous).
+- Unknown stage kind ids, unknown stage instance ids, and unknown config keys fail fast.
+- Merge semantics: dicts are deep-merged, lists are replaced, scalars override.
 
 ## Concept Selection + Filters
 
@@ -101,7 +122,7 @@ Choose which stage's final output becomes `ctx.outputs["image_prompt"]`:
 
 - `prompt.output.capture_stage: <stage_id> | null`
 
-If unset, the plan's default capture behavior applies (typically the final stage).
+If unset, the capture stage defaults to the last chat-producing stage in the resolved list.
 
 ## Refine-Only Inputs
 
@@ -120,7 +141,7 @@ For `prompt.plan: custom`, provide:
 
 - `prompt.stages.sequence: list[str]`
 
-Stage ids must be catalog ids (or unambiguous suffixes). Unknown or ambiguous ids fail fast and list available ids.
+Stage ids must be stage kind ids from StageRegistry (or unambiguous suffixes). Unknown or ambiguous ids fail fast and list available ids.
 
 ## Context Injection
 
@@ -140,22 +161,26 @@ Each run records `outputs.prompt_pipeline` in the transcript JSON, including:
 
 - requested plan name (e.g. `auto`)
 - resolved plan name
-- global refinement policy
 - include/exclude lists
 - resolved stage ids
+- `stage_instances` (ordered list of `{instance, kind}`)
+- `stage_io` (per-stage-kind IO contract summary)
+- optional `stage_configs` summary (keys only; no prompt text)
 - capture stage
 - applied stage overrides
+- explicit refinement stages (e.g. `refine.tot_enclave`, when present)
 - effective context injection mode
 - context injection location (`context.injection_location`)
 - blackbox profile routing (`blackbox_profile_sources`, when blackbox stages are present)
 
-Step paths in the transcript and oplog include stage ids (e.g. `pipeline/standard.section_2_choice/draft`, `pipeline/standard.initial_prompt/tot_enclave/...`).
+Step paths in the transcript and oplog include stage ids (e.g. `pipeline/standard.section_2_choice/draft`, `pipeline/refine.tot_enclave/tot_enclave/fanout/hemingway`, `pipeline/refine.tot_enclave/tot_enclave/reduce/consensus/select/final_consensus`).
 
 Each transcript step includes `type` (`chat` or `action`) and `meta` (when available), including:
 
 - `meta.stage_id`
 - `meta.source` (prompt/template identifier such as `prompts.idea_cards_judge_prompt`)
-- `meta.doc` (short human-facing description, when defined by the catalog)
+- `meta.doc` (short human-facing description, when defined by the stage)
+- `meta.stage_kind` / `meta.stage_instance` (for stages built from StageRefs)
 
 The transcript also includes `final_image_prompt` (top-level) when `ctx.outputs["image_prompt"]` is present.
 
@@ -184,8 +209,6 @@ Baseline: capture the first stage output (no ToT)
 ```yaml
 prompt:
   plan: standard
-  refinement:
-    policy: none
   stages:
     include: ["select_concepts", "filter_concepts", "initial_prompt"]
   output:
@@ -206,8 +229,6 @@ prompt:
     # - generator_hints_plus_dislikes: generator_hints + ctx.outputs["dislikes"] list (no likes)
     judge_profile_source: raw  # raw|generator_hints|generator_hints_plus_dislikes
     final_profile_source: raw  # raw|generator_hints
-  refinement:
-    policy: tot
   stages:
     overrides:
       idea_cards_judge_score:
@@ -240,8 +261,6 @@ prompt:
   plan: refine_only
   refine_only:
     draft_path: "./draft_prompt.txt"
-  refinement:
-    policy: tot
 ```
 
 Profile-only (disable context injection even if enabled in config)
@@ -258,8 +277,6 @@ Custom stage sequence
 ```yaml
 prompt:
   plan: custom
-  refinement:
-    policy: none
   stages:
     sequence:
       - standard.initial_prompt
@@ -282,21 +299,21 @@ Concepts are randomly sampled per run index and reused across sets (A1/B1/C1 sha
 
 Variants:
 
-- **A**: `blackbox` + `prompt.scoring.enabled=true` + `prompt.scoring.{judge,final}_profile_source=generator_hints` + `refinement.policy=none`
-- **B**: `blackbox` + `prompt.scoring.enabled=true` + `prompt.scoring.{judge,final}_profile_source=raw` + `refinement.policy=none`
-- **C**: `simple_no_concepts` + `refinement.policy=none`
+- **A**: `blackbox` + `prompt.scoring.enabled=true` + `prompt.scoring.{judge,final}_profile_source=generator_hints`
+- **B**: `blackbox` + `prompt.scoring.enabled=true` + `prompt.scoring.{judge,final}_profile_source=raw`
+- **C**: `simple_no_concepts`
 
 ## Profile v5 3x3 Runner
 
 Compares v5 profile formats and a one-shot prompt path:
 
-- **A**: `blackbox_refine` + `refinement.policy=none` + v5 `like/dislike` profile
-- **B**: `blackbox_refine` + `refinement.policy=none` + v5 `love/like/dislike/hate` profile
-- **C**: `direct` + `refinement.policy=none` + v5 `love/like/dislike/hate` profile
+- **A**: `blackbox_refine` + v5 `like/dislike` profile
+- **B**: `blackbox_refine` + v5 `love/like/dislike/hate` profile
+- **C**: `direct` + v5 `love/like/dislike/hate` profile
 - Random concepts: 2 injected per run index (shared across sets)
 - Post-processing: profile nudge + OpenAI (GPT Image 1.5) prompt formatting
 - Concept filters: enabled (see `preprompt.filter_concepts` / `prompt.concepts.filters.*`)
-- Final prompt formatting: `postprompt.openai_format` (GPT Image 1.5 prompt text) after refinement
+- Final prompt formatting: `postprompt.openai_format` (GPT Image 1.5 prompt text) after the blackbox refinement loop
 
 Run:
 

@@ -3,10 +3,14 @@ import random
 
 import pytest
 
-from image_project.foundation.messages import MessageHandler
-from image_project.foundation.pipeline import ActionStep, Block, ChatRunner
+from pipelinekit.engine.messages import MessageHandler
+from pipelinekit.engine.pipeline import ActionStep, Block, ChatRunner
 from image_project.framework.config import RunConfig
-from image_project.framework.prompting import ResolvedStages, StageSpec, build_pipeline_block
+from image_project.framework.prompt_pipeline import (
+    make_chat_stage_block,
+    make_pipeline_root_block,
+    resolve_stage_blocks,
+)
 from image_project.framework.runtime import RunContext
 
 
@@ -87,49 +91,61 @@ def test_stage_output_key_captures_intermediate_outputs(tmp_path):
     ctx = _make_ctx(tmp_path)
     runner = ChatRunner(ai_text=FakeTextAI())
 
-    resolved = ResolvedStages(
-        stages=(
-            StageSpec(
-                stage_id="stage_a",
-                prompt="prompt_a",
-                temperature=0.0,
-                merge="none",
-                output_key="a_out",
-                refinement_policy="none",
-            ),
-            StageSpec(
-                stage_id="stage_b",
-                prompt="prompt_b",
-                temperature=0.0,
-                is_default_capture=True,
-                refinement_policy="none",
-            ),
+    stage_blocks = [
+        make_chat_stage_block(
+            "stage_a",
+            prompt="prompt_a",
+            temperature=0.0,
+            merge="none",
+            step_capture_key="a_out",
         ),
+        make_chat_stage_block("stage_b", prompt="prompt_b", temperature=0.0),
+    ]
+
+    resolved = resolve_stage_blocks(
+        stage_blocks,
+        plan_name="test",
+        include=(),
+        exclude=(),
+        overrides={},
         capture_stage="stage_b",
-        metadata={},
+        capture_key="final_out",
     )
 
-    pipeline_root = build_pipeline_block(resolved, refinement_policy="none", capture_key="final_out")
+    pipeline_root = make_pipeline_root_block(resolved)
     runner.run(ctx, pipeline_root)
 
     assert ctx.outputs["a_out"] == "A_OUT"
     assert ctx.outputs["final_out"] == "B_OUT"
 
 
-def test_capture_stage_output_key_conflict_fails_fast(tmp_path):
-    resolved = ResolvedStages(
-        stages=(
-            StageSpec(
-                stage_id="stage_a",
-                prompt="prompt_a",
-                temperature=0.0,
-                is_default_capture=True,
-                output_key="other_key",
-            ),
+def test_capture_stage_and_step_capture_key_can_coexist(tmp_path):
+    class FakeTextAI:
+        def text_chat(self, messages, **kwargs):
+            return "OK"
+
+    ctx = _make_ctx(tmp_path)
+    runner = ChatRunner(ai_text=FakeTextAI())
+
+    stage_blocks = [
+        make_chat_stage_block(
+            "stage_a",
+            prompt="prompt_a",
+            temperature=0.0,
+            step_capture_key="other_key",
         ),
+    ]
+    resolved = resolve_stage_blocks(
+        stage_blocks,
+        plan_name="test",
+        include=(),
+        exclude=(),
+        overrides={},
         capture_stage="stage_a",
-        metadata={},
+        capture_key="image_prompt",
     )
 
-    with pytest.raises(ValueError, match="Capture stage output_key conflict"):
-        build_pipeline_block(resolved, refinement_policy="none", capture_key="image_prompt")
+    runner.run(ctx, make_pipeline_root_block(resolved))
+
+    assert ctx.outputs["other_key"] == "OK"
+    assert ctx.outputs["image_prompt"] == "OK"

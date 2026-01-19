@@ -17,7 +17,7 @@ ScoringIdeaProfileSource = Literal[
     "generator_hints_plus_dislikes",
     "none",
 ]
-PromptNoveltyMethod = Literal["df_overlap_v1", "legacy_v0"]
+PromptNoveltyMethod = Literal["df_overlap_v1"]
 NoveltyPenaltyScaling = Literal["linear", "sqrt", "quadratic"]
 BlackboxRefineAlgorithm = Literal["hillclimb", "beam"]
 BlackboxRefineProfileSource = Literal[
@@ -295,7 +295,6 @@ class PromptConceptsConfig:
 class PromptStageOverride:
     temperature: float | None = None
     params: dict[str, Any] | None = None
-    refinement_policy: str | None = None
 
 
 @dataclass(frozen=True)
@@ -321,11 +320,12 @@ class RunConfig:
     prompt_concepts: PromptConceptsConfig
 
     prompt_plan: str
-    prompt_refinement_policy: str
     prompt_stages_include: tuple[str, ...]
     prompt_stages_exclude: tuple[str, ...]
-    prompt_stages_sequence: tuple[str, ...]
+    prompt_stages_sequence: tuple[Any, ...]
     prompt_stages_overrides: Mapping[str, PromptStageOverride]
+    prompt_stage_configs_defaults: Mapping[str, Mapping[str, Any]]
+    prompt_stage_configs_instances: Mapping[str, Mapping[str, Any]]
     prompt_output_capture_stage: str | None
     prompt_refine_only_draft: str | None
     prompt_refine_only_draft_path: str | None
@@ -371,6 +371,12 @@ class RunConfig:
         if "strict" in cfg:
             strict_unknown_keys = parse_bool(cfg.get("strict"), "strict")
 
+        raw_image_cfg: Any = cfg.get("image")
+        if isinstance(raw_image_cfg, Mapping) and "save_path" in raw_image_cfg:
+            raise ValueError(
+                "Config key image.save_path has been removed; use image.generation_path instead."
+            )
+
         ANY: object = object()
 
         def collect_unknown_keys(
@@ -412,7 +418,6 @@ class RunConfig:
             "titles_manifest_path": None,
             "random_seed": None,
             "plan": None,
-            "refinement": {"policy": None},
             "concepts": {
                 "selection": {
                     "strategy": None,
@@ -434,6 +439,7 @@ class RunConfig:
                 "sequence": None,
                 "overrides": ANY,  # validated explicitly elsewhere (dynamic keys).
             },
+            "stage_configs": ANY,  # validated explicitly elsewhere (dynamic stage-owned keys).
             "output": {"capture_stage": None},
             "refine_only": {"draft": None, "draft_path": None},
             "scoring": {
@@ -506,7 +512,6 @@ class RunConfig:
 
         image_schema: Mapping[str, Any] = {
             "generation_path": None,
-            "save_path": None,
             "upscale_path": None,
             "log_path": None,
             "caption_font_path": None,
@@ -691,16 +696,6 @@ class RunConfig:
         upscale_enabled = optional_bool("upscale.enabled", default=False)
 
         generation_dir_raw = optional_str("image.generation_path")
-        save_dir_raw = optional_str("image.save_path")
-        if generation_dir_raw and save_dir_raw:
-            warnings.append(
-                "Both image.generation_path and image.save_path are set; using image.generation_path."
-            )
-        if not generation_dir_raw and save_dir_raw:
-            warnings.append(
-                "Config key image.save_path is deprecated; use image.generation_path instead."
-            )
-            generation_dir_raw = save_dir_raw
 
         if run_mode == "full" and not generation_dir_raw:
             raise ValueError("Missing required config: image.generation_path")
@@ -827,23 +822,6 @@ class RunConfig:
             if not prompt_plan:
                 raise ValueError("Invalid config value for prompt.plan: must be a non-empty string")
 
-        raw_refinement_cfg: Any = prompt_cfg.get("refinement")
-        if raw_refinement_cfg is None:
-            refinement_cfg: Mapping[str, Any] = {}
-        elif not isinstance(raw_refinement_cfg, Mapping):
-            raise ValueError("Invalid config type for prompt.refinement: expected mapping")
-        else:
-            refinement_cfg = raw_refinement_cfg
-
-        raw_refinement_policy: Any = refinement_cfg.get("policy", "tot")
-        if raw_refinement_policy is None:
-            raise ValueError("Invalid config value for prompt.refinement.policy: None")
-        if not isinstance(raw_refinement_policy, str):
-            raise ValueError("Invalid config type for prompt.refinement.policy: expected string")
-        prompt_refinement_policy = raw_refinement_policy.strip().lower()
-        if not prompt_refinement_policy:
-            raise ValueError("Invalid config value for prompt.refinement.policy: must be a non-empty string")
-
         stages_cfg_raw: Any = prompt_cfg.get("stages")
         if stages_cfg_raw is None:
             stages_cfg: Mapping[str, Any] = {}
@@ -867,111 +845,48 @@ class RunConfig:
                 items.append(trimmed)
             return tuple(items)
 
+        def parse_stage_sequence(value: Any, path: str) -> tuple[Any, ...]:
+            if value is None:
+                return ()
+            if not isinstance(value, (list, tuple)):
+                raise ValueError(f"Invalid config type for {path}: expected list[str|mapping]")
+
+            entries: list[Any] = []
+            for idx, item in enumerate(value):
+                if isinstance(item, str):
+                    trimmed = item.strip()
+                    if not trimmed:
+                        raise ValueError(f"Invalid config value for {path}[{idx}]: empty string")
+                    entries.append(trimmed)
+                    continue
+
+                if isinstance(item, Mapping):
+                    allowed = {"stage", "name"}
+                    for key in item.keys():
+                        if key not in allowed:
+                            raise ValueError(f"Unknown config key {path}[{idx}].{key}")
+                    raw_stage = item.get("stage")
+                    raw_name = item.get("name")
+                    if not isinstance(raw_stage, str) or not raw_stage.strip():
+                        raise ValueError(f"{path}[{idx}].stage missing/invalid")
+                    if not isinstance(raw_name, str) or not raw_name.strip():
+                        raise ValueError(f"{path}[{idx}].name missing/invalid")
+                    entries.append({"stage": raw_stage.strip(), "name": raw_name.strip()})
+                    continue
+
+                raise ValueError(
+                    f"Invalid config type for {path}[{idx}]: expected string or mapping"
+                )
+
+            return tuple(entries)
+
         prompt_stages_include = parse_string_list(stages_cfg.get("include"), "prompt.stages.include")
         prompt_stages_exclude = parse_string_list(stages_cfg.get("exclude"), "prompt.stages.exclude")
-        prompt_stages_sequence = parse_string_list(stages_cfg.get("sequence"), "prompt.stages.sequence")
+        prompt_stages_sequence = parse_stage_sequence(stages_cfg.get("sequence"), "prompt.stages.sequence")
 
         if prompt_plan == "custom":
             if not prompt_stages_sequence:
                 raise ValueError("prompt.plan=custom requires prompt.stages.sequence")
-
-            try:
-                from image_project.impl.current.prompting import StageCatalog  # noqa: PLC0415
-            except Exception as exc:  # noqa: BLE001
-                raise ValueError(
-                    "prompt.plan=custom requires a working StageCatalog, but it failed to import: "
-                    f"{exc}"
-                ) from exc
-
-            available = StageCatalog.available()
-            available_set = set(available)
-
-            from collections import defaultdict as _defaultdict  # noqa: PLC0415
-            import difflib  # noqa: PLC0415
-
-            suffix_to_full: dict[str, list[str]] = _defaultdict(list)
-            for stage_id in available:
-                suffix_to_full[stage_id.split(".", 1)[-1]].append(stage_id)
-
-            def suggest(stage_id: str) -> list[str]:
-                if not stage_id:
-                    return []
-                suggestions: list[str] = []
-                suggestions.extend(difflib.get_close_matches(stage_id, available, n=6, cutoff=0.6))
-
-                suffix = stage_id.split(".", 1)[-1]
-                close_suffixes = difflib.get_close_matches(
-                    suffix, sorted(suffix_to_full.keys()), n=6, cutoff=0.6
-                )
-                for match_suffix in close_suffixes:
-                    suggestions.extend(sorted(suffix_to_full.get(match_suffix, ())))
-
-                seen: set[str] = set()
-                unique: list[str] = []
-                for item in suggestions:
-                    if item in seen:
-                        continue
-                    seen.add(item)
-                    unique.append(item)
-                return unique[:8]
-
-            resolved_sequence: list[str] = []
-            unknown: list[tuple[str, str, list[str]]] = []
-            ambiguous: list[tuple[str, str, list[str]]] = []
-
-            for idx, raw_stage_id in enumerate(prompt_stages_sequence):
-                path = f"prompt.stages.sequence[{idx}]"
-                stage_id = raw_stage_id.strip()
-
-                if stage_id in available_set:
-                    resolved_sequence.append(stage_id)
-                    continue
-
-                if "." not in stage_id:
-                    matches = sorted(s for s in available if s.endswith("." + stage_id))
-                    if len(matches) == 1:
-                        resolved_sequence.append(matches[0])
-                        continue
-                    if len(matches) > 1:
-                        ambiguous.append((path, stage_id, matches))
-                        continue
-
-                unknown.append((path, stage_id, suggest(stage_id)))
-
-            if unknown or ambiguous:
-                lines = [
-                    "Invalid stage ids for prompt.plan=custom (StageCatalog validation failed):",
-                ]
-                for path, stage_id, suggestions in unknown:
-                    if suggestions:
-                        lines.append(
-                            f"- {path}={stage_id!r} is unknown (did you mean: {', '.join(suggestions)})"
-                        )
-                    else:
-                        lines.append(f"- {path}={stage_id!r} is unknown")
-
-                for path, stage_id, matches in ambiguous:
-                    lines.append(
-                        f"- {path}={stage_id!r} is ambiguous (matches: {', '.join(matches)}); "
-                        "use a fully-qualified stage id"
-                    )
-
-                lines.append("Run `pdm run list-stages` to see valid stage ids.")
-                raise ValueError("\n".join(lines))
-
-            if len(set(resolved_sequence)) != len(resolved_sequence):
-                seen: set[str] = set()
-                dups: list[str] = []
-                for item in resolved_sequence:
-                    if item in seen and item not in dups:
-                        dups.append(item)
-                    seen.add(item)
-                raise ValueError(
-                    "prompt.stages.sequence contains duplicate stage ids after normalization: "
-                    + ", ".join(dups)
-                )
-
-            prompt_stages_sequence = tuple(resolved_sequence)
 
         raw_overrides: Any = stages_cfg.get("overrides")
         overrides_cfg: Mapping[str, Any]
@@ -992,7 +907,7 @@ class RunConfig:
                     f"Invalid config type for prompt.stages.overrides.{stage_id}: expected mapping"
                 )
 
-            allowed_keys = {"temperature", "params", "refinement_policy"}
+            allowed_keys = {"temperature", "params"}
             for key in raw_override.keys():
                 if key not in allowed_keys:
                     raise ValueError(f"Unknown config key prompt.stages.overrides.{stage_id}.{key}")
@@ -1017,20 +932,49 @@ class RunConfig:
                     )
                 params = dict(override_params)
 
-            override_ref_policy = raw_override.get("refinement_policy")
-            refinement_policy: str | None = None
-            if override_ref_policy is not None:
-                if not isinstance(override_ref_policy, str) or not override_ref_policy.strip():
-                    raise ValueError(
-                        f"Invalid config value for prompt.stages.overrides.{stage_id}.refinement_policy: must be a non-empty string"
-                    )
-                refinement_policy = override_ref_policy.strip().lower()
-
             prompt_stages_overrides[stage_id] = PromptStageOverride(
                 temperature=temperature,
                 params=params,
-                refinement_policy=refinement_policy,
             )
+
+        raw_stage_configs: Any = prompt_cfg.get("stage_configs")
+        if raw_stage_configs is None:
+            stage_configs_cfg: Mapping[str, Any] = {}
+        elif not isinstance(raw_stage_configs, Mapping):
+            raise ValueError("Invalid config type for prompt.stage_configs: expected mapping")
+        else:
+            stage_configs_cfg = raw_stage_configs
+
+        allowed_stage_configs_keys = {"defaults", "instances"}
+        for key in stage_configs_cfg.keys():
+            if key not in allowed_stage_configs_keys:
+                raise ValueError(f"Unknown config key prompt.stage_configs.{key}")
+
+        def parse_stage_config_mapping(value: Any, *, path: str) -> dict[str, dict[str, Any]]:
+            if value is None:
+                return {}
+            if not isinstance(value, Mapping):
+                raise ValueError(f"Invalid config type for {path}: expected mapping")
+
+            parsed: dict[str, dict[str, Any]] = {}
+            for raw_key, raw_cfg in value.items():
+                if not isinstance(raw_key, str) or not raw_key.strip():
+                    raise ValueError(f"{path} keys must be non-empty strings")
+                key = raw_key.strip()
+                if raw_cfg is None:
+                    parsed[key] = {}
+                    continue
+                if not isinstance(raw_cfg, Mapping):
+                    raise ValueError(f"Invalid config type for {path}.{key}: expected mapping")
+                parsed[key] = dict(raw_cfg)
+            return parsed
+
+        prompt_stage_configs_defaults = parse_stage_config_mapping(
+            stage_configs_cfg.get("defaults"), path="prompt.stage_configs.defaults"
+        )
+        prompt_stage_configs_instances = parse_stage_config_mapping(
+            stage_configs_cfg.get("instances"), path="prompt.stage_configs.instances"
+        )
 
         raw_output_cfg: Any = prompt_cfg.get("output")
         if raw_output_cfg is None:
@@ -1198,10 +1142,10 @@ class RunConfig:
         if not isinstance(raw_novelty_method, str):
             raise ValueError("Invalid config type for prompt.scoring.novelty.method: expected string")
         novelty_method = raw_novelty_method.strip().lower()
-        if novelty_method not in ("df_overlap_v1", "legacy_v0"):
+        if novelty_method != "df_overlap_v1":
             raise ValueError(
                 "Unknown prompt.scoring.novelty.method: "
-                f"{raw_novelty_method!r} (expected: df_overlap_v1|legacy_v0)"
+                f"{raw_novelty_method!r} (expected: df_overlap_v1)"
             )
 
         df_min = parse_int(novelty_cfg.get("df_min", 3), "prompt.scoring.novelty.df_min")
@@ -1289,7 +1233,6 @@ class RunConfig:
         plan_requires_blackbox_refine = prompt_plan in (
             "blackbox_refine",
             "blackbox_refine_only",
-            "blackbox_refine_legacy",
         )
         prompt_blackbox_refine: PromptBlackboxRefineConfig | None = None
 
@@ -2096,11 +2039,12 @@ class RunConfig:
                 prompt_blackbox_refine=prompt_blackbox_refine,
                 prompt_concepts=prompt_concepts,
                 prompt_plan=prompt_plan,
-                prompt_refinement_policy=prompt_refinement_policy,
                 prompt_stages_include=prompt_stages_include,
                 prompt_stages_exclude=prompt_stages_exclude,
                 prompt_stages_sequence=prompt_stages_sequence,
                 prompt_stages_overrides=prompt_stages_overrides,
+                prompt_stage_configs_defaults=prompt_stage_configs_defaults,
+                prompt_stage_configs_instances=prompt_stage_configs_instances,
                 prompt_output_capture_stage=prompt_output_capture_stage,
                 prompt_refine_only_draft=prompt_refine_only_draft,
                 prompt_refine_only_draft_path=prompt_refine_only_draft_path,
