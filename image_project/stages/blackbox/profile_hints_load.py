@@ -9,13 +9,11 @@ KIND_ID = "blackbox.profile_hints_load"
 
 
 def _build(_inputs: PlanInputs, *, instance_id: str, cfg: ConfigNamespace):
-    def _action(ctx: RunContext) -> str:
-        hints_path = ctx.cfg.prompt_scoring.generator_profile_hints_path
-        if not hints_path:
-            raise ValueError(
-                "blackbox.profile_hints_load requires prompt.scoring.generator_profile_hints_path"
-            )
+    hints_path = cfg.get_str("hints_path", default=None)
+    if not hints_path:
+        raise ValueError("blackbox.profile_hints_load requires hints_path")
 
+    def _action(ctx: RunContext) -> str:
         from image_project.framework.profile_io import load_generator_profile_hints
 
         hints = load_generator_profile_hints(hints_path)

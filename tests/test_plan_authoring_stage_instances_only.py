@@ -4,6 +4,7 @@ import pandas as pd
 
 from image_project.framework.config import RunConfig
 from image_project.framework.prompt_pipeline import PlanInputs
+from image_project.framework.prompt_pipeline.pipeline_overrides import PipelineOverrides
 from image_project.impl.current.plans import PromptPlanManager
 from pipelinekit.stage_types import StageInstance
 
@@ -26,31 +27,8 @@ def test_all_registered_plans_return_stage_instances_only(tmp_path):
     cfg_dict = {
         "run": {"mode": "prompt_only"},
         "prompt": {
-            "plan": "standard",
             "categories_path": str(categories_path),
             "profile_path": str(profile_path),
-            "generations_path": str(generations_csv),
-            "random_seed": 123,
-            "concepts": {"filters": {"enabled": False}},
-            "stages": {"sequence": ["standard.initial_prompt"]},
-            "scoring": {
-                "enabled": True,
-                "num_ideas": 2,
-                "exploration_rate": 0.0,
-                "judge_temperature": 0.0,
-                "generator_profile_abstraction": False,
-                "novelty": {"enabled": False, "window": 0},
-            },
-            "blackbox_refine": {
-                "enabled": True,
-                "iterations": 1,
-                "algorithm": "hillclimb",
-                "branching_factor": 2,
-                "include_parents_as_candidates": False,
-                "generator_temperature": 0.9,
-                "variation_prompt": {"template": "v1", "include_profile": False},
-                "judging": {"judges": [{"id": "j1"}], "aggregation": "mean"},
-            },
         },
         "image": {
             "generation_path": str(generation_dir),
@@ -64,6 +42,13 @@ def test_all_registered_plans_return_stage_instances_only(tmp_path):
     cfg, _warnings = RunConfig.from_dict(cfg_dict)
     inputs = PlanInputs(
         cfg=cfg,
+        pipeline=PipelineOverrides(
+            include=(),
+            exclude=(),
+            sequence=("preprompt.select_concepts",),
+            overrides={},
+            capture_stage=None,
+        ),
         ai_text=None,
         prompt_data=pd.DataFrame(),
         user_profile=pd.DataFrame(),

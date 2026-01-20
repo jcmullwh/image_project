@@ -40,8 +40,18 @@ def _build(inputs: PlanInputs, *, instance_id: str, cfg: ConfigNamespace):
 
     from image_project.framework.scoring import expected_idea_ids
 
-    scoring_cfg = inputs.cfg.prompt_scoring
-    idea_ids = expected_idea_ids(scoring_cfg.num_ideas)
+    num_ideas = cfg.get_int("num_ideas", default=6, min_value=1)
+    idea_profile_source = cfg.get_str(
+        "idea_profile_source",
+        default="none",
+        choices=("raw", "generator_hints", "generator_hints_plus_dislikes", "none"),
+    )
+    if idea_profile_source is None:
+        raise ValueError("blackbox.idea_card_generate.idea_profile_source cannot be null")
+    model = cfg.get_str("model", default=None)
+    temperature = cfg.get_float("temperature", default=0.8, min_value=0.0, max_value=2.0)
+
+    idea_ids = expected_idea_ids(int(num_ideas))
     try:
         idea_ordinal = idea_ids.index(idea_id) + 1
     except ValueError:
@@ -55,7 +65,6 @@ def _build(inputs: PlanInputs, *, instance_id: str, cfg: ConfigNamespace):
     directive = _DIVERSITY_DIRECTIVES[(idea_ordinal - 1) % len(_DIVERSITY_DIRECTIVES)]
 
     def _prompt(ctx: RunContext) -> str:
-        idea_profile_source = scoring_cfg.idea_profile_source
         if idea_profile_source == "none":
             hints = ""
         elif idea_profile_source in ("raw", "generator_hints", "generator_hints_plus_dislikes"):
@@ -63,11 +72,11 @@ def _build(inputs: PlanInputs, *, instance_id: str, cfg: ConfigNamespace):
                 ctx,
                 source=idea_profile_source,
                 stage_id=instance_id,
-                config_path="prompt.scoring.idea_profile_source",
+                config_path=f"{cfg.path}.idea_profile_source",
             )
         else:  # pragma: no cover - guarded by config validation
             raise ValueError(
-                "Unknown prompt.scoring.idea_profile_source: "
+                "Unknown blackbox.idea_card_generate.idea_profile_source: "
                 f"{idea_profile_source!r} (expected: raw|generator_hints|generator_hints_plus_dislikes|none)"
             )
 
@@ -76,7 +85,7 @@ def _build(inputs: PlanInputs, *, instance_id: str, cfg: ConfigNamespace):
             generator_profile_hints=str(hints or ""),
             idea_id=idea_id,
             idea_ordinal=int(idea_ordinal),
-            num_ideas=scoring_cfg.num_ideas,
+            num_ideas=int(num_ideas),
             context_guidance=context_guidance,
             diversity_directive=directive,
         )
@@ -85,9 +94,10 @@ def _build(inputs: PlanInputs, *, instance_id: str, cfg: ConfigNamespace):
     return make_chat_stage_block(
         instance_id,
         prompt=_prompt,
-        temperature=0.8,
+        temperature=float(temperature),
         merge="none",
         step_capture_key=output_key,
+        params={"model": model} if model else None,
         tags=("blackbox",),
         doc="Generate one idea card (strict JSON).",
         source="prompts.blackbox.idea_card_generate_prompt",

@@ -11,8 +11,14 @@ KIND_ID = "blackbox.image_prompt_refine"
 
 
 def _build(inputs: PlanInputs, *, instance_id: str, cfg: ConfigNamespace):
-    scoring_cfg = inputs.cfg.prompt_scoring
-    final_profile_source = scoring_cfg.final_profile_source
+    final_profile_source = cfg.get_str(
+        "final_profile_source",
+        default="raw",
+        choices=("raw", "generator_hints", "generator_hints_plus_dislikes"),
+    )
+    if final_profile_source is None:
+        raise ValueError("blackbox.image_prompt_refine.final_profile_source cannot be null")
+    temperature = cfg.get_float("temperature", default=0.4, min_value=0.0, max_value=2.0)
 
     def _prompt(ctx: RunContext) -> str:
         selected_card = ctx.outputs.get("selected_idea_card")
@@ -29,14 +35,14 @@ def _build(inputs: PlanInputs, *, instance_id: str, cfg: ConfigNamespace):
                 ctx,
                 source=final_profile_source,
                 stage_id=KIND_ID,
-                config_path="prompt.scoring.final_profile_source",
+                config_path=f"{cfg.path}.final_profile_source",
             ),
             selected_idea_card=selected_card,
             draft_prompt=draft,
         )
 
     cfg.assert_consumed()
-    return make_chat_stage_block(instance_id, prompt=_prompt, temperature=0.4)
+    return make_chat_stage_block(instance_id, prompt=_prompt, temperature=float(temperature))
 
 
 STAGE = StageRef(

@@ -5,6 +5,7 @@ import pytest
 
 from image_project.framework.config import RunConfig
 from image_project.framework.prompt_pipeline import PlanInputs
+from image_project.framework.prompt_pipeline.pipeline_overrides import PromptPipelineConfig
 from image_project.impl.current.plans import PromptPlanManager
 
 
@@ -31,8 +32,12 @@ def test_custom_plan_unknown_stage_ids_fail_fast_with_suggestions(tmp_path):
     cfg_dict["prompt"]["stages"] = {"sequence": ["ab.scene_draf"]}
 
     cfg, _warnings = RunConfig.from_dict(cfg_dict)
+    prompt_cfg, _prompt_warnings = PromptPipelineConfig.from_root_dict(
+        cfg_dict, run_mode=cfg.run_mode, generation_dir=cfg.generation_dir
+    )
     inputs = PlanInputs(
         cfg=cfg,
+        pipeline=prompt_cfg.stages,
         ai_text=None,
         prompt_data=pd.DataFrame(),
         user_profile=pd.DataFrame(),

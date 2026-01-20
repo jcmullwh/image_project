@@ -15,6 +15,10 @@ from image_project.framework.prompt_pipeline import (
     make_pipeline_root_block,
     resolve_stage_blocks,
 )
+from image_project.framework.prompt_pipeline.pipeline_overrides import (
+    PipelineOverrides,
+    PromptPipelineConfig,
+)
 from image_project.framework.runtime import RunContext
 from image_project.impl.current.plans import PromptPlanManager
 from image_project.stages.registry import get_stage_registry
@@ -23,6 +27,7 @@ from image_project.stages.registry import get_stage_registry
 def _base_cfg_dict(tmp_path) -> dict:
     return {
         "prompt": {
+            "plan": "standard",
             "categories_path": str(tmp_path / "categories.csv"),
             "profile_path": str(tmp_path / "profile.csv"),
             "generations_path": str(tmp_path / "generations.csv"),
@@ -72,6 +77,7 @@ def _make_standard_stage_nodes(cfg: RunConfig) -> tuple[list, PlanInputs]:
     user_profile = pd.DataFrame({"Likes": ["x"], "Dislikes": [None]})
     inputs = PlanInputs(
         cfg=cfg,
+        pipeline=PipelineOverrides(include=(), exclude=(), sequence=(), overrides={}, capture_stage=None),
         ai_text=None,
         prompt_data=prompt_data,
         user_profile=user_profile,
@@ -127,8 +133,8 @@ def test_unknown_stage_id_in_include_fails_fast(tmp_path):
             include=("nope",),
             exclude=(),
             overrides={},
-            stage_configs_defaults=cfg.prompt_stage_configs_defaults,
-            stage_configs_instances=cfg.prompt_stage_configs_instances,
+            stage_configs_defaults={},
+            stage_configs_instances={},
             stage_registry=get_stage_registry(),
             inputs=inputs,
         )
@@ -145,8 +151,8 @@ def test_capture_stage_not_in_resolved_stages_fails_fast(tmp_path):
             include=("select_concepts", "filter_concepts", "initial_prompt"),
             exclude=(),
             overrides={},
-            stage_configs_defaults=cfg.prompt_stage_configs_defaults,
-            stage_configs_instances=cfg.prompt_stage_configs_instances,
+            stage_configs_defaults={},
+            stage_configs_instances={},
             stage_registry=get_stage_registry(),
             inputs=inputs,
         )
@@ -173,8 +179,8 @@ def test_refine_tot_enclave_stage_produces_tot_enclave_steps(tmp_path):
         include=("select_concepts", "initial_prompt", "refine.tot_enclave"),
         exclude=(),
         overrides={},
-        stage_configs_defaults=cfg.prompt_stage_configs_defaults,
-        stage_configs_instances=cfg.prompt_stage_configs_instances,
+        stage_configs_defaults={},
+        stage_configs_instances={},
         stage_registry=get_stage_registry(),
         inputs=inputs,
     )
@@ -219,8 +225,8 @@ def test_excluding_refine_tot_enclave_removes_tot_enclave_steps(tmp_path):
         include=("select_concepts", "initial_prompt", "refine.tot_enclave"),
         exclude=("refine.tot_enclave",),
         overrides={},
-        stage_configs_defaults=cfg.prompt_stage_configs_defaults,
-        stage_configs_instances=cfg.prompt_stage_configs_instances,
+        stage_configs_defaults={},
+        stage_configs_instances={},
         stage_registry=get_stage_registry(),
         inputs=inputs,
     )
@@ -249,17 +255,30 @@ def test_baseline_capture_first_stage_output(tmp_path):
     cfg_dict["prompt"]["stages"] = {"include": ["initial_prompt"]}
     cfg_dict["prompt"]["output"] = {"capture_stage": "initial_prompt"}
     cfg, _warnings = RunConfig.from_dict(cfg_dict)
+    prompt_cfg, _prompt_warnings = PromptPipelineConfig.from_root_dict(
+        cfg_dict, run_mode=cfg.run_mode, generation_dir=cfg.generation_dir
+    )
 
     plan = PromptPlanManager.get("standard")
     stage_nodes, inputs = _make_standard_stage_nodes(cfg)
+    inputs = PlanInputs(
+        cfg=cfg,
+        pipeline=prompt_cfg.stages,
+        ai_text=inputs.ai_text,
+        prompt_data=inputs.prompt_data,
+        user_profile=inputs.user_profile,
+        preferences_guidance=inputs.preferences_guidance,
+        context_guidance=inputs.context_guidance,
+        rng=inputs.rng,
+    )
     compiled = compile_stage_nodes(
         stage_nodes,
         plan_name=plan.name,
-        include=cfg.prompt_stages_include,
-        exclude=cfg.prompt_stages_exclude,
-        overrides=cfg.prompt_stages_overrides,
-        stage_configs_defaults=cfg.prompt_stage_configs_defaults,
-        stage_configs_instances=cfg.prompt_stage_configs_instances,
+        include=prompt_cfg.stages.include,
+        exclude=prompt_cfg.stages.exclude,
+        overrides=prompt_cfg.stages.overrides,
+        stage_configs_defaults=prompt_cfg.stage_configs_defaults,
+        stage_configs_instances=prompt_cfg.stage_configs_instances,
         initial_outputs=("selected_concepts",),
         stage_registry=get_stage_registry(),
         inputs=inputs,
@@ -270,7 +289,7 @@ def test_baseline_capture_first_stage_output(tmp_path):
         include=(),
         exclude=(),
         overrides=compiled.overrides,
-        capture_stage=cfg.prompt_output_capture_stage,
+        capture_stage=prompt_cfg.stages.capture_stage,
     )
 
     class FakeTextAI:

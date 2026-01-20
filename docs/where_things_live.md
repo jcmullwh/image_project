@@ -43,11 +43,15 @@ Common locations inside framework:
 - Prompt plans, plan plugins, and experiment-specific wiring.
 - May import `image_project.stages` + `image_project.framework` + `image_project.foundation` + `image_project.prompts`.
 - Must not be a prompt-policy dumping ground: prompt templates belong in `image_project/prompts/`.
+- Experiments are registered plugins under:
+  - `image_project/impl/current/experiments.py` (registry + interface)
+  - `image_project/impl/current/experiment_plugins/*` (experiment definitions)
 
 ### `image_project/app/` and `tools/` (entrypoints + maintenance)
 
 - CLI entrypoints (`run_generation()`), docs generation tools, experiment runners.
 - Can import the layers above; should not contain prompt policy.
+- Canonical experiment runner: `image_project/app/experiment_runner.py` (plugins supply plan-building only).
 
 ## Dependency direction
 
@@ -90,7 +94,7 @@ prompt:
 
 ### Blackbox refine loop
 
-- Loop implementation + iteration stage: `image_project/stages/blackbox_refine/loop.py`
+- Loop stage implementation (init + N iterations + finalize): `image_project/stages/blackbox_refine/loop.py`
 - Prompt plans that use it: `image_project/impl/current/plan_plugins/blackbox_refine.py`
 
 Example config override (apply to all iterations via kind defaults):
@@ -99,9 +103,9 @@ Example config override (apply to all iterations via kind defaults):
 prompt:
   stage_configs:
     defaults:
-      blackbox_refine.iter:
-        judges: ["j1"]
-        candidates_per_iter: 2
+      blackbox_refine.loop:
+        iterations: 6
+        algorithm: hillclimb  # hillclimb|beam
 ```
 
 ## Observability

@@ -13,26 +13,38 @@ In `config/config.yaml`:
 
 ```yaml
 prompt:
-  scoring:
-    enabled: true
-    num_ideas: 6
-    exploration_rate: 0.15
-    judge_temperature: 0.0
-    judge_model: null
-    generator_profile_abstraction: true
-    generator_profile_hints_path: null  # optional: load hints from file instead of generating
-    novelty:
-      enabled: true
-      window: 25
-      method: df_overlap_v1   # df_overlap_v1
-      df_min: 3
-      max_motifs: 200
-      min_token_len: 3
-      df_cap: 10
-      max_penalty: 20
-      alpha_only: true
-      scaling: linear         # linear | sqrt | quadratic
-      stopwords_extra: []
+  plan: blackbox
+  stage_configs:
+    defaults:
+      blackbox.generate_idea_cards:
+        num_ideas: 6
+        idea_profile_source: generator_hints   # raw|generator_hints|generator_hints_plus_dislikes|none
+        temperature: 0.8
+      blackbox.idea_cards_judge_score:
+        judge_profile_source: raw              # raw|generator_hints|generator_hints_plus_dislikes
+        judge_temperature: 0.0
+        judge_model: null
+      blackbox.select_idea_card:
+        exploration_rate: 0.15
+        num_ideas: 6
+        novelty:
+          enabled: true
+          window: 25
+          method: df_overlap_v1   # df_overlap_v1
+          df_min: 3
+          max_motifs: 200
+          min_token_len: 3
+          df_cap: 10
+          max_penalty: 20
+          alpha_only: true
+          scaling: linear         # linear | sqrt | quadratic
+          stopwords_extra: []
+      blackbox.prepare:
+        novelty:
+          enabled: true
+          window: 25
+      blackbox.generator_profile_hints:
+        mode: abstract             # raw|file|abstract
 ```
 
 ## Novelty Methods
@@ -41,11 +53,11 @@ prompt:
 
 ## Flow
 
-1. Prepare scoring context (`blackbox.prepare`) including novelty summary and default generator hints.
-2. Load a generator-safe profile summary (`blackbox.profile_hints_load`) when configured, otherwise generate it (`blackbox.profile_abstraction`) when enabled.
-3. Generate N idea cards (`blackbox.idea_cards_generate`) as strict JSON.
+1. Prepare blackbox context (`blackbox.prepare`) including novelty summary and default generator hints.
+2. Produce `generator_profile_hints` (`blackbox.generator_profile_hints`) via raw/file/abstraction mode.
+3. Generate N idea cards (`blackbox.generate_idea_cards`) as strict JSON (composite stage).
 4. Score idea cards with a separate judge (`blackbox.idea_cards_judge_score`) as strict JSON `{ "scores": [{"id","score"}] }`.
-5. Select a winner in code (`blackbox.select_idea_card`) using epsilon-greedy and optional novelty penalty from recent `prompt.generations_path` history.
+5. Select a winner in code (`blackbox.select_idea_card`) using epsilon-greedy and optional novelty penalty from recent generations history.
 6. Generate the final prompt from the selected idea card (`blackbox.image_prompt_creation`).
 
 ## Prompt Refinement Loop (Blackbox)
@@ -55,9 +67,9 @@ Two additional plans add an iterative *prompt refinement loop* on top of blackbo
 - `prompt.plan: blackbox_refine`: uses the blackbox idea-card pipeline to produce a seed prompt, then refines it for `m` iterations.
 - `prompt.plan: blackbox_refine_only`: uses a user-provided draft prompt as the seed (`prompt.refine_only.draft` / `draft_path`), then refines it for `m` iterations.
 
-The loop is configured under `prompt.blackbox_refine` (algorithm, branching factor, iterations, multiple judges + aggregation, mutation directives, etc.).
+The loop is configured under `prompt.stage_configs.defaults.blackbox_refine.loop` (algorithm, branching factor, iterations, multiple judges + aggregation, mutation directives, etc.).
 
-If `prompt.blackbox_refine.max_prompt_chars` is set, it is included as an output constraint in the generator prompt, but candidate prompts are **not truncated in code** (judges see the full text).
+If `prompt.stage_configs.defaults.blackbox_refine.loop.max_prompt_chars` is set, candidate prompts are truncated in code (with a warning logged) so judges never see over-limit prompts.
 
 ### Score Feedback Gradient (Best/Worst)
 
@@ -67,10 +79,12 @@ If you want a directional "gradient" between what scored well vs poorly, enable:
 
 ```yaml
 prompt:
-  blackbox_refine:
-    variation_prompt:
-      score_feedback: best_worst        # none|best_worst
-      score_feedback_max_chars: 900     # per prompt example
+  stage_configs:
+    defaults:
+      blackbox_refine.loop:
+        variation_prompt:
+          score_feedback: best_worst        # none|best_worst
+          score_feedback_max_chars: 900     # per prompt example
 ```
 
 When enabled, iteration `N` generator prompts include **two scored examples from iteration `N-1`**:

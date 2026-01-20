@@ -6,7 +6,7 @@ from dataclasses import asdict
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from image_project.framework.config import RunConfig
+from image_project.framework.prompt_pipeline.pipeline_overrides import PromptPipelineConfig
 from image_project.prompts import concept_filters as concept_filter_prompts
 
 
@@ -15,7 +15,9 @@ class ResolvedPromptInputs:
     draft_prompt: str | None = None
 
 
-def resolve_prompt_inputs(cfg: RunConfig, *, required: tuple[str, ...] = ()) -> ResolvedPromptInputs:
+def resolve_prompt_inputs(
+    prompt_cfg: PromptPipelineConfig, *, required: tuple[str, ...] = ()
+) -> ResolvedPromptInputs:
     """
     Resolve plan inputs that may involve I/O, separate from orchestration.
 
@@ -28,10 +30,11 @@ def resolve_prompt_inputs(cfg: RunConfig, *, required: tuple[str, ...] = ()) -> 
         raise ValueError(f"Unknown required inputs: {unknown_required}")
 
     draft_prompt: str | None = None
-    if cfg.prompt_refine_only_draft:
-        draft_prompt = cfg.prompt_refine_only_draft
-    elif cfg.prompt_refine_only_draft_path:
-        path = str(cfg.prompt_refine_only_draft_path)
+    refine_only = prompt_cfg.refine_only
+    if refine_only.draft:
+        draft_prompt = refine_only.draft
+    elif refine_only.draft_path:
+        path = str(refine_only.draft_path)
         if not os.path.exists(path):
             raise ValueError(f"prompt.refine_only.draft_path not found: {path}")
         with open(path, "r", encoding="utf-8") as handle:

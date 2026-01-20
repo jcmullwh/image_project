@@ -21,11 +21,13 @@ from image_project.framework.artifacts import append_generation_row
 from image_project.framework.config import RunConfig
 from image_project.framework.runtime import RunContext
 from image_project.framework.artifacts import write_transcript
+from image_project.framework.prompt_pipeline.pipeline_overrides import PromptPipelineConfig
 
 
 def test_config_validation_missing_prompt_categories_path_raises():
     cfg_dict = {
         "prompt": {
+            "plan": "standard",
             "profile_path": "x.csv",
             "generations_path": "g.csv",
         },
@@ -36,8 +38,8 @@ def test_config_validation_missing_prompt_categories_path_raises():
         },
     }
 
-    with pytest.raises(ValueError) as excinfo:
-        RunConfig.from_dict(cfg_dict)
+    with pytest.raises((ValueError, TypeError)) as excinfo:
+        PromptPipelineConfig.from_root_dict(cfg_dict, run_mode="full", generation_dir="out")
 
     assert "prompt.categories_path" in str(excinfo.value)
 
@@ -64,6 +66,7 @@ def test_config_validation_missing_image_generation_path_raises():
 def test_config_validation_empty_strings_are_missing():
     cfg_dict = {
         "prompt": {
+            "plan": "standard",
             "categories_path": "   ",
             "profile_path": "p.csv",
             "generations_path": "g.csv",
@@ -75,8 +78,8 @@ def test_config_validation_empty_strings_are_missing():
         },
     }
 
-    with pytest.raises(ValueError) as excinfo:
-        RunConfig.from_dict(cfg_dict)
+    with pytest.raises((ValueError, TypeError)) as excinfo:
+        PromptPipelineConfig.from_root_dict(cfg_dict, run_mode="full", generation_dir="out")
 
     assert "prompt.categories_path" in str(excinfo.value)
 
@@ -126,6 +129,7 @@ def test_config_validation_run_mode_unknown_raises(tmp_path):
 def test_config_validation_blackbox_profile_source_enum_is_strict(tmp_path, key):
     cfg_dict = {
         "prompt": {
+            "plan": "blackbox",
             "categories_path": str(tmp_path / "categories.csv"),
             "profile_path": str(tmp_path / "profile.csv"),
             "generations_path": str(tmp_path / "generations.csv"),
@@ -140,8 +144,8 @@ def test_config_validation_blackbox_profile_source_enum_is_strict(tmp_path, key)
         "upscale": {"enabled": False},
     }
 
-    with pytest.raises(ValueError, match=rf"prompt\.scoring\.{key}"):
-        RunConfig.from_dict(cfg_dict)
+    with pytest.raises(ValueError, match=r"Removed prompt config blocks present: prompt\.scoring"):
+        PromptPipelineConfig.from_root_dict(cfg_dict, run_mode="full", generation_dir=str(tmp_path / "generated"))
 
 
 def test_config_validation_requires_both_upscale_dimensions(tmp_path):
@@ -181,7 +185,7 @@ def test_config_validation_rejects_conflicting_upscale_size_and_aspect(tmp_path)
             "enabled": True,
             "target_width_px": 2000,
             "target_height_px": 1200,
-            "target_aspect_ratio": "16:9",
+            "target_aspect_ratio": "16/9",
         },
     }
 
@@ -203,7 +207,7 @@ def test_config_parses_target_aspect_ratio(tmp_path):
             "upscale_path": str(tmp_path / "upscaled"),
             "log_path": str(tmp_path / "logs"),
         },
-        "upscale": {"enabled": True, "target_aspect_ratio": "21:9"},
+        "upscale": {"enabled": True, "target_aspect_ratio": "21/9"},
     }
     cfg, _warnings = RunConfig.from_dict(cfg_dict)
 
@@ -605,6 +609,7 @@ def test_integration_offline_run_generation_writes_artifacts(tmp_path, monkeypat
 
     cfg_dict = {
         "prompt": {
+            "plan": "standard",
             "categories_path": str(categories_path),
             "profile_path": str(profile_path),
             "generations_path": str(generations_csv),
@@ -642,7 +647,7 @@ def test_integration_offline_run_generation_writes_artifacts(tmp_path, monkeypat
 
     transcript = json.loads(transcript_path.read_text(encoding="utf-8"))
     assert transcript["generation_id"] == generation_id
-    assert transcript["outputs"]["prompt_pipeline"]["requested_plan"] == "auto"
+    assert transcript["outputs"]["prompt_pipeline"]["requested_plan"] == "standard"
     assert transcript["outputs"]["prompt_pipeline"]["plan"] == "standard"
     assert transcript["outputs"]["prompt_pipeline"]["refinement_mode"] == "explicit_stages"
     assert transcript["outputs"]["prompt_pipeline"]["capture_stage"] == "refine.tot_enclave"
@@ -865,6 +870,7 @@ def test_transcript_written_on_pipeline_failure(tmp_path, monkeypatch):
 
     cfg_dict = {
         "prompt": {
+            "plan": "standard",
             "categories_path": str(categories_path),
             "profile_path": str(profile_path),
             "generations_path": str(generations_csv),
@@ -944,6 +950,7 @@ def test_run_review_runs_on_pipeline_failure(tmp_path, monkeypatch):
 
     cfg_dict = {
         "prompt": {
+            "plan": "standard",
             "categories_path": str(categories_path),
             "profile_path": str(profile_path),
             "generations_path": str(generations_csv),

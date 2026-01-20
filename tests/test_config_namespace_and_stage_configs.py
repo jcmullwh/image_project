@@ -6,6 +6,7 @@ import pytest
 from image_project.framework.config import RunConfig
 from pipelinekit.config_namespace import ConfigNamespace
 from image_project.framework.prompt_pipeline import PlanInputs, compile_stage_nodes
+from image_project.framework.prompt_pipeline.pipeline_overrides import PipelineOverrides
 from image_project.impl.current.plans import PromptPlanManager
 from image_project.stages.registry import get_stage_registry
 
@@ -30,6 +31,7 @@ def _base_cfg_dict(tmp_path) -> dict:
 def _make_inputs(cfg: RunConfig) -> PlanInputs:
     return PlanInputs(
         cfg=cfg,
+        pipeline=PipelineOverrides(include=(), exclude=(), sequence=(), overrides={}, capture_stage=None),
         ai_text=None,
         prompt_data=pd.DataFrame(),
         user_profile=pd.DataFrame({"Likes": ["x"], "Dislikes": [None]}),
@@ -68,7 +70,6 @@ def test_config_namespace_unknown_key_enforcement_includes_path_and_consumed_key
 
 def test_stage_config_defaults_unknown_kind_fails_fast(tmp_path):
     cfg_dict = _base_cfg_dict(tmp_path)
-    cfg_dict["prompt"]["stage_configs"] = {"defaults": {"does_not_exist": {"x": 1}}}
     cfg, _warnings = RunConfig.from_dict(cfg_dict)
     inputs = _make_inputs(cfg)
     stage_nodes = PromptPlanManager.get("standard").stage_nodes(inputs)
@@ -80,8 +81,8 @@ def test_stage_config_defaults_unknown_kind_fails_fast(tmp_path):
             include=(),
             exclude=(),
             overrides={},
-            stage_configs_defaults=cfg.prompt_stage_configs_defaults,
-            stage_configs_instances=cfg.prompt_stage_configs_instances,
+            stage_configs_defaults={"does_not_exist": {"x": 1}},
+            stage_configs_instances={},
             stage_registry=get_stage_registry(),
             inputs=inputs,
         )
@@ -89,7 +90,6 @@ def test_stage_config_defaults_unknown_kind_fails_fast(tmp_path):
 
 def test_stage_config_instances_unknown_stage_fails_fast(tmp_path):
     cfg_dict = _base_cfg_dict(tmp_path)
-    cfg_dict["prompt"]["stage_configs"] = {"instances": {"does_not_exist": {"x": 1}}}
     cfg, _warnings = RunConfig.from_dict(cfg_dict)
     inputs = _make_inputs(cfg)
     stage_nodes = PromptPlanManager.get("standard").stage_nodes(inputs)
@@ -101,8 +101,8 @@ def test_stage_config_instances_unknown_stage_fails_fast(tmp_path):
             include=("select_concepts", "initial_prompt"),
             exclude=(),
             overrides={},
-            stage_configs_defaults=cfg.prompt_stage_configs_defaults,
-            stage_configs_instances=cfg.prompt_stage_configs_instances,
+            stage_configs_defaults={},
+            stage_configs_instances={"does_not_exist": {"x": 1}},
             stage_registry=get_stage_registry(),
             inputs=inputs,
         )
@@ -110,11 +110,6 @@ def test_stage_config_instances_unknown_stage_fails_fast(tmp_path):
 
 def test_stage_config_unknown_keys_fail_fast(tmp_path):
     cfg_dict = _base_cfg_dict(tmp_path)
-    cfg_dict["prompt"]["stage_configs"] = {
-        "instances": {
-            "standard.initial_prompt": {"typo_key": True},
-        }
-    }
     cfg, _warnings = RunConfig.from_dict(cfg_dict)
     inputs = _make_inputs(cfg)
     stage_nodes = PromptPlanManager.get("standard").stage_nodes(inputs)
@@ -126,8 +121,8 @@ def test_stage_config_unknown_keys_fail_fast(tmp_path):
             include=("select_concepts", "initial_prompt"),
             exclude=(),
             overrides={},
-            stage_configs_defaults=cfg.prompt_stage_configs_defaults,
-            stage_configs_instances=cfg.prompt_stage_configs_instances,
+            stage_configs_defaults={},
+            stage_configs_instances={"standard.initial_prompt": {"typo_key": True}},
             stage_registry=get_stage_registry(),
             inputs=inputs,
         )
@@ -145,8 +140,8 @@ def test_stage_io_missing_required_outputs_fails_before_execution(tmp_path):
             include=("initial_prompt",),
             exclude=(),
             overrides={},
-            stage_configs_defaults=cfg.prompt_stage_configs_defaults,
-            stage_configs_instances=cfg.prompt_stage_configs_instances,
+            stage_configs_defaults={},
+            stage_configs_instances={},
             stage_registry=get_stage_registry(),
             inputs=inputs,
         )

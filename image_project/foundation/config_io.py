@@ -78,6 +78,32 @@ def _deep_merge(base: Any, overlay: Any, *, path: str) -> Any:
     return overlay
 
 
+def deep_merge(base: Any, overlay: Any, *, path: str = "") -> Any:
+    """Deep-merge `overlay` onto `base` with strict type checks.
+
+    This is used by experiment runners and other orchestration code to apply
+    config overlays deterministically and loudly:
+
+    - Mapping + mapping merges recursively.
+    - List/tuple overlays replace the full list.
+    - Scalar overlays replace the base scalar.
+    - `overlay is None` returns None (explicit deletion).
+
+    Args:
+        base: Base object to merge into (usually a dict).
+        overlay: Overlay object (usually a dict).
+        path: Dot-separated path prefix for error messages.
+
+    Returns:
+        The merged structure (may be dict/list/scalar depending on inputs).
+
+    Raises:
+        ValueError: If overlay/base types are incompatible at any point.
+    """
+
+    return _deep_merge(base, overlay, path=path)
+
+
 def load_config(**kwargs):
     """
     Load configuration settings from a YAML file.

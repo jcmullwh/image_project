@@ -215,6 +215,66 @@ class ConfigNamespace:
         self._record_effective(key, value)
         return value
 
+    def get_optional_int(
+        self,
+        key: str,
+        *,
+        default: int | None | object = _MISSING,
+        min_value: int | None = None,
+        max_value: int | None = None,
+        choices: Iterable[int] | None = None,
+    ) -> int | None:
+        """Parse an optional integer value.
+
+        Accepts:
+          - int
+          - None (explicit null)
+
+        Missing keys behave like `get_int`: if `default` is provided, it is used
+        and recorded as an effective value; otherwise the key is required.
+        """
+
+        if default is not _MISSING and default is not None and (
+            isinstance(default, bool) or not isinstance(default, int)
+        ):
+            raise TypeError(f"{_join_path(self.path, key.strip())} default must be an int or None")
+
+        raw = self._get_raw(key, default=default)
+        if raw is None:
+            self._record_effective(key, None)
+            return None
+
+        if raw is default and default is not _MISSING:
+            if default is None:
+                self._record_effective(key, None)
+                return None
+            value = int(default)
+            self._record_effective(key, value)
+            return value
+
+        if isinstance(raw, bool) or not isinstance(raw, int):
+            raise TypeError(
+                f"{_join_path(self.path, key.strip())} must be an int or null (type={type(raw).__name__})"
+            )
+        value = int(raw)
+        if min_value is not None and value < int(min_value):
+            raise ValueError(
+                f"{_join_path(self.path, key.strip())} must be >= {int(min_value)} (got {value})"
+            )
+        if max_value is not None and value > int(max_value):
+            raise ValueError(
+                f"{_join_path(self.path, key.strip())} must be <= {int(max_value)} (got {value})"
+            )
+        if choices is not None:
+            choice_set = {int(item) for item in choices}
+            if value not in choice_set:
+                allowed = ", ".join(str(item) for item in sorted(choice_set)) or "<none>"
+                raise ValueError(
+                    f"{_join_path(self.path, key.strip())} must be one of: {allowed} (got {value})"
+                )
+        self._record_effective(key, value)
+        return value
+
     def get_float(
         self,
         key: str,
@@ -236,6 +296,50 @@ class ConfigNamespace:
         if isinstance(raw, bool) or not isinstance(raw, (int, float)):
             raise TypeError(
                 f"{_join_path(self.path, key.strip())} must be a float (type={type(raw).__name__})"
+            )
+        value = float(raw)
+        if min_value is not None and value < float(min_value):
+            raise ValueError(
+                f"{_join_path(self.path, key.strip())} must be >= {float(min_value)} (got {value})"
+            )
+        if max_value is not None and value > float(max_value):
+            raise ValueError(
+                f"{_join_path(self.path, key.strip())} must be <= {float(max_value)} (got {value})"
+            )
+        self._record_effective(key, value)
+        return value
+
+    def get_optional_float(
+        self,
+        key: str,
+        *,
+        default: float | None | object = _MISSING,
+        min_value: float | None = None,
+        max_value: float | None = None,
+    ) -> float | None:
+        """Parse an optional float value (float or null)."""
+
+        if default is not _MISSING and default is not None and (
+            isinstance(default, bool) or not isinstance(default, (int, float))
+        ):
+            raise TypeError(f"{_join_path(self.path, key.strip())} default must be a float or None")
+
+        raw = self._get_raw(key, default=default)
+        if raw is None:
+            self._record_effective(key, None)
+            return None
+
+        if raw is default and default is not _MISSING:
+            if default is None:
+                self._record_effective(key, None)
+                return None
+            value = float(default)
+            self._record_effective(key, value)
+            return value
+
+        if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+            raise TypeError(
+                f"{_join_path(self.path, key.strip())} must be a float or null (type={type(raw).__name__})"
             )
         value = float(raw)
         if min_value is not None and value < float(min_value):
@@ -311,6 +415,41 @@ class ConfigNamespace:
             if not trimmed:
                 raise ValueError(f"{_join_path(self.path, key.strip())}[{idx}] cannot be empty")
             items.append(trimmed)
+
+        if not items and not allow_empty:
+            raise ValueError(f"{_join_path(self.path, key.strip())} cannot be empty")
+
+        self._record_effective(key, list(items))
+        return items
+
+    def get_list_mapping(
+        self,
+        key: str,
+        *,
+        default: list[Mapping[str, Any]] | tuple[Mapping[str, Any], ...] | object = _MISSING,
+        allow_empty: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Parse a list of mapping objects (converted to dicts)."""
+
+        if default is not _MISSING and not isinstance(default, (list, tuple)):
+            raise TypeError(f"{_join_path(self.path, key.strip())} default must be a list[dict]")
+
+        raw = self._get_raw(key, default=default)
+        if raw is default and default is not _MISSING:
+            raw = list(default)  # type: ignore[arg-type]
+
+        if not isinstance(raw, (list, tuple)):
+            raise TypeError(
+                f"{_join_path(self.path, key.strip())} must be a list[dict] (type={type(raw).__name__})"
+            )
+
+        items: list[dict[str, Any]] = []
+        for idx, item in enumerate(raw):
+            if not isinstance(item, Mapping):
+                raise TypeError(
+                    f"{_join_path(self.path, key.strip())}[{idx}] must be a mapping (type={type(item).__name__})"
+                )
+            items.append(dict(item))
 
         if not items and not allow_empty:
             raise ValueError(f"{_join_path(self.path, key.strip())} cannot be empty")

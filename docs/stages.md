@@ -24,6 +24,8 @@ Total stages: 38
 
 ## blackbox
 
+- `blackbox.generate_idea_cards` (composite): Generate N isolated idea cards then assemble into idea_cards_json. `(stages.blackbox.generate_idea_cards._build)` [io: provides=idea_cards_json; captures=idea_cards_json]
+- `blackbox.generator_profile_hints` (composite): Produce generator_profile_hints from raw/profile file/abstraction. `(stages.blackbox.generator_profile_hints._build)` [io: provides=generator_profile_hints; captures=generator_profile_hints]
 - `blackbox.idea_card_generate` (chat): Generate a single idea card (strict JSON) as an isolated stage. `(prompts.blackbox.idea_card_generate_prompt)` [io: requires=selected_concepts]
 - `blackbox.idea_cards_assemble` (action): Assemble isolated per-idea JSON artifacts into idea_cards_json. `(framework.scoring.parse_idea_card_json)` [io: provides=idea_cards_json; captures=idea_cards_json]
 - `blackbox.idea_cards_generate` (chat): Generate idea cards (strict JSON). `(prompts.blackbox.idea_cards_generate_prompt)` [io: provides=idea_cards_json; captures=idea_cards_json]
@@ -39,9 +41,7 @@ Total stages: 38
 
 ## blackbox_refine
 
-- `blackbox_refine.finalize` (action): Finalize blackbox refinement loop output (beam[0]). `(stages.blackbox_refine.loop._finalize_block)` [io: requires=bbref.beams]
-- `blackbox_refine.init_state` (action): Initialize blackbox refine loop state. `(stages.blackbox_refine.loop._init_state_block)` [io: provides=bbref.beams]
-- `blackbox_refine.iter` (composite): Blackbox refine iteration stage (generate candidates, judge, select). `(stages.blackbox_refine.loop._iteration_stage_block)` [io: requires=bbref.beams]
+- `blackbox_refine.loop` (composite): Run the blackbox refinement loop (init + N iterations + finalize). `(stages.blackbox_refine.loop._build_blackbox_refine_loop)` [io: requires=bbref.seed_prompt; provides=bbref.beams]
 - `blackbox_refine.seed_from_draft` (action): Seed the blackbox refinement loop from prompt.refine_only.draft. `(stages.blackbox_refine.seed_from_draft._build)` [io: provides=bbref.seed_prompt; captures=bbref.seed_prompt]
 - `blackbox_refine.seed_prompt` (chat): Generate the seed prompt for the blackbox refinement loop. `(prompts.blackbox.final_prompt_from_selected_idea_prompt)` [io: requires=selected_idea_card; provides=bbref.seed_prompt; captures=bbref.seed_prompt]
 

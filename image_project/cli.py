@@ -13,6 +13,8 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("generate", help="Run a generation pipeline")
     sub.add_parser("list-stages", help="List available stages")
     sub.add_parser("list-plans", help="List available prompt plans")
+    experiments = sub.add_parser("experiments", help="List/describe/run registered experiments")
+    experiments.add_argument("args", nargs=argparse.REMAINDER)
     index_artifacts = sub.add_parser(
         "index-artifacts",
         help="Build an index of experiment plans and images under _artifacts/",
@@ -66,6 +68,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         from .run_review.cli import main as run_review_main
 
         return int(run_review_main(args.args))
+
+    if args.command == "experiments":
+        from .app.experiments_cli import main as experiments_main
+
+        return int(experiments_main(getattr(args, "args", None)))
 
     if args.command == "index-artifacts":
         from .framework.artifacts import update_artifacts_index, update_artifacts_index_combined

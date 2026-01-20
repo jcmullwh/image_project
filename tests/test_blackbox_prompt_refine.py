@@ -10,15 +10,16 @@ from pipelinekit.config_namespace import ConfigNamespace
 from pipelinekit.engine.messages import MessageHandler
 from pipelinekit.engine.pipeline import ActionStep, Block, ChatStep
 from image_project.stages.blackbox_refine.loop import (
+    PromptBlackboxRefineJudgeConfig,
+    STAGE as BLACKBOX_REFINE_LOOP,
     _aggregate_scores,
     _resolve_blackbox_profile_text,
-    build_blackbox_refine_loop_instances,
 )
-from image_project.framework.config import PromptBlackboxRefineJudgeConfig, RunConfig
+from image_project.framework.config import RunConfig
 from image_project.framework.prompt_pipeline import PlanInputs
+from image_project.framework.prompt_pipeline.pipeline_overrides import PipelineOverrides
 from image_project.framework.runtime import RunContext
 from image_project.prompts import blackbox as blackbox_prompts
-from pipelinekit.stage_types import StageInstance
 
 
 def _make_logger(name: str) -> logging.Logger:
@@ -40,20 +41,6 @@ def _iter_chat_steps(block: Block, *, prefix: str) -> list[tuple[str, ChatStep]]
     return items
 
 
-def _materialize_stage_nodes(stage_nodes: list[object], *, inputs: PlanInputs) -> list[Block]:
-    blocks: list[Block] = []
-    for node in stage_nodes:
-        if isinstance(node, Block):
-            blocks.append(node)
-            continue
-        if isinstance(node, StageInstance):
-            cfg_ns = ConfigNamespace.empty(path=f"prompt.stage_configs.resolved.{node.instance_id}")
-            blocks.append(node.stage.build(inputs, instance_id=node.instance_id, cfg=cfg_ns))
-            continue
-        raise TypeError(f"Unexpected stage node type: {type(node).__name__}")
-    return blocks
-
-
 def _find_action_step(block: Block, *, name: str) -> ActionStep:
     for node in block.nodes:
         if isinstance(node, ActionStep) and node.name == name:
@@ -73,14 +60,7 @@ def _base_cfg_dict(tmp_path) -> dict:
         "prompt": {
             "categories_path": str(tmp_path / "categories.csv"),
             "profile_path": str(tmp_path / "profile.csv"),
-            "concepts": {"filters": {"enabled": False}},
-            "scoring": {
-                "enabled": True,
-                "exploration_rate": 0.0,
-                "judge_temperature": 0.0,
-                "generator_profile_abstraction": False,
-                "novelty": {"enabled": False, "window": 0},
-            },
+            "plan": "standard",
         },
         "rclone": {"enabled": False},
         "upscale": {"enabled": False},
@@ -97,32 +77,11 @@ def test_directive_determinism(tmp_path):
     (tmp_path / "profile.csv").write_text("Likes,Dislikes\ncolorful,boring\n", encoding="utf-8")
 
     cfg_dict = _base_cfg_dict(tmp_path)
-    cfg_dict["prompt"]["blackbox_refine"] = {
-        "enabled": True,
-        "iterations": 1,
-        "algorithm": "hillclimb",
-        "branching_factor": 3,
-        "include_parents_as_candidates": False,
-        "generator_temperature": 0.9,
-        "variation_prompt": {
-            "template": "v1",
-            "include_profile": False,
-            "include_context_guidance": False,
-            "include_novelty_summary": False,
-            "include_mutation_directive": True,
-            "include_scoring_rubric": False,
-        },
-        "mutation_directives": {
-            "mode": "random",
-            "directives": ["D1", "D2", "D3"],
-        },
-        "judging": {"judges": [{"id": "j1"}], "aggregation": "mean"},
-    }
-
     cfg, _warnings = RunConfig.from_dict(cfg_dict)
 
     inputs = PlanInputs(
         cfg=cfg,
+        pipeline=PipelineOverrides(include=(), exclude=(), sequence=(), overrides={}, capture_stage=None),
         ai_text=None,
         prompt_data=pd.DataFrame(),
         user_profile=pd.DataFrame(),
@@ -133,10 +92,38 @@ def test_directive_determinism(tmp_path):
     )
 
     def build_map() -> dict[str, str]:
-        loop_nodes = build_blackbox_refine_loop_instances(inputs)
-        loop_blocks = _materialize_stage_nodes(loop_nodes, inputs=inputs)
-        init_stage = loop_blocks[0]
-        assert init_stage.name == "blackbox_refine.init_state"
+        cfg_ns = ConfigNamespace(
+            {
+                "iterations": 1,
+                "algorithm": "hillclimb",
+                "branching_factor": 3,
+                "include_parents_as_candidates": False,
+                "generator_temperature": 0.9,
+                "variation_prompt": {
+                    "template": "v1",
+                    "include_profile": False,
+                    "include_context_guidance": False,
+                    "include_novelty_summary": False,
+                    "include_mutation_directive": True,
+                    "include_scoring_rubric": False,
+                    "score_feedback": "none",
+                },
+                "mutation_directives": {
+                    "mode": "random",
+                    "directives": ["D1", "D2", "D3"],
+                },
+                "judging": {"judges": [{"id": "j1"}], "aggregation": "mean"},
+            },
+            path="prompt.stage_configs.resolved.blackbox_refine.loop",
+        )
+        loop_block = BLACKBOX_REFINE_LOOP.build(
+            inputs, instance_id="blackbox_refine.loop", cfg=cfg_ns
+        )
+        init_stage = next(
+            node
+            for node in loop_block.nodes
+            if isinstance(node, Block) and node.name == "blackbox_refine.init_state"
+        )
 
         ctx = RunContext(
             generation_id="unit_test",
@@ -153,7 +140,11 @@ def test_directive_determinism(tmp_path):
         init_action.fn(ctx)
 
         mapping: dict[str, str] = {}
-        iter_stage = next(block for block in loop_blocks if block.name == "blackbox_refine.iter_01")
+        iter_stage = next(
+            node
+            for node in loop_block.nodes
+            if isinstance(node, Block) and node.name == "blackbox_refine.iter_01"
+        )
         for path, step in _iter_chat_steps(iter_stage, prefix=str(iter_stage.name)):
             if not (step.name or "").startswith("cand_"):
                 continue
@@ -253,7 +244,7 @@ def test_blackbox_refine_profile_text_passthrough(tmp_path):
         ctx,
         source="raw",
         stage_id="test",
-        config_path="prompt.scoring.judge_profile_source",
+        config_path="prompt.stage_configs.defaults.blackbox_refine.loop.judge_profile_source",
     )
     assert raw_profile == ctx.outputs["preferences_guidance"].strip()
     assert "Derived avoid constraints:" not in raw_profile
@@ -262,7 +253,7 @@ def test_blackbox_refine_profile_text_passthrough(tmp_path):
         ctx,
         source="generator_hints_plus_dislikes",
         stage_id="test",
-        config_path="prompt.scoring.judge_profile_source",
+        config_path="prompt.stage_configs.defaults.blackbox_refine.loop.judge_profile_source",
     )
     assert "Profile extraction (generator-safe hints):" in hints_profile
     assert "Dislikes:" in hints_profile
@@ -279,29 +270,11 @@ def test_novelty_penalty_applied_in_selection(tmp_path):
     (tmp_path / "profile.csv").write_text("Likes,Dislikes\ncolorful,boring\n", encoding="utf-8")
 
     cfg_dict = _base_cfg_dict(tmp_path)
-    cfg_dict["prompt"]["scoring"]["novelty"] = {"enabled": True, "window": 25, "method": "df_overlap_v1"}
-    cfg_dict["prompt"]["blackbox_refine"] = {
-        "enabled": True,
-        "iterations": 1,
-        "algorithm": "hillclimb",
-        "branching_factor": 2,
-        "include_parents_as_candidates": False,
-        "generator_temperature": 0.9,
-        "variation_prompt": {
-            "template": "v1",
-            "include_profile": False,
-            "include_context_guidance": False,
-            "include_novelty_summary": False,
-            "include_mutation_directive": False,
-            "include_scoring_rubric": False,
-        },
-        "judging": {"judges": [{"id": "j1"}], "aggregation": "mean"},
-    }
-
     cfg, _warnings = RunConfig.from_dict(cfg_dict)
 
     inputs = PlanInputs(
         cfg=cfg,
+        pipeline=PipelineOverrides(include=(), exclude=(), sequence=(), overrides={}, capture_stage=None),
         ai_text=None,
         prompt_data=pd.DataFrame(),
         user_profile=pd.DataFrame(),
@@ -310,11 +283,35 @@ def test_novelty_penalty_applied_in_selection(tmp_path):
         rng=random.Random(0),
         draft_prompt="seed",
     )
-    loop_nodes = build_blackbox_refine_loop_instances(inputs)
-    loop_blocks = _materialize_stage_nodes(loop_nodes, inputs=inputs)
-
-    init_stage = loop_blocks[0]
-    iter_stage = next(block for block in loop_blocks if block.name == "blackbox_refine.iter_01")
+    cfg_ns = ConfigNamespace(
+        {
+            "iterations": 1,
+            "algorithm": "hillclimb",
+            "branching_factor": 2,
+            "include_parents_as_candidates": False,
+            "generator_temperature": 0.9,
+            "exploration_rate": 0.0,
+            "variation_prompt": {
+                "template": "v1",
+                "include_profile": False,
+                "include_context_guidance": False,
+                "include_novelty_summary": False,
+                "include_mutation_directive": False,
+                "include_scoring_rubric": False,
+                "score_feedback": "none",
+            },
+            "judging": {"judges": [{"id": "j1"}], "aggregation": "mean"},
+            "novelty": {"enabled": True, "window": 25, "method": "df_overlap_v1"},
+        },
+        path="prompt.stage_configs.resolved.blackbox_refine.loop",
+    )
+    loop_block = BLACKBOX_REFINE_LOOP.build(inputs, instance_id="blackbox_refine.loop", cfg=cfg_ns)
+    init_stage = next(
+        node for node in loop_block.nodes if isinstance(node, Block) and node.name == "blackbox_refine.init_state"
+    )
+    iter_stage = next(
+        node for node in loop_block.nodes if isinstance(node, Block) and node.name == "blackbox_refine.iter_01"
+    )
     select_step = _find_action_step(iter_stage, name="select")
 
     ctx = RunContext(
@@ -375,31 +372,11 @@ def test_best_worst_score_feedback_is_injected_into_next_iteration_generation_pr
     (tmp_path / "profile.csv").write_text("Likes,Dislikes\ncolorful,boring\n", encoding="utf-8")
 
     cfg_dict = _base_cfg_dict(tmp_path)
-    cfg_dict["prompt"]["blackbox_refine"] = {
-        "enabled": True,
-        "iterations": 2,
-        "algorithm": "hillclimb",
-        "branching_factor": 2,
-        "include_parents_as_candidates": False,
-        "generator_temperature": 0.9,
-        "variation_prompt": {
-            "template": "v1",
-            "include_profile": False,
-            "include_context_guidance": False,
-            "include_novelty_summary": False,
-            "include_mutation_directive": False,
-            "include_scoring_rubric": False,
-            "score_feedback": "best_worst",
-            "score_feedback_max_chars": 2000,
-        },
-        "judging": {"judges": [{"id": "j1"}], "aggregation": "mean"},
-    }
-    cfg_dict["prompt"]["scoring"].update({"exploration_rate": 0.0, "novelty": {"enabled": False, "window": 0}})
-
     cfg, _warnings = RunConfig.from_dict(cfg_dict)
 
     inputs = PlanInputs(
         cfg=cfg,
+        pipeline=PipelineOverrides(include=(), exclude=(), sequence=(), overrides={}, capture_stage=None),
         ai_text=None,
         prompt_data=pd.DataFrame(),
         user_profile=pd.DataFrame(),
@@ -409,11 +386,38 @@ def test_best_worst_score_feedback_is_injected_into_next_iteration_generation_pr
         draft_prompt="seed",
     )
 
-    loop_nodes = build_blackbox_refine_loop_instances(inputs)
-    loop_blocks = _materialize_stage_nodes(loop_nodes, inputs=inputs)
-    init_stage = loop_blocks[0]
-    iter_stage_01 = next(block for block in loop_blocks if block.name == "blackbox_refine.iter_01")
-    iter_stage_02 = next(block for block in loop_blocks if block.name == "blackbox_refine.iter_02")
+    cfg_ns = ConfigNamespace(
+        {
+            "iterations": 2,
+            "algorithm": "hillclimb",
+            "branching_factor": 2,
+            "include_parents_as_candidates": False,
+            "generator_temperature": 0.9,
+            "exploration_rate": 0.0,
+            "variation_prompt": {
+                "template": "v1",
+                "include_profile": False,
+                "include_context_guidance": False,
+                "include_novelty_summary": False,
+                "include_mutation_directive": False,
+                "include_scoring_rubric": False,
+                "score_feedback": "best_worst",
+                "score_feedback_max_chars": 2000,
+            },
+            "judging": {"judges": [{"id": "j1"}], "aggregation": "mean"},
+        },
+        path="prompt.stage_configs.resolved.blackbox_refine.loop",
+    )
+    loop_block = BLACKBOX_REFINE_LOOP.build(inputs, instance_id="blackbox_refine.loop", cfg=cfg_ns)
+    init_stage = next(
+        node for node in loop_block.nodes if isinstance(node, Block) and node.name == "blackbox_refine.init_state"
+    )
+    iter_stage_01 = next(
+        node for node in loop_block.nodes if isinstance(node, Block) and node.name == "blackbox_refine.iter_01"
+    )
+    iter_stage_02 = next(
+        node for node in loop_block.nodes if isinstance(node, Block) and node.name == "blackbox_refine.iter_02"
+    )
     select_step = _find_action_step(iter_stage_01, name="select")
     gen_step_iter2 = next(
         step for _path, step in _iter_chat_steps(iter_stage_02, prefix=str(iter_stage_02.name)) if step.name == "cand_A"
@@ -466,15 +470,19 @@ def test_blackbox_refine_only_end_to_end_prompt_only(tmp_path, monkeypatch):
     cfg_dict = _base_cfg_dict(tmp_path)
     cfg_dict["prompt"]["plan"] = "blackbox_refine_only"
     cfg_dict["prompt"]["refine_only"] = {"draft": "DRAFT_SEED"}
-    cfg_dict["prompt"]["blackbox_refine"] = {
-        "enabled": True,
-        "iterations": 2,
-        "algorithm": "hillclimb",
-        "branching_factor": 2,
-        "include_parents_as_candidates": False,
-        "generator_temperature": 0.9,
-        "variation_prompt": {"template": "v1", "include_profile": False},
-        "judging": {"judges": [{"id": "j1"}], "aggregation": "mean"},
+    cfg_dict["prompt"]["stage_configs"] = {
+        "defaults": {
+            "blackbox_refine.loop": {
+                "iterations": 2,
+                "algorithm": "hillclimb",
+                "branching_factor": 2,
+                "include_parents_as_candidates": False,
+                "generator_temperature": 0.9,
+                "exploration_rate": 0.0,
+                "variation_prompt": {"template": "v1", "include_profile": False},
+                "judging": {"judges": [{"id": "j1"}], "aggregation": "mean"},
+            }
+        }
     }
 
     generation_id = "unit_test_bbref_only"
@@ -588,23 +596,24 @@ def test_blackbox_refine_seed_from_blackbox(tmp_path, monkeypatch):
     cfg_dict["prompt"].update(
         {
             "plan": "blackbox_refine",
-            "scoring": {
-                "enabled": True,
-                "num_ideas": num_ideas,
-                "exploration_rate": 0.0,
-                "judge_temperature": 0.0,
-                "generator_profile_abstraction": False,
-                "novelty": {"enabled": False, "window": 0},
-            },
-            "blackbox_refine": {
-                "enabled": True,
-                "iterations": 1,
-                "algorithm": "hillclimb",
-                "branching_factor": 2,
-                "include_parents_as_candidates": False,
-                "generator_temperature": 0.9,
-                "variation_prompt": {"template": "v1", "include_profile": False},
-                "judging": {"judges": [{"id": "j1"}], "aggregation": "mean"},
+            "stage_configs": {
+                "defaults": {
+                    "blackbox.generate_idea_cards": {"num_ideas": num_ideas},
+                    "blackbox.select_idea_card": {
+                        "num_ideas": num_ideas,
+                        "exploration_rate": 0.0,
+                    },
+                    "blackbox_refine.loop": {
+                        "iterations": 1,
+                        "algorithm": "hillclimb",
+                        "branching_factor": 2,
+                        "include_parents_as_candidates": False,
+                        "generator_temperature": 0.9,
+                        "exploration_rate": 0.0,
+                        "variation_prompt": {"template": "v1", "include_profile": False},
+                        "judging": {"judges": [{"id": "j1"}], "aggregation": "mean"},
+                    },
+                }
             },
         }
     )

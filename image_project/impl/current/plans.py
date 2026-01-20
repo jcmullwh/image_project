@@ -5,26 +5,24 @@ import pkgutil
 from typing import Any
 
 from image_project.framework.config import RunConfig
+from image_project.framework.prompt_pipeline.pipeline_overrides import PromptPipelineConfig
 from image_project.framework.prompt_pipeline import (
     PlanInputs,
     PlanMetadata,
     PromptPlan,
     ResolvedPlan,
 )
-from image_project.impl.current.blackbox_idea_cards import build_blackbox_isolated_idea_card_instances
+from image_project.stages.blackbox.generate_idea_cards import STAGE as BLACKBOX_GENERATE_IDEA_CARDS
 from image_project.stages.blackbox.idea_cards_judge_score import (
     STAGE as BLACKBOX_IDEA_CARDS_JUDGE_SCORE,
+)
+from image_project.stages.blackbox.generator_profile_hints import (
+    STAGE as BLACKBOX_GENERATOR_PROFILE_HINTS,
 )
 from image_project.stages.blackbox.image_prompt_creation import (
     STAGE as BLACKBOX_IMAGE_PROMPT_CREATION,
 )
 from image_project.stages.blackbox.prepare import STAGE as BLACKBOX_PREPARE
-from image_project.stages.blackbox.profile_abstraction import (
-    STAGE as BLACKBOX_PROFILE_ABSTRACTION,
-)
-from image_project.stages.blackbox.profile_hints_load import (
-    STAGE as BLACKBOX_PROFILE_HINTS_LOAD,
-)
 from image_project.stages.blackbox.select_idea_card import STAGE as BLACKBOX_SELECT_IDEA_CARD
 from image_project.stages.preprompt.filter_concepts import STAGE as PREPROMPT_FILTER_CONCEPTS
 from image_project.stages.preprompt.select_concepts import STAGE as PREPROMPT_SELECT_CONCEPTS
@@ -147,34 +145,29 @@ class PromptPlanManager:
         return tuple(sorted(_PLAN_REGISTRY.keys()))
 
     @classmethod
-    def resolve(cls, cfg: RunConfig) -> ResolvedPlan:
-        requested = (cfg.prompt_plan or "").strip().lower()
+    def resolve(cls, *, run_cfg: RunConfig, pipeline_cfg: PromptPipelineConfig) -> ResolvedPlan:
+        requested = (pipeline_cfg.plan or "").strip().lower()
         if not requested:
             raise ValueError("Invalid config value for prompt.plan: must be a non-empty string")
 
-        scoring_enabled = bool(cfg.prompt_scoring.enabled)
-
         if requested == "auto":
-            plan_name = "blackbox" if scoring_enabled else "standard"
-        else:
-            plan_name = requested
+            raise ValueError(
+                "prompt.plan=auto is no longer supported; choose an explicit plan name"
+            )
+
+        plan_name = requested
 
         plan = cls.get(plan_name)
         metadata = cls._read_metadata(plan)
 
-        if metadata.requires_scoring is True and not scoring_enabled:
-            raise ValueError(f"prompt.plan={plan.name} requires prompt.scoring.enabled=true")
-        if metadata.requires_scoring is False and scoring_enabled:
-            raise ValueError(f"prompt.plan={plan.name} conflicts with prompt.scoring.enabled=true")
-
         if metadata.context_injection == "disabled":
             effective_context_enabled = False
         elif metadata.context_injection == "enabled":
-            if not cfg.context_enabled:
+            if not run_cfg.context_enabled:
                 raise ValueError(f"Plan {plan.name} requires context.enabled=true")
             effective_context_enabled = True
         else:
-            effective_context_enabled = bool(cfg.context_enabled)
+            effective_context_enabled = bool(run_cfg.context_enabled)
 
         return ResolvedPlan(
             requested_plan=requested,
@@ -235,7 +228,7 @@ class CustomPromptPlan:
     name = "custom"
 
     def stage_nodes(self, inputs: PlanInputs) -> list[StageInstance]:
-        sequence = tuple(inputs.cfg.prompt_stages_sequence)
+        sequence = tuple(getattr(inputs.pipeline, "sequence", ()))
         if not sequence:
             raise ValueError("prompt.plan=custom requires prompt.stages.sequence")
 
@@ -295,26 +288,16 @@ class BlackboxPromptPlan:
     requires_scoring = True
 
     def stage_nodes(self, inputs: PlanInputs) -> list[StageInstance]:
-        scoring_cfg = inputs.cfg.prompt_scoring
         sequence: list[StageInstance] = [
             PREPROMPT_SELECT_CONCEPTS.instance(),
             PREPROMPT_FILTER_CONCEPTS.instance(),
             BLACKBOX_PREPARE.instance(),
+            BLACKBOX_GENERATOR_PROFILE_HINTS.instance(),
+            BLACKBOX_GENERATE_IDEA_CARDS.instance(),
+            BLACKBOX_IDEA_CARDS_JUDGE_SCORE.instance(),
+            BLACKBOX_SELECT_IDEA_CARD.instance(),
+            BLACKBOX_IMAGE_PROMPT_CREATION.instance(),
         ]
-        if scoring_cfg.generator_profile_hints_path:
-            sequence.append(BLACKBOX_PROFILE_HINTS_LOAD.instance())
-        elif scoring_cfg.generator_profile_abstraction:
-            sequence.append(BLACKBOX_PROFILE_ABSTRACTION.instance())
-
-        sequence.extend(build_blackbox_isolated_idea_card_instances(inputs))
-
-        sequence.extend(
-            [
-                BLACKBOX_IDEA_CARDS_JUDGE_SCORE.instance(),
-                BLACKBOX_SELECT_IDEA_CARD.instance(),
-                BLACKBOX_IMAGE_PROMPT_CREATION.instance(),
-            ]
-        )
         return sequence
 
 

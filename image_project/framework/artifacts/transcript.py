@@ -8,16 +8,31 @@ from image_project.framework.runtime import RunContext
 
 
 def write_transcript(path: str, ctx: RunContext) -> None:
+    prompt_inputs = ctx.outputs.get("prompt_inputs")
+    categories_path: str | None = None
+    profile_path: str | None = None
+    if isinstance(prompt_inputs, dict):
+        raw_categories = prompt_inputs.get("categories_path")
+        raw_profile = prompt_inputs.get("profile_path")
+        if isinstance(raw_categories, str) and raw_categories.strip():
+            categories_path = raw_categories
+        if isinstance(raw_profile, str) and raw_profile.strip():
+            profile_path = raw_profile
+
     payload: dict[str, Any] = {
         "generation_id": ctx.generation_id,
         "seed": ctx.seed,
-        "categories_file": os.path.basename(ctx.cfg.categories_path),
-        "profile_file": os.path.basename(ctx.cfg.profile_path),
         "selected_concepts": list(ctx.selected_concepts),
         "steps": list(ctx.steps),
         "image_path": ctx.image_path,
         "created_at": ctx.created_at,
     }
+    if categories_path:
+        payload["categories_file"] = os.path.basename(categories_path)
+    if profile_path:
+        payload["profile_file"] = os.path.basename(profile_path)
+    if isinstance(prompt_inputs, dict) and prompt_inputs:
+        payload["prompt_inputs"] = dict(prompt_inputs)
     experiment = getattr(ctx.cfg, "experiment", None)
     if experiment is not None:
         exp_payload = {
