@@ -9,6 +9,7 @@ from pipelinekit.engine.messages import MessageHandler
 from pipelinekit.engine.pipeline import Block, ChatStep
 from image_project.framework.config import RunConfig
 from image_project.framework.prompt_pipeline import PlanInputs
+from image_project.framework.prompt_pipeline.pipeline_overrides import PipelineOverrides
 from image_project.framework.runtime import RunContext
 from image_project.prompts import blackbox as blackbox_prompts
 from image_project.impl.current.plans import StandardPromptPlan
@@ -37,6 +38,7 @@ def _base_cfg_dict(tmp_path) -> dict:
 def _make_inputs(cfg: RunConfig) -> PlanInputs:
     return PlanInputs(
         cfg=cfg,
+        pipeline=PipelineOverrides(include=(), exclude=(), sequence=(), overrides={}, capture_stage=None),
         ai_text=None,
         prompt_data=pd.DataFrame(),
         user_profile=pd.DataFrame({"Likes": ["x"], "Dislikes": [None]}),
@@ -149,16 +151,17 @@ def test_blackbox_judge_profile_source_routing(tmp_path, monkeypatch, source, ex
 
     monkeypatch.setattr(blackbox_prompts, "idea_cards_judge_prompt", fake_prompt)
 
-    cfg_dict = _base_cfg_dict(tmp_path)
-    cfg_dict["prompt"]["scoring"] = {"judge_profile_source": source}
-    cfg, _warnings = RunConfig.from_dict(cfg_dict)
+    cfg, _warnings = RunConfig.from_dict(_base_cfg_dict(tmp_path))
     inputs = _make_inputs(cfg)
 
     ref = registry.resolve("blackbox.idea_cards_judge_score")
     block = ref.build(
         inputs,
         instance_id=ref.id,
-        cfg=ConfigNamespace.empty(path=f"prompt.stage_configs.resolved.{ref.id}"),
+        cfg=ConfigNamespace(
+            {"judge_profile_source": source},
+            path=f"prompt.stage_configs.resolved.{ref.id}",
+        ),
     )
     draft = next(node for node in block.nodes if isinstance(node, ChatStep) and node.name == "draft")
 
@@ -179,16 +182,17 @@ def test_blackbox_judge_profile_source_requires_generator_hints(tmp_path, monkey
 
     monkeypatch.setattr(blackbox_prompts, "idea_cards_judge_prompt", fake_prompt)
 
-    cfg_dict = _base_cfg_dict(tmp_path)
-    cfg_dict["prompt"]["scoring"] = {"judge_profile_source": "generator_hints"}
-    cfg, _warnings = RunConfig.from_dict(cfg_dict)
+    cfg, _warnings = RunConfig.from_dict(_base_cfg_dict(tmp_path))
     inputs = _make_inputs(cfg)
 
     ref = registry.resolve("blackbox.idea_cards_judge_score")
     block = ref.build(
         inputs,
         instance_id=ref.id,
-        cfg=ConfigNamespace.empty(path=f"prompt.stage_configs.resolved.{ref.id}"),
+        cfg=ConfigNamespace(
+            {"judge_profile_source": "generator_hints"},
+            path=f"prompt.stage_configs.resolved.{ref.id}",
+        ),
     )
     draft = next(node for node in block.nodes if isinstance(node, ChatStep) and node.name == "draft")
 
@@ -212,16 +216,17 @@ def test_blackbox_idea_profile_source_routing(tmp_path, monkeypatch, source, exp
 
     monkeypatch.setattr(blackbox_prompts, "idea_cards_generate_prompt", fake_prompt)
 
-    cfg_dict = _base_cfg_dict(tmp_path)
-    cfg_dict["prompt"]["scoring"] = {"idea_profile_source": source}
-    cfg, _warnings = RunConfig.from_dict(cfg_dict)
+    cfg, _warnings = RunConfig.from_dict(_base_cfg_dict(tmp_path))
     inputs = _make_inputs(cfg)
 
     ref = registry.resolve("blackbox.idea_cards_generate")
     block = ref.build(
         inputs,
         instance_id=ref.id,
-        cfg=ConfigNamespace.empty(path=f"prompt.stage_configs.resolved.{ref.id}"),
+        cfg=ConfigNamespace(
+            {"idea_profile_source": source},
+            path=f"prompt.stage_configs.resolved.{ref.id}",
+        ),
     )
     draft = next(node for node in block.nodes if isinstance(node, ChatStep) and node.name == "draft")
 
@@ -244,16 +249,17 @@ def test_blackbox_final_profile_source_routing(tmp_path, monkeypatch, source, ex
 
     monkeypatch.setattr(blackbox_prompts, "final_prompt_from_selected_idea_prompt", fake_prompt)
 
-    cfg_dict = _base_cfg_dict(tmp_path)
-    cfg_dict["prompt"]["scoring"] = {"final_profile_source": source}
-    cfg, _warnings = RunConfig.from_dict(cfg_dict)
+    cfg, _warnings = RunConfig.from_dict(_base_cfg_dict(tmp_path))
     inputs = _make_inputs(cfg)
 
     ref = registry.resolve("blackbox.image_prompt_creation")
     block = ref.build(
         inputs,
         instance_id=ref.id,
-        cfg=ConfigNamespace.empty(path=f"prompt.stage_configs.resolved.{ref.id}"),
+        cfg=ConfigNamespace(
+            {"final_profile_source": source},
+            path=f"prompt.stage_configs.resolved.{ref.id}",
+        ),
     )
     draft = next(node for node in block.nodes if isinstance(node, ChatStep) and node.name == "draft")
 

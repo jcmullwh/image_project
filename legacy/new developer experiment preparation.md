@@ -8,6 +8,10 @@ Goal: help a new developer successfully set up and run an A/B experiment that te
 
 This developer diary predates the `pipelinekit` refactor. References to `image_project/impl/current/prompting.py` are historical; the stage catalog now lives under `image_project/stages/*` and is assembled by `image_project/stages/registry.py`. Prompt policy helpers live under `image_project/prompts/*`.
 
+It also predates the first-class experiments refactor: standalone scripts under `tools/run_experiment_*.py` are now legacy. Prefer the canonical runner (`python -m image_project experiments run <name>` / `pdm run experiment-*`) and the plugin definitions under `image_project/impl/current/experiment_plugins/*`.
+
+It also predates the current “real data default” convention: the repo does not silently default to sample CSVs. Some experiments support `--data sample` as an explicit opt-in for local smoke testing, but the default data source is always the loaded config (`--data config`).
+
 ## Running Counters
 
 - files_opened: 15

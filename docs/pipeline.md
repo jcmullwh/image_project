@@ -130,18 +130,18 @@ prompt:
         max_critics: 2
 ```
 
-### Example: override blackbox refine iteration settings
+### Example: override blackbox refine loop settings
 
 ```yaml
 prompt:
   stage_configs:
     defaults:
-      blackbox_refine.iter:
-        judges: ["j1"]
-        candidates_per_iter: 2
+      blackbox_refine.loop:
+        iterations: 6
+        algorithm: hillclimb  # hillclimb|beam
 ```
 
-Stages that consume config keys record the small “effective” values under `outputs.prompt_pipeline.stage_configs_effective`.
+Stages that consume config keys record the small, consumed-only effective values under `outputs.prompt_pipeline.stage_configs_effective`.
 
 ## Step Parameters
 
@@ -161,8 +161,7 @@ The transcript includes a `path` for every step (e.g. `pipeline/standard.section
 
 Step telemetry is injected via a `StepRecorder`:
 
-- `DefaultStepRecorder` (production): emits `Step:`/`Received response` logs and appends the per-step dicts to `ctx.steps` (transcript schema unchanged).
-- `DefaultStepRecorder` (production): emits `Step:`/`Received response` logs and appends the per-step dicts to `ctx.steps` (schema is append-only; new optional fields may appear).
+- `DefaultStepRecorder` (default): emits `Step:`/`Received response` logs and appends per-step dicts to `ctx.steps` (schema is append-only).
 - `NullStepRecorder`: disables logging and transcript appends (useful for benchmarks/tests).
 - Custom recorders must implement `on_step_start`, `on_step_end`, and `on_step_error`; misconfiguration raises at construction time. `on_step_start` receives `path` plus `**metrics` so new fields can be added without breaking callers.
 

@@ -9,12 +9,11 @@ from __future__ import annotations
 import hashlib
 import math
 import random
-import re
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass
 from typing import Any, Literal, Mapping
 
 from image_project.framework import scoring as blackbox_scoring
-from image_project.framework.config import PromptBlackboxRefineConfig, PromptBlackboxRefineJudgeConfig
+from image_project.framework.scoring import NoveltyConfig
 from pipelinekit.config_namespace import ConfigNamespace
 from pipelinekit.engine.pipeline import ActionStep, Block, ChatStep
 from image_project.framework.prompt_pipeline import PlanInputs, make_action_stage_block
@@ -24,7 +23,7 @@ from image_project.prompts.blackbox_refine import (
     prompt_variants_judge_prompt,
     variation_generate_prompt,
 )
-from pipelinekit.stage_types import StageIO, StageInstance, StageRef
+from pipelinekit.stage_types import StageIO, StageRef
 
 
 CandidateKind = Literal["generated", "parent"]
@@ -38,6 +37,74 @@ class CandidateSpec:
     kind: CandidateKind
     stage_id: str | None
     output_key: str | None
+
+
+@dataclass(frozen=True)
+class PromptBlackboxRefineVariationPromptConfig:
+    template: str
+    include_concepts: bool
+    include_context_guidance: bool
+    include_profile: bool
+    profile_source: str
+    include_novelty_summary: bool
+    include_mutation_directive: bool
+    include_scoring_rubric: bool
+    score_feedback: str
+    score_feedback_max_chars: int
+
+
+@dataclass(frozen=True)
+class PromptBlackboxRefineMutationDirectivesConfig:
+    mode: str
+    directives: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class PromptBlackboxRefineJudgeConfig:
+    id: str
+    rubric: str
+    weight: float
+    model: str | None
+    temperature: float | None
+
+
+@dataclass(frozen=True)
+class PromptBlackboxRefineJudgingConfig:
+    judges: tuple[PromptBlackboxRefineJudgeConfig, ...]
+    aggregation: str
+    trimmed_mean_drop: int
+
+
+@dataclass(frozen=True)
+class PromptBlackboxRefineSelectionConfig:
+    exploration_rate_override: float | None
+    group_by_beam: bool
+    tie_breaker: str
+
+
+@dataclass(frozen=True)
+class PromptBlackboxRefineConfig:
+    algorithm: str
+    iterations: int
+    beam_width: int
+    branching_factor: int
+    include_parents_as_candidates: bool
+
+    generator_model: str | None
+    generator_temperature: float
+    max_prompt_chars: int | None
+
+    variation_prompt: PromptBlackboxRefineVariationPromptConfig
+    mutation_directives: PromptBlackboxRefineMutationDirectivesConfig
+    judging: PromptBlackboxRefineJudgingConfig
+    selection: PromptBlackboxRefineSelectionConfig
+
+    # Stage-owned scoring defaults (formerly under prompt.scoring.*).
+    judge_model: str | None
+    judge_temperature: float
+    judge_profile_source: str
+    exploration_rate: float
+    novelty: NoveltyConfig
 
 
 def pick_mutation_directive(
@@ -65,24 +132,6 @@ def pick_mutation_directive(
         idx = int.from_bytes(digest[:8], "big") % len(directives)
         return directives[idx]
     raise ValueError(f"Unknown mutation directive mode: {mode!r}")
-
-
-def build_blackbox_refine_loop_instances(inputs: PlanInputs) -> list[StageInstance]:
-    cfg = inputs.cfg.prompt_blackbox_refine
-    if cfg is None:
-        raise ValueError("blackbox_refine requires prompt.blackbox_refine config")
-    if not cfg.enabled:
-        raise ValueError("blackbox_refine requires prompt.blackbox_refine.enabled=true")
-
-    stage_nodes: list[StageInstance] = [BLACKBOX_REFINE_INIT_STATE_STAGE.instance()]
-
-    for iteration in range(1, cfg.iterations + 1):
-        stage_nodes.append(
-            BLACKBOX_REFINE_ITER_STAGE.instance(f"blackbox_refine.iter_{iteration:02d}")
-        )
-
-    stage_nodes.append(BLACKBOX_REFINE_FINALIZE_STAGE.instance())
-    return stage_nodes
 
 
 def _beams_count_for_iteration(cfg: PromptBlackboxRefineConfig, iteration: int) -> int:
@@ -144,6 +193,8 @@ def _iteration_stage_block(
     inputs: PlanInputs,
     cfg: PromptBlackboxRefineConfig,
     iteration: int,
+    *,
+    config_path_root: str,
 ) -> Block:
     beams_count = _beams_count_for_iteration(cfg, iteration)
     candidates = _candidate_specs_for_iteration(cfg, iteration, beams_count=beams_count)
@@ -157,7 +208,9 @@ def _iteration_stage_block(
                 continue
             if int(cand.parent_beam_index) != int(beam_index):
                 continue
-            beam_nodes.append(_candidate_generation_step(cfg, iteration, cand))
+            beam_nodes.append(
+                _candidate_generation_step(cfg, iteration, cand, config_path_root=config_path_root)
+            )
         nodes.append(
             Block(
                 name=f"beam_{beam_index:02d}",
@@ -168,10 +221,16 @@ def _iteration_stage_block(
 
     judge_steps: list[Any] = []
     for judge in cfg.judging.judges:
-        judge_steps.append(_judge_scores_step(inputs, cfg, iteration, judge, candidates))
+        judge_steps.append(
+            _judge_scores_step(
+                inputs, cfg, iteration, judge, candidates, config_path_root=config_path_root
+            )
+        )
     nodes.append(Block(name="judge", merge="none", nodes=judge_steps))
 
-    nodes.append(_select_action_step(inputs, cfg, iteration, candidates))
+    nodes.append(
+        _select_action_step(inputs, cfg, iteration, candidates, config_path_root=config_path_root)
+    )
 
     return Block(
         name=f"blackbox_refine.iter_{iteration:02d}",
@@ -221,9 +280,7 @@ def _init_state_block(
         prompt_refine["seed_prompt"] = seed_prompt
         prompt_refine["iterations"] = []
 
-        novelty_enabled = bool(
-            inputs.cfg.prompt_scoring.novelty.enabled and inputs.cfg.prompt_scoring.novelty.window > 0
-        )
+        novelty_enabled = bool(cfg.novelty.enabled and cfg.novelty.window > 0)
 
         ctx.logger.info(
             "Blackbox prompt refine init: algorithm=%s iterations=%d beam_width=%d branching_factor=%d judges=%d aggregation=%s novelty=%s seed_source=%s",
@@ -256,6 +313,8 @@ def _candidate_generation_step(
     cfg: PromptBlackboxRefineConfig,
     iteration: int,
     candidate: CandidateSpec,
+    *,
+    config_path_root: str,
 ) -> ChatStep:
     assert candidate.kind == "generated"
     assert candidate.output_key is not None
@@ -286,7 +345,7 @@ def _candidate_generation_step(
                 ctx,
                 profile_source=cfg.variation_prompt.profile_source,
                 stage_id=candidate.stage_id or "<unknown>",
-                config_path="prompt.blackbox_refine.variation_prompt.profile_source",
+                config_path=f"{config_path_root}.variation_prompt.profile_source",
             )
 
         novelty_summary: Mapping[str, Any] | None = None
@@ -347,19 +406,21 @@ def _judge_scores_step(
     iteration: int,
     judge: PromptBlackboxRefineJudgeConfig,
     candidates: list[CandidateSpec],
+    *,
+    config_path_root: str,
 ) -> ChatStep:
     stage_id = f"blackbox_refine.iter_{iteration:02d}.judge.{judge.id}"
     output_key = f"bbref.iter_{iteration:02d}.judge.{judge.id}.scores_json"
 
     judge_params: dict[str, Any] = {}
-    judge_model = judge.model if judge.model else inputs.cfg.prompt_scoring.judge_model
+    judge_model = judge.model if judge.model else cfg.judge_model
     if judge_model:
         judge_params["model"] = judge_model
 
     temperature = (
         float(judge.temperature)
         if judge.temperature is not None
-        else float(inputs.cfg.prompt_scoring.judge_temperature)
+        else float(cfg.judge_temperature)
     )
 
     def _prompt(ctx: RunContext, *, candidates=candidates, judge=judge) -> str:
@@ -385,9 +446,9 @@ def _judge_scores_step(
 
         raw_profile = _resolve_blackbox_profile_text(
             ctx,
-            source=inputs.cfg.prompt_scoring.judge_profile_source,
+            source=cfg.judge_profile_source,
             stage_id=stage_id,
-            config_path="prompt.scoring.judge_profile_source",
+            config_path=f"{config_path_root}.judge_profile_source",
         )
 
         novelty_summary = _resolve_novelty_summary(ctx)
@@ -426,12 +487,14 @@ def _select_action_step(
     cfg: PromptBlackboxRefineConfig,
     iteration: int,
     candidates: list[CandidateSpec],
+    *,
+    config_path_root: str,
 ) -> ActionStep:
     stage_id = f"blackbox_refine.iter_{iteration:02d}.select"
     pipeline_step_path = f"pipeline/blackbox_refine.iter_{iteration:02d}/select"
 
     def _action(ctx: RunContext, *, iteration=iteration, candidates=candidates) -> dict[str, Any]:
-        novelty_cfg = inputs.cfg.prompt_scoring.novelty
+        novelty_cfg = cfg.novelty
         novelty_enabled_cfg = bool(novelty_cfg.enabled and novelty_cfg.window > 0)
         novelty_summary = _resolve_novelty_summary(ctx)
         novelty_available = bool(isinstance(novelty_summary, dict) and novelty_summary.get("enabled"))
@@ -439,11 +502,11 @@ def _select_action_step(
         warnings: list[str] = []
         if cfg.variation_prompt.include_novelty_summary and not novelty_available:
             warnings.append(
-                f"{pipeline_step_path}: prompt.blackbox_refine.variation_prompt.include_novelty_summary=true but novelty summary is unavailable; using <none>"
+                f"{pipeline_step_path}: {config_path_root}.variation_prompt.include_novelty_summary=true but novelty summary is unavailable; using <none>"
             )
         if novelty_enabled_cfg and not novelty_available:
             warnings.append(
-                f"{pipeline_step_path}: prompt.scoring.novelty.enabled=true but novelty summary is unavailable; novelty penalties disabled for this run"
+                f"{pipeline_step_path}: {config_path_root}.novelty.enabled=true but novelty summary is unavailable; novelty penalties disabled for this run"
             )
 
         candidate_by_id = {c.candidate_id: c for c in candidates}
@@ -489,9 +552,11 @@ def _select_action_step(
         truncated_ids = [row["id"] for row in candidate_rows if row.get("prompt_truncated") is True]
         if truncated_ids:
             warnings.append(
-                "Candidate prompt(s) exceeded prompt.blackbox_refine.max_prompt_chars and were truncated: "
-                f"max={cfg.max_prompt_chars} ids={truncated_ids}"
+                f"Candidate prompt(s) exceeded {config_path_root}.max_prompt_chars and were truncated: max={cfg.max_prompt_chars} ids={truncated_ids}"
             )
+
+        for warning in warnings:
+            ctx.logger.warning("%s", warning)
 
         judge_outputs: list[dict[str, Any]] = []
         judge_scores_by_id: dict[str, dict[str, int]] = {}
@@ -517,10 +582,10 @@ def _select_action_step(
             judge_outputs.append(
                 {
                     "judge_id": judge.id,
-                    "model": judge.model or inputs.cfg.prompt_scoring.judge_model,
+                    "model": judge.model or cfg.judge_model,
                     "temperature": judge.temperature
                     if judge.temperature is not None
-                    else inputs.cfg.prompt_scoring.judge_temperature,
+                    else cfg.judge_temperature,
                     "weight": judge.weight,
                     "rubric": judge.rubric,
                     "raw_json": raw_json,
@@ -634,7 +699,7 @@ def _select_action_step(
         exploration_rate = (
             float(cfg.selection.exploration_rate_override)
             if cfg.selection.exploration_rate_override is not None
-            else float(inputs.cfg.prompt_scoring.exploration_rate)
+            else float(cfg.exploration_rate)
         )
         scoring_seed = (int(ctx.seed) ^ 0xBB0F00D) + int(iteration)
         rng = random.Random(scoring_seed)
@@ -889,6 +954,9 @@ def _resolve_candidate_prompt_text(
         text = raw.strip()
 
     original_chars = len(text)
+    if max_prompt_chars is not None and original_chars > int(max_prompt_chars):
+        truncated = text[: int(max_prompt_chars)].rstrip()
+        return truncated, original_chars, True
     return text, original_chars, False
 
 
@@ -1131,115 +1199,13 @@ def _select_candidates(
     return selected[:k]
 
 
-BLACKBOX_REFINE_ITER_KIND_ID = "blackbox_refine.iter"
-_ITERATION_INSTANCE_RE = re.compile(r"^blackbox_refine\.iter_(\d+)$")
+KIND_ID = "blackbox_refine.loop"
 
 
-def _build_blackbox_refine_iteration(
-    inputs: PlanInputs,
-    *,
-    instance_id: str,
-    cfg: ConfigNamespace,
-) -> Block:
-    match = _ITERATION_INSTANCE_RE.match((instance_id or "").strip())
-    if match is None:
-        raise ValueError(
-            "blackbox_refine.iter requires instance_id of the form: "
-            "blackbox_refine.iter_01, blackbox_refine.iter_02, ..."
-        )
-    iteration = int(match.group(1))
-    expected_instance_id = f"blackbox_refine.iter_{iteration:02d}"
-    if instance_id != expected_instance_id:
-        raise ValueError(
-            "blackbox_refine.iter instance_id must be zero-padded to match internal naming: "
-            f"expected={expected_instance_id} got={instance_id}"
-        )
-
-    base_cfg = inputs.cfg.prompt_blackbox_refine
-    if base_cfg is None:
-        raise ValueError("blackbox_refine.iter requires prompt.blackbox_refine config")
-    if not base_cfg.enabled:
-        raise ValueError("blackbox_refine.iter requires prompt.blackbox_refine.enabled=true")
-    if not (1 <= iteration <= int(base_cfg.iterations)):
-        raise ValueError(
-            f"{instance_id} iteration must be in [1, {int(base_cfg.iterations)}] (got {iteration})"
-        )
-
-    allowed_judges = {judge.id: judge for judge in base_cfg.judging.judges}
-    default_judges = [judge.id for judge in base_cfg.judging.judges]
-
-    judges = cfg.get_list_str("judges", default=default_judges)
-    seen: set[str] = set()
-    dupes: list[str] = []
-    for judge_id in judges:
-        if judge_id in seen and judge_id not in dupes:
-            dupes.append(judge_id)
-        seen.add(judge_id)
-    if dupes:
-        raise ValueError(
-            f"Duplicate judge id(s) for {instance_id}: {', '.join(dupes)}"
-        )
-
-    invalid_judges = [judge_id for judge_id in judges if judge_id not in allowed_judges]
-    if invalid_judges:
-        allowed_list = ", ".join(sorted(allowed_judges.keys())) or "<none>"
-        raise ValueError(
-            f"Invalid judge id(s) for {instance_id}: {', '.join(invalid_judges)} (allowed: {allowed_list})"
-        )
-    selected_judges = tuple(allowed_judges[judge_id] for judge_id in judges)
-
-    candidates_per_iter = cfg.get_int(
-        "candidates_per_iter",
-        default=int(base_cfg.branching_factor),
-        min_value=1,
-    )
-
-    effective_cfg = replace(
-        base_cfg,
-        branching_factor=int(candidates_per_iter),
-        judging=replace(base_cfg.judging, judges=selected_judges),
-    )
-
-    cfg.assert_consumed()
-    return _iteration_stage_block(inputs, effective_cfg, iteration)
-
-
-BLACKBOX_REFINE_ITER_STAGE = StageRef(
-    id=BLACKBOX_REFINE_ITER_KIND_ID,
-    builder=_build_blackbox_refine_iteration,
-    doc="Blackbox refine iteration stage (generate candidates, judge, select).",
-    source="stages.blackbox_refine.loop._iteration_stage_block",
-    tags=("blackbox_refine",),
-    kind="composite",
-    io=StageIO(
-        requires=("bbref.beams",),
-    ),
-)
-
-
-BLACKBOX_REFINE_INIT_STATE_KIND_ID = "blackbox_refine.init_state"
-
-
-def _build_blackbox_refine_init_state(
-    inputs: PlanInputs,
-    *,
-    instance_id: str,
-    cfg: ConfigNamespace,
-) -> Block:
-    if instance_id != BLACKBOX_REFINE_INIT_STATE_KIND_ID:
-        raise ValueError(
-            f"{BLACKBOX_REFINE_INIT_STATE_KIND_ID} does not support custom instance ids: {instance_id}"
-        )
-
-    base_cfg = inputs.cfg.prompt_blackbox_refine
-    if base_cfg is None:
-        raise ValueError("blackbox_refine.init_state requires prompt.blackbox_refine config")
-    if not base_cfg.enabled:
-        raise ValueError("blackbox_refine.init_state requires prompt.blackbox_refine.enabled=true")
-
-    seed_output_key = cfg.get_str("seed_output_key", default="bbref.seed_prompt")
-    if seed_output_key is None:
-        raise ValueError("blackbox_refine.init_state seed_output_key cannot be null")
+def _parse_loop_config(
+    cfg: ConfigNamespace, *, inputs: PlanInputs
+) -> tuple[PromptBlackboxRefineConfig, str]:
+    """Parse stage-owned configuration for `blackbox_refine.loop`."""
 
     seed_source = cfg.get_str("seed_source", default=None)
     if seed_source is None:
@@ -1247,60 +1213,263 @@ def _build_blackbox_refine_init_state(
         seed_source = inferred
         cfg.set_effective("seed_source", inferred)
 
-    cfg.assert_consumed()
-    return _init_state_block(
-        inputs,
-        base_cfg,
-        seed_output_key=seed_output_key,
-        seed_source=seed_source,
+    iterations = cfg.get_int("iterations", default=3, min_value=1)
+    algorithm = cfg.get_str("algorithm", default="hillclimb", choices=("hillclimb", "beam"))
+    if algorithm is None:
+        raise ValueError(f"{cfg.path}.algorithm cannot be null")
+
+    beam_width = cfg.get_int("beam_width", default=3, min_value=1)
+    if algorithm == "beam" and beam_width < 2:
+        raise ValueError(f"{cfg.path}.beam_width must be >= 2 when algorithm=beam (got {beam_width})")
+
+    branching_factor = cfg.get_int("branching_factor", default=6, min_value=1)
+    include_parents_as_candidates = cfg.get_bool("include_parents_as_candidates", default=True)
+
+    generator_model = cfg.get_str("generator_model", default=None)
+    generator_temperature = cfg.get_float(
+        "generator_temperature", default=0.9, min_value=0.0, max_value=2.0
+    )
+    max_prompt_chars = cfg.get_optional_int("max_prompt_chars", default=3500, min_value=1)
+
+    vp_ns = cfg.namespace("variation_prompt", default={})
+    template = vp_ns.get_str("template", default="v1", choices=("v1", "v2"))
+    if template is None:
+        raise ValueError(f"{vp_ns.path}.template cannot be null")
+    include_concepts = vp_ns.get_bool("include_concepts", default=True)
+    include_context_guidance = vp_ns.get_bool("include_context_guidance", default=False)
+    include_profile = vp_ns.get_bool("include_profile", default=True)
+    profile_source = vp_ns.get_str(
+        "profile_source",
+        default="likes_dislikes",
+        choices=("raw", "generator_hints", "likes_dislikes", "dislikes_only", "combined"),
+    )
+    if profile_source is None:
+        raise ValueError(f"{vp_ns.path}.profile_source cannot be null")
+    include_novelty_summary = vp_ns.get_bool("include_novelty_summary", default=True)
+    include_mutation_directive = vp_ns.get_bool("include_mutation_directive", default=True)
+    include_scoring_rubric = vp_ns.get_bool("include_scoring_rubric", default=True)
+    score_feedback = vp_ns.get_str(
+        "score_feedback",
+        default="best_worst",
+        choices=("none", "best_worst"),
+    )
+    if score_feedback is None:
+        raise ValueError(f"{vp_ns.path}.score_feedback cannot be null")
+    score_feedback_max_chars = vp_ns.get_int("score_feedback_max_chars", default=900, min_value=0)
+    variation_prompt = PromptBlackboxRefineVariationPromptConfig(
+        template=str(template),
+        include_concepts=bool(include_concepts),
+        include_context_guidance=bool(include_context_guidance),
+        include_profile=bool(include_profile),
+        profile_source=str(profile_source),
+        include_novelty_summary=bool(include_novelty_summary),
+        include_mutation_directive=bool(include_mutation_directive),
+        include_scoring_rubric=bool(include_scoring_rubric),
+        score_feedback=str(score_feedback),
+        score_feedback_max_chars=int(score_feedback_max_chars),
     )
 
+    md_ns = cfg.namespace("mutation_directives", default={})
+    directive_mode = md_ns.get_str("mode", default="random", choices=("none", "random", "cycle", "fixed"))
+    if directive_mode is None:
+        raise ValueError(f"{md_ns.path}.mode cannot be null")
+    directives = tuple(md_ns.get_list_str("directives", default=(), allow_empty=True))
+    mutation_directives = PromptBlackboxRefineMutationDirectivesConfig(
+        mode=str(directive_mode),
+        directives=tuple(directives),
+    )
 
-BLACKBOX_REFINE_INIT_STATE_STAGE = StageRef(
-    id=BLACKBOX_REFINE_INIT_STATE_KIND_ID,
-    builder=_build_blackbox_refine_init_state,
-    doc="Initialize blackbox refine loop state.",
-    source="stages.blackbox_refine.loop._init_state_block",
-    tags=("blackbox_refine",),
-    kind="action",
-    io=StageIO(
-        provides=("bbref.beams",),
-    ),
-)
+    judging_ns = cfg.namespace("judging", default={})
+    judges_raw = judging_ns.get_list_mapping("judges")
+    judges: list[PromptBlackboxRefineJudgeConfig] = []
+    for idx, judge_item in enumerate(judges_raw):
+        judge_ns = ConfigNamespace(judge_item, path=f"{judging_ns.path}.judges[{idx}]")
+        judge_id = judge_ns.get_str("id")
+        if judge_id is None:
+            raise ValueError(f"{judge_ns.path}.id cannot be null")
+        rubric = judge_ns.get_str(
+            "rubric",
+            default="default",
+            choices=("default", "strict", "novelty_heavy"),
+        )
+        if rubric is None:
+            raise ValueError(f"{judge_ns.path}.rubric cannot be null")
+        weight = judge_ns.get_float("weight", default=1.0, min_value=0.0)
+        model = judge_ns.get_str("model", default=None)
+        temperature = judge_ns.get_optional_float("temperature", default=None, min_value=0.0, max_value=2.0)
+        judge_ns.assert_consumed()
+        judges.append(
+            PromptBlackboxRefineJudgeConfig(
+                id=str(judge_id),
+                rubric=str(rubric),
+                weight=float(weight),
+                model=model,
+                temperature=temperature,
+            )
+        )
+
+    if not judges:
+        raise ValueError(f"{judging_ns.path}.judges must contain at least one judge")
+    seen_judges: set[str] = set()
+    dupes = [j.id for j in judges if (j.id in seen_judges or seen_judges.add(j.id)) and j.id]
+    if dupes:
+        raise ValueError(f"{judging_ns.path}.judges contains duplicate ids: {', '.join(sorted(set(dupes)))}")
+
+    aggregation = judging_ns.get_str(
+        "aggregation",
+        default="mean",
+        choices=("mean", "median", "min", "max", "trimmed_mean"),
+    )
+    if aggregation is None:
+        raise ValueError(f"{judging_ns.path}.aggregation cannot be null")
+    trimmed_mean_drop = judging_ns.get_int("trimmed_mean_drop", default=0, min_value=0)
+    if aggregation == "trimmed_mean" and (2 * int(trimmed_mean_drop) >= len(judges)):
+        raise ValueError(
+            f"{judging_ns.path}.trimmed_mean_drop is too large for judge count (drop={trimmed_mean_drop} judges={len(judges)})"
+        )
+    judging = PromptBlackboxRefineJudgingConfig(
+        judges=tuple(judges),
+        aggregation=str(aggregation),
+        trimmed_mean_drop=int(trimmed_mean_drop),
+    )
+
+    selection_ns = cfg.namespace("selection", default={})
+    exploration_rate_override = selection_ns.get_optional_float(
+        "exploration_rate_override", default=None, min_value=0.0, max_value=1.0
+    )
+    group_by_beam = selection_ns.get_bool("group_by_beam", default=False)
+    tie_breaker = selection_ns.get_str(
+        "tie_breaker",
+        default="stable_id",
+        choices=("stable_id", "prefer_shorter", "prefer_novel"),
+    )
+    if tie_breaker is None:
+        raise ValueError(f"{selection_ns.path}.tie_breaker cannot be null")
+    selection = PromptBlackboxRefineSelectionConfig(
+        exploration_rate_override=exploration_rate_override,
+        group_by_beam=bool(group_by_beam),
+        tie_breaker=str(tie_breaker),
+    )
+
+    judge_model = cfg.get_str("judge_model", default=None)
+    judge_temperature = cfg.get_float("judge_temperature", default=0.0, min_value=0.0, max_value=2.0)
+    judge_profile_source = cfg.get_str(
+        "judge_profile_source",
+        default="raw",
+        choices=("raw", "generator_hints", "generator_hints_plus_dislikes"),
+    )
+    if judge_profile_source is None:
+        raise ValueError(f"{cfg.path}.judge_profile_source cannot be null")
+    exploration_rate = cfg.get_float("exploration_rate", default=0.15, min_value=0.0, max_value=1.0)
+
+    novelty_ns = cfg.namespace("novelty", default={})
+    novelty_enabled = novelty_ns.get_bool("enabled", default=False)
+    novelty_window = novelty_ns.get_int("window", default=0, min_value=0)
+    novelty_method = novelty_ns.get_str(
+        "method",
+        default="df_overlap_v1",
+        choices=("df_overlap_v1",),
+    )
+    if novelty_method is None:
+        raise ValueError(f"{novelty_ns.path}.method cannot be null")
+    novelty_df_min = novelty_ns.get_int("df_min", default=3, min_value=1)
+    novelty_max_motifs = novelty_ns.get_int("max_motifs", default=200, min_value=1)
+    novelty_min_token_len = novelty_ns.get_int("min_token_len", default=3, min_value=1)
+    novelty_stopwords_extra = tuple(novelty_ns.get_list_str("stopwords_extra", default=(), allow_empty=True))
+    novelty_max_penalty = novelty_ns.get_int("max_penalty", default=20, min_value=0)
+    novelty_df_cap = novelty_ns.get_int("df_cap", default=10, min_value=1)
+    novelty_alpha_only = novelty_ns.get_bool("alpha_only", default=True)
+    novelty_scaling = novelty_ns.get_str(
+        "scaling",
+        default="linear",
+        choices=("linear", "sqrt", "quadratic"),
+    )
+    if novelty_scaling is None:
+        raise ValueError(f"{novelty_ns.path}.scaling cannot be null")
+
+    novelty_cfg = NoveltyConfig(
+        enabled=bool(novelty_enabled),
+        window=int(novelty_window),
+        method=str(novelty_method),
+        df_min=int(novelty_df_min),
+        max_motifs=int(novelty_max_motifs),
+        min_token_len=int(novelty_min_token_len),
+        stopwords_extra=tuple(novelty_stopwords_extra),
+        max_penalty=int(novelty_max_penalty),
+        df_cap=int(novelty_df_cap),
+        alpha_only=bool(novelty_alpha_only),
+        scaling=str(novelty_scaling),
+    )
+
+    loop_cfg = PromptBlackboxRefineConfig(
+        algorithm=str(algorithm),
+        iterations=int(iterations),
+        beam_width=int(beam_width),
+        branching_factor=int(branching_factor),
+        include_parents_as_candidates=bool(include_parents_as_candidates),
+        generator_model=generator_model,
+        generator_temperature=float(generator_temperature),
+        max_prompt_chars=max_prompt_chars,
+        variation_prompt=variation_prompt,
+        mutation_directives=mutation_directives,
+        judging=judging,
+        selection=selection,
+        judge_model=judge_model,
+        judge_temperature=float(judge_temperature),
+        judge_profile_source=str(judge_profile_source),
+        exploration_rate=float(exploration_rate),
+        novelty=novelty_cfg,
+    )
+
+    return loop_cfg, str(seed_source)
 
 
-BLACKBOX_REFINE_FINALIZE_KIND_ID = "blackbox_refine.finalize"
-
-
-def _build_blackbox_refine_finalize(
+def _build_blackbox_refine_loop(
     inputs: PlanInputs,
     *,
     instance_id: str,
     cfg: ConfigNamespace,
 ) -> Block:
-    if instance_id != BLACKBOX_REFINE_FINALIZE_KIND_ID:
-        raise ValueError(
-            f"{BLACKBOX_REFINE_FINALIZE_KIND_ID} does not support custom instance ids: {instance_id}"
-        )
+    """Build the composite stage that runs init + N iterations + finalize."""
 
-    base_cfg = inputs.cfg.prompt_blackbox_refine
-    if base_cfg is None:
-        raise ValueError("blackbox_refine.finalize requires prompt.blackbox_refine config")
-    if not base_cfg.enabled:
-        raise ValueError("blackbox_refine.finalize requires prompt.blackbox_refine.enabled=true")
+    if instance_id != KIND_ID:
+        raise ValueError(f"{KIND_ID} does not support custom instance ids: {instance_id}")
+
+    loop_cfg, seed_source = _parse_loop_config(cfg, inputs=inputs)
+
+    nodes: list[Any] = [
+        _init_state_block(
+            inputs,
+            loop_cfg,
+            seed_output_key="bbref.seed_prompt",
+            seed_source=seed_source,
+        ),
+    ]
+    for iteration in range(1, int(loop_cfg.iterations) + 1):
+        nodes.append(_iteration_stage_block(inputs, loop_cfg, iteration, config_path_root=cfg.path))
+    nodes.append(_finalize_block(loop_cfg))
 
     cfg.assert_consumed()
-    return _finalize_block(base_cfg)
+    return Block(
+        name=instance_id,
+        merge="none",
+        nodes=nodes,
+        meta={
+            "doc": "Blackbox refinement loop (init + iterations + finalize).",
+            "tags": ["blackbox_refine"],
+        },
+    )
 
 
-BLACKBOX_REFINE_FINALIZE_STAGE = StageRef(
-    id=BLACKBOX_REFINE_FINALIZE_KIND_ID,
-    builder=_build_blackbox_refine_finalize,
-    doc="Finalize blackbox refinement loop output (beam[0]).",
-    source="stages.blackbox_refine.loop._finalize_block",
+STAGE = StageRef(
+    id=KIND_ID,
+    builder=_build_blackbox_refine_loop,
+    doc="Run the blackbox refinement loop (init + N iterations + finalize).",
+    source="stages.blackbox_refine.loop._build_blackbox_refine_loop",
     tags=("blackbox_refine",),
-    kind="action",
+    kind="composite",
     io=StageIO(
-        requires=("bbref.beams",),
+        requires=("bbref.seed_prompt",),
+        provides=("bbref.beams",),
     ),
 )

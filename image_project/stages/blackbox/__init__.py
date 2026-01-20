@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from image_project.stages.blackbox.generator_profile_hints import STAGE as GENERATOR_PROFILE_HINTS
+from image_project.stages.blackbox.generate_idea_cards import STAGE as GENERATE_IDEA_CARDS
 from image_project.stages.blackbox.idea_card_generate import STAGE as IDEA_CARD_GENERATE
 from image_project.stages.blackbox.idea_cards_assemble import STAGE as IDEA_CARDS_ASSEMBLE
 from image_project.stages.blackbox.idea_cards_generate import STAGE as IDEA_CARDS_GENERATE
@@ -15,6 +17,8 @@ from image_project.stages.blackbox.select_idea_card import STAGE as SELECT_IDEA_
 
 __all_stages__ = [
     PREPARE,
+    GENERATOR_PROFILE_HINTS,
+    GENERATE_IDEA_CARDS,
     PROFILE_ABSTRACTION,
     PROFILE_HINTS_LOAD,
     IDEA_CARD_GENERATE,

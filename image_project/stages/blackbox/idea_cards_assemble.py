@@ -14,8 +14,8 @@ KIND_ID = "blackbox.idea_cards_assemble"
 def _build(inputs: PlanInputs, *, instance_id: str, cfg: ConfigNamespace):
     from image_project.framework.scoring import expected_idea_ids
 
-    scoring_cfg = inputs.cfg.prompt_scoring
-    idea_ids = expected_idea_ids(scoring_cfg.num_ideas)
+    num_ideas = cfg.get_int("num_ideas", default=6, min_value=1)
+    idea_ids = expected_idea_ids(int(num_ideas))
 
     def _action(ctx: RunContext) -> str:
         from image_project.framework import scoring as blackbox_scoring

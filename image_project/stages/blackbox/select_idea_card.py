@@ -11,15 +11,57 @@ KIND_ID = "blackbox.select_idea_card"
 
 
 def _build(inputs: PlanInputs, *, instance_id: str, cfg: ConfigNamespace):
-    scoring_cfg = inputs.cfg.prompt_scoring
+    exploration_rate = cfg.get_float(
+        "exploration_rate", default=0.15, min_value=0.0, max_value=1.0
+    )
+    expected_num_ideas = cfg.get_int("num_ideas", default=6, min_value=1)
+
+    novelty_ns = cfg.namespace("novelty", default={})
+    novelty_enabled = novelty_ns.get_bool("enabled", default=False)
+    novelty_window = novelty_ns.get_int("window", default=0, min_value=0)
+    novelty_method = novelty_ns.get_str(
+        "method",
+        default="df_overlap_v1",
+        choices=("df_overlap_v1",),
+    )
+    if novelty_method is None:
+        raise ValueError("blackbox.select_idea_card.novelty.method cannot be null")
+    novelty_df_min = novelty_ns.get_int("df_min", default=3, min_value=1)
+    novelty_max_motifs = novelty_ns.get_int("max_motifs", default=200, min_value=1)
+    novelty_min_token_len = novelty_ns.get_int("min_token_len", default=3, min_value=1)
+    novelty_stopwords_extra = tuple(
+        novelty_ns.get_list_str("stopwords_extra", default=(), allow_empty=True)
+    )
+    novelty_max_penalty = novelty_ns.get_int("max_penalty", default=20, min_value=0)
+    novelty_df_cap = novelty_ns.get_int("df_cap", default=10, min_value=1)
+    novelty_alpha_only = novelty_ns.get_bool("alpha_only", default=True)
+    novelty_scaling = novelty_ns.get_str(
+        "scaling",
+        default="linear",
+        choices=("linear", "sqrt", "quadratic"),
+    )
+    if novelty_scaling is None:
+        raise ValueError("blackbox.select_idea_card.novelty.scaling cannot be null")
 
     def _action(ctx: RunContext) -> dict[str, Any]:
         import random
 
         from image_project.framework import scoring as blackbox_scoring
+        from image_project.framework.scoring import NoveltyConfig
 
-        if not scoring_cfg.enabled:
-            raise ValueError("blackbox.select_idea_card requires prompt.scoring.enabled=true")
+        novelty_cfg = NoveltyConfig(
+            enabled=bool(novelty_enabled),
+            window=int(novelty_window),
+            method=str(novelty_method),
+            df_min=int(novelty_df_min),
+            max_motifs=int(novelty_max_motifs),
+            min_token_len=int(novelty_min_token_len),
+            stopwords_extra=tuple(novelty_stopwords_extra),
+            max_penalty=int(novelty_max_penalty),
+            df_cap=int(novelty_df_cap),
+            alpha_only=bool(novelty_alpha_only),
+            scaling=str(novelty_scaling),
+        )
 
         idea_cards_json = ctx.outputs.get("idea_cards_json")
         if not isinstance(idea_cards_json, str) or not idea_cards_json.strip():
@@ -28,7 +70,6 @@ def _build(inputs: PlanInputs, *, instance_id: str, cfg: ConfigNamespace):
         if not isinstance(idea_scores_json, str) or not idea_scores_json.strip():
             raise ValueError("Missing required output: idea_scores_json")
 
-        novelty_cfg = scoring_cfg.novelty
         novelty_enabled_cfg = bool(novelty_cfg.enabled and novelty_cfg.window > 0)
         novelty_summary: dict[str, Any] | None = None
         novelty_available = False
@@ -57,7 +98,7 @@ def _build(inputs: PlanInputs, *, instance_id: str, cfg: ConfigNamespace):
 
         if novelty_missing:
             warn = (
-                "pipeline/blackbox.select_idea_card/action: prompt.scoring.novelty.enabled=true but novelty summary is "
+                "pipeline/blackbox.select_idea_card/action: novelty.enabled=true but novelty summary is "
                 "unavailable; novelty penalties disabled for this run"
             )
             ctx.logger.warning(warn)
@@ -69,7 +110,7 @@ def _build(inputs: PlanInputs, *, instance_id: str, cfg: ConfigNamespace):
 
         try:
             idea_cards = blackbox_scoring.parse_idea_cards_json(
-                idea_cards_json, expected_num_ideas=scoring_cfg.num_ideas
+                idea_cards_json, expected_num_ideas=expected_num_ideas
             )
         except Exception as exc:
             pipeline = ctx.outputs.get("prompt_pipeline")
@@ -97,7 +138,7 @@ def _build(inputs: PlanInputs, *, instance_id: str, cfg: ConfigNamespace):
         selection = blackbox_scoring.select_candidate(
             scores=scores,
             idea_cards=idea_cards,
-            exploration_rate=scoring_cfg.exploration_rate,
+            exploration_rate=float(exploration_rate),
             rng=random.Random(scoring_seed),
             novelty_cfg=novelty_cfg,
             novelty_summary=novelty_summary,
@@ -118,7 +159,7 @@ def _build(inputs: PlanInputs, *, instance_id: str, cfg: ConfigNamespace):
         ctx.blackbox_scoring.update(
             {
                 "scoring_seed": scoring_seed,
-                "exploration_rate": scoring_cfg.exploration_rate,
+                "exploration_rate": float(exploration_rate),
                 "exploration_roll": selection.exploration_roll,
                 "selection_mode": selection.selection_mode,
                 "selected_id": selection.selected_id,

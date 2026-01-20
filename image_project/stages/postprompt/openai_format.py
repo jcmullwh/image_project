@@ -11,9 +11,7 @@ KIND_ID = "postprompt.openai_format"
 
 
 def _build(inputs: PlanInputs, *, instance_id: str, cfg: ConfigNamespace):
-    max_chars: int | None = None
-    if inputs.cfg.prompt_blackbox_refine is not None:
-        max_chars = inputs.cfg.prompt_blackbox_refine.max_prompt_chars
+    max_chars = cfg.get_optional_int("max_prompt_chars", default=None, min_value=1)
 
     def _prompt(ctx: RunContext) -> str:
         draft = resolve_latest_prompt_for_postprompt(ctx, stage_id=KIND_ID)

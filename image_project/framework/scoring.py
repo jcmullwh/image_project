@@ -10,7 +10,21 @@ from collections import Counter, deque
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping
 
-from image_project.framework.config import PromptNoveltyConfig
+@dataclass(frozen=True)
+class NoveltyConfig:
+    """Configuration for novelty penalties in blackbox scoring."""
+
+    enabled: bool
+    window: int
+    method: str = "df_overlap_v1"
+    df_min: int = 3
+    max_motifs: int = 200
+    min_token_len: int = 3
+    stopwords_extra: tuple[str, ...] = ()
+    max_penalty: int = 20
+    df_cap: int = 10
+    alpha_only: bool = True
+    scaling: str = "linear"
 
 
 @dataclass(frozen=True)
@@ -441,7 +455,7 @@ def _stopwords_fingerprint(stopwords: Iterable[str]) -> tuple[int, str]:
 def _extract_recent_motif_summary_df_overlap_v1(
     *,
     generations_csv_path: str,
-    cfg: PromptNoveltyConfig,
+    cfg: NoveltyConfig,
 ) -> dict[str, Any]:
     window = int(cfg.window)
     if window <= 0:
@@ -504,7 +518,7 @@ def _extract_recent_motif_summary_df_overlap_v1(
 
 
 def extract_recent_motif_summary(
-    *, generations_csv_path: str, novelty_cfg: PromptNoveltyConfig
+    *, generations_csv_path: str, novelty_cfg: NoveltyConfig
 ) -> dict[str, Any]:
     method = str(getattr(novelty_cfg, "method", "") or "").strip().lower()
     if method == "df_overlap_v1":
@@ -519,7 +533,7 @@ def _novelty_penalties_df_overlap_v1(
     novelty_summary: Mapping[str, Any],
     *,
     text_field: str,
-    cfg: PromptNoveltyConfig,
+    cfg: NoveltyConfig,
 ) -> tuple[dict[str, int], dict[str, dict[str, Any]]]:
     penalties: dict[str, int] = {str(card.get("id")): 0 for card in candidates}
     breakdown: dict[str, dict[str, Any]] = {
@@ -613,7 +627,7 @@ def _novelty_penalties_df_overlap_v1(
 
 def novelty_penalties(
     candidates: list[Mapping[str, Any]],
-    novelty_cfg: PromptNoveltyConfig,
+    novelty_cfg: NoveltyConfig,
     novelty_summary: Mapping[str, Any] | None,
     *,
     text_field: str,
@@ -663,7 +677,7 @@ def select_candidate(
     idea_cards: list[Mapping[str, Any]],
     exploration_rate: float,
     rng: random.Random,
-    novelty_cfg: PromptNoveltyConfig | None = None,
+    novelty_cfg: NoveltyConfig | None = None,
     novelty_summary: Mapping[str, Any] | None = None,
 ) -> SelectionResult:
     if not scores:
@@ -674,7 +688,7 @@ def select_candidate(
     if missing_cards:
         raise ValueError(f"selection inconsistency: missing idea cards for ids={missing_cards}")
 
-    effective_novelty_cfg = novelty_cfg or PromptNoveltyConfig(enabled=False, window=0)
+    effective_novelty_cfg = novelty_cfg or NoveltyConfig(enabled=False, window=0)
     novelty_enabled = bool(effective_novelty_cfg.enabled and effective_novelty_cfg.window > 0)
     novelty_method = str(getattr(effective_novelty_cfg, "method", "") or "").strip().lower()
 

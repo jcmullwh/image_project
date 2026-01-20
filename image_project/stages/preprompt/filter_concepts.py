@@ -11,7 +11,20 @@ KIND_ID = "preprompt.filter_concepts"
 
 
 def _build(inputs: PlanInputs, *, instance_id: str, cfg: ConfigNamespace):
-    filters_cfg = inputs.cfg.prompt_concepts.filters
+    filters_enabled = cfg.get_bool("enabled", default=False)
+    order = tuple(
+        cfg.get_list_str(
+            "order",
+            default=("dislike_rewrite",),
+            allow_empty=not filters_enabled,
+        )
+    )
+
+    dislike_cfg = cfg.namespace("dislike_rewrite", default={})
+    dislike_enabled = dislike_cfg.get_bool("enabled", default=True)
+    dislike_temperature = dislike_cfg.get_float(
+        "temperature", default=0.25, min_value=0.0, max_value=2.0
+    )
 
     def _action(ctx: RunContext) -> dict[str, Any]:
         from image_project.framework.inputs import apply_concept_filters, make_dislike_rewrite_filter
@@ -21,12 +34,12 @@ def _build(inputs: PlanInputs, *, instance_id: str, cfg: ConfigNamespace):
         applied: list[str] = []
         skipped: list[dict[str, str]] = []
 
-        if not filters_cfg.enabled:
+        if not filters_enabled:
             skipped.append({"name": "<all>", "reason": "disabled"})
         else:
-            for name in filters_cfg.order:
+            for name in order:
                 if name == "dislike_rewrite":
-                    if not filters_cfg.dislike_rewrite.enabled:
+                    if not dislike_enabled:
                         skipped.append({"name": name, "reason": "disabled"})
                         continue
 
@@ -40,18 +53,18 @@ def _build(inputs: PlanInputs, *, instance_id: str, cfg: ConfigNamespace):
                         make_dislike_rewrite_filter(
                             dislikes=dislikes,
                             ai_text=inputs.ai_text,
-                            temperature=filters_cfg.dislike_rewrite.temperature,
+                            temperature=float(dislike_temperature),
                         )
                     )
                     applied.append(name)
-                else:  # pragma: no cover - guarded by config validation
-                    skipped.append({"name": name, "reason": "unknown"})
+                else:
+                    raise ValueError(f"Unknown concept filter: {name!r}")
 
         filtered, outcomes = apply_concept_filters(concepts_in, filters, logger=ctx.logger)
 
         ctx.outputs["concept_filter_log"] = {
-            "enabled": bool(filters_cfg.enabled),
-            "order": list(filters_cfg.order),
+            "enabled": bool(filters_enabled),
+            "order": list(order),
             "applied": applied,
             "skipped": skipped,
             "input": concepts_in,

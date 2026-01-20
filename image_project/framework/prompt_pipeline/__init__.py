@@ -33,6 +33,7 @@ from .stage_policies import (
     IMAGE_PROJECT_OVERRIDE_POLICY,
     IMAGE_PROJECT_SELECTOR_RESOLVER,
 )
+from .pipeline_overrides import PipelineOverrides
 
 StageNode: TypeAlias = StageInstance
 
@@ -249,6 +250,7 @@ def make_pipeline_root_block(resolved: ResolvedStages) -> Block:
 @dataclass(frozen=True)
 class PlanInputs:
     cfg: RunConfig
+    pipeline: PipelineOverrides
     ai_text: Any
     prompt_data: pd.DataFrame
     user_profile: pd.DataFrame

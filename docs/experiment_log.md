@@ -1,75 +1,54 @@
-# Experiment Log
+# Experiment Artifacts and Logs
 
-This file summarizes experiments that have been planned and/or executed in this repo. Artifact folders live under `_artifacts/experiments/` and should be treated as the source of truth.
+Experiments are executed via `python -m image_project experiments run <name>` and write a self-contained artifact directory under `_artifacts/experiments/` by default.
 
-## Artifact conventions
+Note: `_artifacts/` is gitignored, so treat this file as a description of conventions rather than a catalog of checked-in runs.
 
-- `experiment_plan.json`: planned variants, seeds, and config provenance (`config_meta`).
-- `experiment_plan_full.json`: planned variants plus per-run resolved configs and resolved prompt pipeline stages (written even for `--dry-run`).
-- `experiment_results.json`: per-run status + primary outputs (only present when the runner executed).
-- `logs/runs_index.jsonl`: per-run metadata, resolved prompt pipeline, and artifact paths.
+## Where experiments write
 
-## Experiments (newest first)
+`python -m image_project experiments run <name>` writes a single experiment directory:
 
-### Planned (dry-run): 3x3 blackbox profile routing, no ToT
+- Default: `./_artifacts/experiments/<YYYYMMDD_HHMMSS>_<experiment_name>/`
+- Override: `--output-root <dir>`
+- Resume: `--resume --output-root <existing_experiment_dir>`
 
-- **Artifacts:** `_artifacts/experiments/_dryrun_blackbox_swap/`
-- **Experiment id:** `exp3x3_20251227_222203`
-- **Runner:** `tools/run_experiment_3x3.py`
-- **Goal:** Replace the old `standard` baseline with a materially different blackbox configuration and remove ToT refinement everywhere; isolate whether profile routing (`raw` vs `generator_hints`) changes blackbox outputs.
-- **Distinct differences (variants):**
-  - **A**: `prompt.plan=blackbox`, scoring on, `prompt.scoring.{judge,final}_profile_source=generator_hints`, `prompt.stages.exclude=["refine.tot_enclave"]`
-  - **B**: `prompt.plan=blackbox`, scoring on, `prompt.scoring.{judge,final}_profile_source=raw`, `prompt.stages.exclude=["refine.tot_enclave"]`
-  - **C**: `prompt.plan=simple_no_concepts`, scoring off, `prompt.stages.exclude=["refine.tot_enclave"]` (concept selection is ignored by this plan)
-- **Status:** dry-run only (no `experiment_results.json`).
+Inside `<output_root>/` (top-level):
 
-### 2025-12-26/25: A/B refinement-block (prompt-only) smoke runs
+- `experiment.log`: runner log (stdout mirror + debug details)
+- `experiment_plan.json`: compact, portable plan summary (written for non-resume runs)
+- `experiment_plan_full.json`: expanded plan with per-run `cfg_dict` + prompt pipeline compilation results (written even for `--dry-run`)
+- `experiment_results.json`: per-run results (written when runs execute; merged on `--resume`)
+- `pairs.json`: optional pairing manifest for A/B-style experiments (written when the plugin provides it)
 
-- **Runners:** `tools/run_experiment_ab_refinement_block.py`
-- **Goal:** Test whether adding an explicit "refinement block checklist" to the middle prompt improves the final strict one-line prompt formatting.
-- **Distinct differences (variants):**
-  - **A** (`no_refinement_block`): middle stage is `ab.scene_refine_no_block`
-  - **B** (`with_refinement_block`): middle stage is `ab.scene_refine_with_block`
-  - Everything else is held constant (same token generation, same draft stage, same final formatting stage, `prompt.stages.exclude=["refine.tot_enclave"]`, `prompt.plan=custom`, `run.mode=prompt_only`, `context.enabled=false`, scoring off).
-- **Runs executed (all 2/2 success):**
-  - `_artifacts/experiments/_smoke_ab_run/` - `exp_ab_refinement_block_20251225_191749`
-  - `_artifacts/experiments/_smoke_ab_run2/` - `exp_ab_refinement_block_20251225_191816`
-  - `_artifacts/experiments/_smoke_ab_refinement_block_run/` - `exp_ab_refinement_block_20251226_075215`
-- **Planned-only (no results file):**
-  - `_artifacts/experiments/_smoke_ab/` - `exp_ab_refinement_block_20251225_191659` (runs_per_variant=2)
-  - `_artifacts/experiments/_smoke_ab_refinement_block/` - `exp_ab_refinement_block_20251226_075116`
+Standard subdirectories (from runner-owned overrides):
 
-### A/B SceneSpec JSON intermediary (prompt-only)
+- `logs/`: per-run operational logs, transcripts, run-review reports, and `runs_index.jsonl`
+- `generated/`: images and `titles_manifest.csv` (only in `run.mode=full`)
+- `upscaled/`: upscaled images (only when enabled)
 
-- **Runner:** `tools/run_experiment_ab_scenespec_json_intermediary.py`
-- **Goal:** Compare a prose-refinement path vs a SceneSpec JSON intermediary path for producing the final strict one-line prompt.
-- **Distinct differences (variants):**
-  - **A** (`prose_refine`): `ab.scene_refine_with_block` -> `ab.final_prompt_format` (captures `ab.final_prompt_format`)
-  - **B** (`scenespec_json`): `ab.scene_spec_json` -> `ab.final_prompt_format_from_scenespec` (captures `ab.final_prompt_format_from_scenespec`)
-  - Common: starts with `ab.random_token` -> `ab.scene_draft`, `prompt.plan=custom`, `prompt.stages.exclude=["refine.tot_enclave"]`, scoring off, `run.mode=prompt_only`, `context.enabled=false`.
-- **Status:** no artifacts currently found under `_artifacts/experiments/*_ab_scenespec_json_intermediary/` (they may have been deleted/cleaned).
+## Plan vs results
 
-### 2025-12-25: 3x3 (full image runs) - baseline vs blackbox vs simple_no_concepts
+- Use `experiment_plan_full.json` to validate whether each planned run's config parses and the prompt pipeline compiles; a run with errors has `config_error`.
+- By default, `experiments run` aborts if any planned run has a config error; override with `--no-fail-on-config-error`.
 
-These runs predate the current `tools/run_experiment_3x3.py` variant definitions; use the per-run `runs_index.jsonl` + transcripts as the canonical record of what actually executed.
+## Indexing artifacts
 
-#### Run 1 - `exp3x3_20251225_103121`
+To build a query-friendly index from `_artifacts/`:
 
-- **Artifacts:** `_artifacts/experiments/20251225_103121_3x3/`
-- **Runner:** `tools/run_experiment_3x3.py`
-- **Goal:** Compare three prompt pipeline variants against the same fixed concepts and seeds to assess impact on final prompt quality and resulting images.
-- **Distinct differences (variants):**
-  - **A**: `prompt.plan=standard`, scoring off, ToT refinement enabled (`refine.tot_enclave`)
-  - **B**: `prompt.plan=blackbox`, scoring on (`num_ideas=8`), ToT refinement enabled (legacy behavior)
-  - **C**: `prompt.plan=simple_no_concepts`, scoring off, ToT refinement disabled (no `refine.tot_enclave` stage)
-- **Shared concepts (fixed):** bioluminescent koi pond; secret romance; optimistic serenity; minimalist courtyard installation; three-quarter angle; stylized digital illustration; winter golden hour; neon complementary palette
-- **Result:** 9/9 success (see `_artifacts/experiments/20251225_103121_3x3/experiment_results.json`).
+```bash
+python -m image_project index-artifacts
+# or
+pdm run index-artifacts
+```
 
-#### Run 2 - `exp3x3_20251225_121028`
+This writes (by default) under `_artifacts/index/`:
 
-- **Artifacts:** `_artifacts/experiments/20251225_121028_3x3/`
-- **Runner:** `tools/run_experiment_3x3.py`
-- **Goal:** Same as Run 1, re-run with a different base seed while holding the variant definitions constant.
-- **Distinct differences (variants):** same A/B/C as Run 1
-- **Shared concepts (fixed):** bioluminescent koi pond; secret romance; optimistic serenity; minimalist courtyard installation; three-quarter angle; stylized digital illustration; winter golden hour; neon complementary palette
-- **Result:** 9/9 success (see `_artifacts/experiments/20251225_121028_3x3/experiment_results.json`).
+- `experiments_index.json`
+- `experiment_registry.csv`
+- `run_registry.csv`
+- `image_registry.csv`
+
+## Notes for experiment authors
+
+- Determinism: experiments should set `prompt.random_seed` for reproducibility and should record a base seed under `experiment_plan.json` (`experiment_meta.base_seed` by convention).
+- Paired experiments: implement `build_pairs_manifest(...)` so run-review can compare pairs by run index via `--compare-experiment <output_root>`.

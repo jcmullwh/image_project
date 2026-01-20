@@ -13,12 +13,16 @@ KIND_ID = "blackbox.idea_cards_judge_score"
 
 
 def _build(inputs: PlanInputs, *, instance_id: str, cfg: ConfigNamespace):
-    scoring_cfg = inputs.cfg.prompt_scoring
-    judge_params: dict[str, Any] = {}
-    if scoring_cfg.judge_model:
-        judge_params["model"] = scoring_cfg.judge_model
+    judge_temperature = cfg.get_float("judge_temperature", default=0.0, min_value=0.0, max_value=2.0)
+    judge_model = cfg.get_str("judge_model", default=None)
+    judge_profile_source = cfg.get_str(
+        "judge_profile_source",
+        default="raw",
+        choices=("raw", "generator_hints", "generator_hints_plus_dislikes"),
+    )
+    if judge_profile_source is None:
+        raise ValueError("blackbox.idea_cards_judge_score.judge_profile_source cannot be null")
 
-    judge_profile_source = scoring_cfg.judge_profile_source
     context_guidance = inputs.context_guidance or None
 
     def _prompt(ctx: RunContext) -> str:
@@ -39,20 +43,24 @@ def _build(inputs: PlanInputs, *, instance_id: str, cfg: ConfigNamespace):
                 ctx,
                 source=judge_profile_source,
                 stage_id=KIND_ID,
-                config_path="prompt.scoring.judge_profile_source",
+                config_path=f"{cfg.path}.judge_profile_source",
             ),
             idea_cards_json=idea_cards_json,
             recent_motif_summary=recent_motif_summary,
             context_guidance=context_guidance,
         )
 
+    judge_params: dict[str, Any] = {}
+    if judge_model:
+        judge_params["model"] = judge_model
+
     cfg.assert_consumed()
     return make_chat_stage_block(
         instance_id,
         prompt=_prompt,
-        temperature=scoring_cfg.judge_temperature,
+        temperature=float(judge_temperature),
         merge="none",
-        params=judge_params,
+        params=judge_params or None,
         step_capture_key="idea_scores_json",
     )
 

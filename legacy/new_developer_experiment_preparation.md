@@ -4,6 +4,14 @@ Goal: help a new developer successfully set up and run an A/B experiment that te
 
 This file is intentionally a running log + checklist of “what you need to look at and do” while wiring the experiment into the repo, so we can identify documentation/architecture gaps.
 
+## Update (2026-01)
+
+This file is a historical onboarding diary. The current repo uses first-class experiments (`python -m image_project experiments run <name>` / `pdm run experiment-*`) and plugin definitions under `image_project/impl/current/experiment_plugins/*`. Standalone scripts under `tools/run_experiment_*.py` remain for reference only.
+
+The repo also defaults to real data via the loaded config; sample CSVs are an explicit opt-in (`--data sample`) for certain experiments.
+
+For current docs, start with `README.md` and `docs/experiments.md`.
+
 ---
 
 ## What we’re building

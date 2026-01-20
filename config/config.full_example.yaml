@@ -26,7 +26,7 @@ prompt:
   random_seed: null
 
   # Prompt Plans + Stage Modifiers (config-driven experimentation)
-  plan: auto  # auto -> blackbox when scoring.enabled=true; otherwise standard
+  plan: blackbox_refine
   stages:
     include: []
     # To disable ToT refinement for plans that include it, exclude `refine.tot_enclave`.
@@ -35,92 +35,116 @@ prompt:
     overrides: {}
   # Optional: stage-owned configuration (validated by each stage; unknown keys fail fast).
   stage_configs:
-    defaults: {}
+    defaults:
+      preprompt.select_concepts:
+        strategy: random  # random|fixed|file
+        fixed: []
+        file_path: null
+
+      preprompt.filter_concepts:
+        enabled: true
+        order: ["dislike_rewrite"]
+        dislike_rewrite:
+          enabled: true
+          temperature: 0.25
+
+      blackbox.prepare:
+        novelty:
+          enabled: true
+          window: 25
+
+      blackbox.generator_profile_hints:
+        mode: abstract # raw|file|abstract
+        hints_path: null
+        model: null
+        temperature: 0.0
+
+      blackbox.generate_idea_cards:
+        num_ideas: 6
+        idea_profile_source: generator_hints # raw|generator_hints|generator_hints_plus_dislikes|none
+        model: null
+        temperature: 0.8
+
+      blackbox.idea_cards_judge_score:
+        judge_temperature: 0.0
+        judge_model: null
+        judge_profile_source: raw # raw|generator_hints|generator_hints_plus_dislikes
+
+      blackbox.select_idea_card:
+        exploration_rate: 0.15
+        num_ideas: 6
+        novelty:
+          enabled: true
+          window: 25
+
+      blackbox_refine.seed_prompt:
+        final_profile_source: raw # raw|generator_hints|generator_hints_plus_dislikes
+        temperature: 0.8
+
+      blackbox_refine.loop:
+        seed_source: null # null -> inferred (draft|blackbox)
+        iterations: 3
+        algorithm: hillclimb  # hillclimb|beam
+        beam_width: 3         # only used when algorithm=beam (>=2)
+        branching_factor: 6
+        include_parents_as_candidates: true
+
+        generator_model: null
+        generator_temperature: 0.9
+        max_prompt_chars: 3500
+
+        variation_prompt:
+          template: v1
+          include_concepts: true
+          include_context_guidance: false
+          include_profile: true
+          profile_source: likes_dislikes  # raw|generator_hints|likes_dislikes|dislikes_only|combined
+          include_novelty_summary: true
+          include_mutation_directive: true
+          include_scoring_rubric: true
+          # Optional: leak a tiny amount of score feedback into the next iteration's generator prompt
+          # (judges remain blind; this is for "gradient" direction).
+          score_feedback: best_worst  # none|best_worst
+          score_feedback_max_chars: 900
+
+        mutation_directives:
+          mode: random  # none|random|cycle|fixed
+          directives:
+            - "Mutate composition and camera perspective while preserving subject and mood."
+            - "Increase specificity: add concrete materials, lighting, and lens details."
+            - "Introduce a subtle narrative twist; avoid clichés."
+
+        judging:
+          judges:
+            - id: j1
+              model: null
+              temperature: null
+              weight: 1.0
+              rubric: default  # default|strict|novelty_heavy
+          aggregation: mean  # mean|median|min|max|trimmed_mean
+          trimmed_mean_drop: 0
+
+        selection:
+          exploration_rate_override: null
+          group_by_beam: false
+          tie_breaker: stable_id  # stable_id|prefer_shorter|prefer_novel
+
+        judge_model: null
+        judge_temperature: 0.0
+        judge_profile_source: raw
+        exploration_rate: 0.15
+        novelty:
+          enabled: true
+          window: 25
+
+      postprompt.profile_nudge:
+        max_prompt_chars: 3500
+
+      postprompt.openai_format:
+        max_prompt_chars: 3500
     instances: {}
   output:
     capture_stage: null
-
-  concepts:
-    selection:
-      strategy: random  # random|fixed|file
-      # fixed: ["Baroque", "Portrait", "Moody", "Wide"]
-      # file_path: "./image_project/impl/current/data/local/fixed_concepts.txt"
-    filters:
-      enabled: true
-      order: ["dislike_rewrite"]
-      dislike_rewrite:
-        enabled: true
-        temperature: 0.25
-
-  scoring:
-    enabled: true
-    num_ideas: 6
-    exploration_rate: 0.15
-    judge_temperature: 0.0
-    judge_model: null
-    judge_profile_source: raw  # raw|generator_hints|generator_hints_plus_dislikes
-    idea_profile_source: generator_hints  # raw|generator_hints|generator_hints_plus_dislikes|none
-    final_profile_source: raw  # raw|generator_hints
-    generator_profile_abstraction: true
-    generator_profile_hints_path: null  # optional file containing generator-safe hints (overrides abstraction stage)
-    novelty:
-      enabled: true
-      window: 25
-
-  # Optional: iterative blackbox prompt refinement loop.
-  # Plans:
-  # - blackbox_refine: seed from blackbox idea-card pipeline
-  # - blackbox_refine_only: seed from prompt.refine_only.draft / draft_path
-  blackbox_refine:
-    enabled: true
-    iterations: 3
-    algorithm: hillclimb  # hillclimb|beam
-    beam_width: 3         # only used when algorithm=beam (>=2)
-    branching_factor: 6
-    include_parents_as_candidates: true
-
-    generator_model: null
-    generator_temperature: 0.9
-    max_prompt_chars: 3500
-
-    variation_prompt:
-      template: v1
-      include_concepts: true
-      include_context_guidance: false
-      include_profile: true
-      profile_source: likes_dislikes  # raw|generator_hints|likes_dislikes|dislikes_only|combined
-      include_novelty_summary: true
-      include_mutation_directive: true
-      include_scoring_rubric: true
-      # Optional: leak a tiny amount of score feedback into the next iteration's generator prompt
-      # (judges remain blind; this is for "gradient" direction).
-      score_feedback: best_worst  # none|best_worst
-      score_feedback_max_chars: 900
-
-    mutation_directives:
-      mode: random  # none|random|cycle|fixed
-      directives:
-        - "Mutate composition and camera perspective while preserving subject and mood."
-        - "Increase specificity: add concrete materials, lighting, and lens details."
-        - "Introduce a subtle narrative twist; avoid clichés."
-      per_axis:
-        enabled: false
-        axes: []
-
-    judging:
-      judges:
-        - id: j1
-          model: null
-          temperature: null
-          weight: 1.0
-          rubric: default  # default|strict|novelty_heavy
-      aggregation: mean  # mean|median|min|max|trimmed_mean
-      trimmed_mean_drop: 0
-
-    selection:
-      exploration_rate_override: null
-      group_by_beam: false
-      tie_breaker: stable_id  # stable_id|prefer_shorter|prefer_novel
 
 context:
   enabled: true
