@@ -5,9 +5,11 @@ import pandas as pd
 from image_project.framework.config import RunConfig
 from image_project.framework.inputs import extract_dislikes
 from image_project.framework.profile_io import load_user_profile
-from image_project.framework.prompting import PlanInputs
-from image_project.impl.current.prompting import build_preferences_guidance
+from image_project.framework.prompt_pipeline import PlanInputs
+from image_project.framework.prompt_pipeline.pipeline_overrides import PromptPipelineConfig
+from image_project.prompts.preprompt import build_preferences_guidance
 from image_project.impl.current.plans import PromptPlanManager
+from pipelinekit.stage_types import StageInstance
 
 
 def test_load_user_profile_row_based_includes_notes(tmp_path):
@@ -102,11 +104,13 @@ def test_blackbox_plan_uses_profile_hints_load_when_configured(tmp_path):
             "plan": "blackbox",
             "categories_path": str(categories_path),
             "profile_path": str(profile_path),
-            "scoring": {
-                "enabled": True,
-                "generator_profile_abstraction": True,
-                "generator_profile_hints_path": str(hints_path),
-                "novelty": {"enabled": False, "window": 0},
+            "stage_configs": {
+                "defaults": {
+                    "blackbox.generator_profile_hints": {
+                        "mode": "file",
+                        "hints_path": str(hints_path),
+                    }
+                }
             },
         },
         "image": {"log_path": str(tmp_path / "logs")},
@@ -115,10 +119,14 @@ def test_blackbox_plan_uses_profile_hints_load_when_configured(tmp_path):
     }
 
     cfg, _warnings = RunConfig.from_dict(cfg_dict)
-    resolved = PromptPlanManager.resolve(cfg)
+    prompt_cfg, _prompt_warnings = PromptPipelineConfig.from_root_dict(
+        cfg_dict, run_mode=cfg.run_mode, generation_dir=cfg.generation_dir
+    )
+    resolved = PromptPlanManager.resolve(run_cfg=cfg, pipeline_cfg=prompt_cfg)
 
     inputs = PlanInputs(
         cfg=cfg,
+        pipeline=prompt_cfg.stages,
         ai_text=None,
         prompt_data=pd.DataFrame(),
         user_profile=pd.DataFrame({"Likes": ["x"], "Dislikes": ["y"]}),
@@ -127,12 +135,14 @@ def test_blackbox_plan_uses_profile_hints_load_when_configured(tmp_path):
         rng=random.Random(0),
     )
 
-    stage_ids = [spec.stage_id for spec in resolved.plan.stage_specs(inputs)]
-    assert "blackbox.profile_hints_load" in stage_ids
-    assert "blackbox.profile_abstraction" not in stage_ids
+    stage_ids = [
+        node.instance_id if isinstance(node, StageInstance) else str(node.name)
+        for node in resolved.plan.stage_nodes(inputs)
+    ]
+    assert "blackbox.generator_profile_hints" in stage_ids
 
 
-def test_blackbox_refine_legacy_plan_adds_final_refinement_stage(tmp_path):
+def test_blackbox_refine_plan_adds_final_refinement_stage(tmp_path):
     categories_path = tmp_path / "categories.csv"
     profile_path = tmp_path / "profile.csv"
 
@@ -144,10 +154,16 @@ def test_blackbox_refine_legacy_plan_adds_final_refinement_stage(tmp_path):
     cfg_dict = {
         "run": {"mode": "prompt_only"},
         "prompt": {
-            "plan": "blackbox_refine_legacy",
+            "plan": "blackbox_refine",
             "categories_path": str(categories_path),
             "profile_path": str(profile_path),
-            "scoring": {"enabled": True, "novelty": {"enabled": False, "window": 0}},
+            "stage_configs": {
+                "defaults": {
+                    "blackbox_refine.loop": {
+                        "judging": {"judges": [{"id": "j1"}], "aggregation": "mean"},
+                    }
+                }
+            },
         },
         "image": {"log_path": str(tmp_path / "logs")},
         "rclone": {"enabled": False},
@@ -155,10 +171,14 @@ def test_blackbox_refine_legacy_plan_adds_final_refinement_stage(tmp_path):
     }
 
     cfg, _warnings = RunConfig.from_dict(cfg_dict)
-    resolved = PromptPlanManager.resolve(cfg)
+    prompt_cfg, _prompt_warnings = PromptPipelineConfig.from_root_dict(
+        cfg_dict, run_mode=cfg.run_mode, generation_dir=cfg.generation_dir
+    )
+    resolved = PromptPlanManager.resolve(run_cfg=cfg, pipeline_cfg=prompt_cfg)
 
     inputs = PlanInputs(
         cfg=cfg,
+        pipeline=prompt_cfg.stages,
         ai_text=None,
         prompt_data=pd.DataFrame(),
         user_profile=pd.DataFrame({"Likes": ["x"], "Dislikes": ["y"]}),
@@ -167,6 +187,10 @@ def test_blackbox_refine_legacy_plan_adds_final_refinement_stage(tmp_path):
         rng=random.Random(0),
     )
 
-    stage_ids = [spec.stage_id for spec in resolved.plan.stage_specs(inputs)]
-    assert "blackbox_refine.init_state" in stage_ids
+    stage_ids = [
+        node.instance_id if isinstance(node, StageInstance) else str(node.name)
+        for node in resolved.plan.stage_nodes(inputs)
+    ]
+    assert "blackbox_refine.loop" in stage_ids
+    assert "blackbox_refine.init_state" not in stage_ids
     assert stage_ids[-1] == "postprompt.openai_format"

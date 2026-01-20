@@ -75,8 +75,13 @@ def _load_pipeline_paths(config_path: str) -> tuple[str | None, list[str]]:
     if not isinstance(image_cfg, Mapping):
         return None, []
 
+    if "save_path" in image_cfg:
+        raise ValueError(
+            "Config key image.save_path has been removed; use image.generation_path instead."
+        )
+
     logs_dir = normalize_path(image_cfg.get("log_path"))
-    generation_dir = normalize_path(image_cfg.get("generation_path") or image_cfg.get("save_path"))
+    generation_dir = normalize_path(image_cfg.get("generation_path"))
     upscale_dir = normalize_path(image_cfg.get("upscale_path"))
 
     image_dirs = [d for d in (generation_dir, upscale_dir) if d]

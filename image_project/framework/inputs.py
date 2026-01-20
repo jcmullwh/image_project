@@ -1,15 +1,13 @@
 from __future__ import annotations
 
-import json
 import os
-import re
-import textwrap
 from collections.abc import Iterable
 from dataclasses import asdict
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from image_project.framework.config import RunConfig
+from image_project.framework.prompt_pipeline.pipeline_overrides import PromptPipelineConfig
+from image_project.prompts import concept_filters as concept_filter_prompts
 
 
 @dataclass(frozen=True)
@@ -17,7 +15,9 @@ class ResolvedPromptInputs:
     draft_prompt: str | None = None
 
 
-def resolve_prompt_inputs(cfg: RunConfig, *, required: tuple[str, ...] = ()) -> ResolvedPromptInputs:
+def resolve_prompt_inputs(
+    prompt_cfg: PromptPipelineConfig, *, required: tuple[str, ...] = ()
+) -> ResolvedPromptInputs:
     """
     Resolve plan inputs that may involve I/O, separate from orchestration.
 
@@ -30,10 +30,11 @@ def resolve_prompt_inputs(cfg: RunConfig, *, required: tuple[str, ...] = ()) -> 
         raise ValueError(f"Unknown required inputs: {unknown_required}")
 
     draft_prompt: str | None = None
-    if cfg.prompt_refine_only_draft:
-        draft_prompt = cfg.prompt_refine_only_draft
-    elif cfg.prompt_refine_only_draft_path:
-        path = str(cfg.prompt_refine_only_draft_path)
+    refine_only = prompt_cfg.refine_only
+    if refine_only.draft:
+        draft_prompt = refine_only.draft
+    elif refine_only.draft_path:
+        path = str(refine_only.draft_path)
         if not os.path.exists(path):
             raise ValueError(f"prompt.refine_only.draft_path not found: {path}")
         with open(path, "r", encoding="utf-8") as handle:
@@ -176,34 +177,13 @@ def make_dislike_rewrite_filter(
                 note="skipped: ai_text unavailable",
             )
 
-        prompt = textwrap.dedent(
-            f"""\
-            Selected concepts (keep length and order): 
-            {json.dumps(input_concepts, ensure_ascii=False)}
-
-            User dislikes (avoid conflicts): 
-            {json.dumps(clean_dislikes, ensure_ascii=False)}
-
-            If any selected concept conflicts with a dislike, rewrite just that concept so it no longer conflicts but still fits the original creative intent and variety. If there is no conflict, keep the concept unchanged.
-
-            Return ONLY a JSON array of the revised concepts (strings), same length and order as provided. Do not add commentary or keys.
-            """
-        ).strip()
+        messages = concept_filter_prompts.build_dislike_rewrite_messages(
+            selected_concepts=input_concepts,
+            dislikes=clean_dislikes,
+        )
 
         try:
-            response = ai_text.text_chat(
-                [
-                    {
-                        "role": "system",
-                        "content": (
-                            "You rewrite selected creative concepts so none of them conflict with the user's dislikes. "
-                            "Keep variety, keep count, and avoid over-censoring."
-                        ),
-                    },
-                    {"role": "user", "content": prompt},
-                ],
-                temperature=temperature,
-            )
+            response = ai_text.text_chat(messages, temperature=temperature)
         except Exception as exc:  # pragma: no cover - defensive
             return ConceptFilterOutcome(
                 name="dislike_rewrite",
@@ -212,7 +192,7 @@ def make_dislike_rewrite_filter(
                 error=str(exc),
             )
 
-        parsed = _parse_concept_list(response)
+        parsed = concept_filter_prompts.parse_concept_list_response(response)
         if not parsed:
             return ConceptFilterOutcome(
                 name="dislike_rewrite",
@@ -230,36 +210,3 @@ def make_dislike_rewrite_filter(
         )
 
     return _filter
-
-
-def _parse_concept_list(response: Any) -> list[str]:
-    """
-    Try to coerce the model response into a clean list of concept strings.
-    """
-    if not isinstance(response, str):
-        return []
-
-    cleaned = response.strip()
-    if cleaned.startswith("```"):
-        cleaned = "\n".join(
-            line for line in cleaned.splitlines() if not line.strip().startswith("```")
-        ).strip()
-
-    candidates = [cleaned]
-
-    bracket_match = re.search(r"\\[.*\\]", cleaned, flags=re.DOTALL)
-    if bracket_match:
-        candidates.insert(0, bracket_match.group(0).strip())
-
-    for candidate in candidates:
-        try:
-            parsed = json.loads(candidate)
-        except Exception:
-            continue
-
-        if isinstance(parsed, list):
-            coerced = [str(item).strip() for item in parsed if str(item).strip()]
-            if coerced:
-                return coerced
-
-    return []

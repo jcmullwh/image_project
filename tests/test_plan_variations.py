@@ -65,7 +65,6 @@ def _base_cfg_dict(tmp_path) -> dict:
             "profile_path": str(profile_path),
             "generations_path": str(generations_csv),
             "random_seed": 123,
-            "refinement": {"policy": "none"},
         },
         "image": {
             "generation_path": str(generation_dir),
@@ -131,7 +130,7 @@ def test_simple_no_concepts_plan_skips_preprompt(tmp_path, monkeypatch):
     transcript = json.loads(transcript_path.read_text(encoding="utf-8"))
     assert transcript["outputs"]["prompt_pipeline"]["plan"] == "simple_no_concepts"
     assert transcript["outputs"]["prompt_pipeline"]["resolved_stages"] == [
-        "standard.initial_prompt",
+        "standard.initial_prompt_freeform",
         "standard.image_prompt_creation",
     ]
     assert transcript["outputs"]["prompt_pipeline"]["capture_stage"] == "standard.image_prompt_creation"
@@ -139,7 +138,7 @@ def test_simple_no_concepts_plan_skips_preprompt(tmp_path, monkeypatch):
     recorded_step_paths = [step.get("path") for step in transcript.get("steps", [])]
     assert "pipeline/preprompt.select_concepts/action" not in recorded_step_paths
     assert "pipeline/preprompt.filter_concepts/action" not in recorded_step_paths
-    assert "pipeline/standard.initial_prompt/draft" in recorded_step_paths
+    assert "pipeline/standard.initial_prompt_freeform/draft" in recorded_step_paths
     assert "pipeline/standard.image_prompt_creation/draft" in recorded_step_paths
 
 

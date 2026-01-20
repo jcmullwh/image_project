@@ -11,11 +11,15 @@ python -m image_project run-review  # defaults to --most-recent (prints what it'
 python -m image_project run-review --oplog /path/to/oplog.log --transcript /path/to/transcript.json [--generation-id <id>]
 python -m image_project run-review --best-effort --generation-id <id> --logs-dir <artifact_dir>
 python -m image_project run-review --compare <runA> <runB> --logs-dir <artifact_dir>
+python -m image_project run-review --compare-experiment <experiment_dir> --all --output-dir <out_dir>
+python -m image_project run-review --compare-experiment <experiment_dir> --pair 1 --output-dir <out_dir>
 ```
 
-When `--logs-dir` (and `--images-dir`) are omitted, the tool loads the pipeline config (`config/config.yaml` by default) and uses `image.log_path` (and `image.generation_path` / `image.upscale_path`) as defaults, printing the config path it used.
+When `--logs-dir` (and `--images-dir`) are omitted, the tool loads the pipeline config (`config/config.yaml` by default; override with `--config` / `--config-path`) and uses `image.log_path` (and `image.generation_path` / `image.upscale_path`) as defaults, printing the config path it used.
 
 The tool writes `<generation_id>_run_report.json` and `<generation_id>_run_report.html` (or `<runA>_vs_<runB>_run_compare.*` in compare mode) to the current directory by default. Use `--output-dir` to change the destination.
+
+`--compare-experiment` reads `<experiment_dir>/pairs.json` (written by A/B experiment runners) and produces one HTML/JSON compare per pair, plus an `index.html` and `summary.json` in `--output-dir`.
 
 ## Behavior
 

@@ -5,31 +5,72 @@ import pkgutil
 from typing import Any
 
 from image_project.framework.config import RunConfig
-from image_project.framework.prompting import (
-    LinearStagePlan,
+from image_project.framework.prompt_pipeline.pipeline_overrides import PromptPipelineConfig
+from image_project.framework.prompt_pipeline import (
     PlanInputs,
     PlanMetadata,
     PromptPlan,
     ResolvedPlan,
-    StageNodeSpec,
 )
-from image_project.impl.current.prompting import StageCatalog, build_blackbox_isolated_idea_card_specs
+from image_project.stages.blackbox.generate_idea_cards import STAGE as BLACKBOX_GENERATE_IDEA_CARDS
+from image_project.stages.blackbox.idea_cards_judge_score import (
+    STAGE as BLACKBOX_IDEA_CARDS_JUDGE_SCORE,
+)
+from image_project.stages.blackbox.generator_profile_hints import (
+    STAGE as BLACKBOX_GENERATOR_PROFILE_HINTS,
+)
+from image_project.stages.blackbox.image_prompt_creation import (
+    STAGE as BLACKBOX_IMAGE_PROMPT_CREATION,
+)
+from image_project.stages.blackbox.prepare import STAGE as BLACKBOX_PREPARE
+from image_project.stages.blackbox.select_idea_card import STAGE as BLACKBOX_SELECT_IDEA_CARD
+from image_project.stages.preprompt.filter_concepts import STAGE as PREPROMPT_FILTER_CONCEPTS
+from image_project.stages.preprompt.select_concepts import STAGE as PREPROMPT_SELECT_CONCEPTS
+from image_project.stages.refine.image_prompt_refine import STAGE as REFINE_IMAGE_PROMPT_REFINE
+from image_project.stages.refine.tot_enclave import STAGE as REFINE_TOT_ENCLAVE
+from image_project.stages.registry import get_stage_registry
+from image_project.stages.standard.image_prompt_creation import (
+    STAGE as STANDARD_IMAGE_PROMPT_CREATION,
+)
+from image_project.stages.standard.initial_prompt import STAGE as STANDARD_INITIAL_PROMPT
+from image_project.stages.standard.section_2_choice import STAGE as STANDARD_SECTION_2_CHOICE
+from image_project.stages.standard.section_2b_title_and_story import (
+    STAGE as STANDARD_SECTION_2B_TITLE_AND_STORY,
+)
+from image_project.stages.standard.section_3_message_focus import (
+    STAGE as STANDARD_SECTION_3_MESSAGE_FOCUS,
+)
+from image_project.stages.standard.section_4_concise_description import (
+    STAGE as STANDARD_SECTION_4_CONCISE_DESCRIPTION,
+)
+from pipelinekit.stage_types import StageInstance, StageRef
 
 
-class SequencePromptPlan(LinearStagePlan):
-    """Declarative plan: resolve a sequence of stage ids via the StageCatalog."""
+class SequencePromptPlan:
+    """Declarative plan: return a sequence of stage nodes."""
 
     name: str
-    sequence: tuple[str, ...] = ()
+    sequence: tuple[Any, ...] = ()
 
-    def stage_sequence(self, inputs: PlanInputs) -> tuple[str, ...]:
+    def stage_sequence(self, inputs: PlanInputs) -> tuple[Any, ...]:
         return tuple(self.sequence)
 
-    def stage_specs(self, inputs: PlanInputs) -> list[StageNodeSpec]:
+    def stage_nodes(self, inputs: PlanInputs) -> list[StageInstance]:
         sequence = self.stage_sequence(inputs)
         if not sequence:
             raise ValueError(f"prompt.plan={self.name} produced an empty stage sequence")
-        return [StageCatalog.build(stage_id, inputs) for stage_id in sequence]
+        nodes: list[StageInstance] = []
+        for idx, entry in enumerate(sequence):
+            if isinstance(entry, StageInstance):
+                nodes.append(entry)
+                continue
+            if isinstance(entry, StageRef):
+                nodes.append(entry.instance())
+                continue
+            raise TypeError(
+                f"prompt.plan={self.name} stage_sequence[{idx}] must be StageRef|StageInstance (type={type(entry).__name__})"
+            )
+        return nodes
 
 
 _PLAN_REGISTRY: dict[str, type[PromptPlan]] = {}
@@ -104,34 +145,29 @@ class PromptPlanManager:
         return tuple(sorted(_PLAN_REGISTRY.keys()))
 
     @classmethod
-    def resolve(cls, cfg: RunConfig) -> ResolvedPlan:
-        requested = (cfg.prompt_plan or "").strip().lower()
+    def resolve(cls, *, run_cfg: RunConfig, pipeline_cfg: PromptPipelineConfig) -> ResolvedPlan:
+        requested = (pipeline_cfg.plan or "").strip().lower()
         if not requested:
             raise ValueError("Invalid config value for prompt.plan: must be a non-empty string")
 
-        scoring_enabled = bool(cfg.prompt_scoring.enabled)
-
         if requested == "auto":
-            plan_name = "blackbox" if scoring_enabled else "standard"
-        else:
-            plan_name = requested
+            raise ValueError(
+                "prompt.plan=auto is no longer supported; choose an explicit plan name"
+            )
+
+        plan_name = requested
 
         plan = cls.get(plan_name)
         metadata = cls._read_metadata(plan)
 
-        if metadata.requires_scoring is True and not scoring_enabled:
-            raise ValueError(f"prompt.plan={plan.name} requires prompt.scoring.enabled=true")
-        if metadata.requires_scoring is False and scoring_enabled:
-            raise ValueError(f"prompt.plan={plan.name} conflicts with prompt.scoring.enabled=true")
-
         if metadata.context_injection == "disabled":
             effective_context_enabled = False
         elif metadata.context_injection == "enabled":
-            if not cfg.context_enabled:
+            if not run_cfg.context_enabled:
                 raise ValueError(f"Plan {plan.name} requires context.enabled=true")
             effective_context_enabled = True
         else:
-            effective_context_enabled = bool(cfg.context_enabled)
+            effective_context_enabled = bool(run_cfg.context_enabled)
 
         return ResolvedPlan(
             requested_plan=requested,
@@ -188,14 +224,45 @@ def list_plans() -> None:
 
 
 @register_plan
-class CustomPromptPlan(SequencePromptPlan):
+class CustomPromptPlan:
     name = "custom"
 
-    def stage_sequence(self, inputs: PlanInputs) -> tuple[str, ...]:
-        sequence = tuple(inputs.cfg.prompt_stages_sequence)
+    def stage_nodes(self, inputs: PlanInputs) -> list[StageInstance]:
+        sequence = tuple(getattr(inputs.pipeline, "sequence", ()))
         if not sequence:
             raise ValueError("prompt.plan=custom requires prompt.stages.sequence")
-        return sequence
+
+        registry = get_stage_registry()
+        nodes: list[StageInstance] = []
+
+        def resolve_stage(stage_id: str, *, path: str) -> StageRef:
+            try:
+                return registry.resolve(stage_id)
+            except ValueError as exc:
+                suggestions = registry.suggest(stage_id, limit=8)
+                hint = f" (did you mean: {', '.join(suggestions)})" if suggestions else ""
+                raise ValueError(f"{path}={stage_id!r} is invalid{hint}") from exc
+
+        for idx, entry in enumerate(sequence):
+            if isinstance(entry, str):
+                ref = resolve_stage(entry, path=f"prompt.stages.sequence[{idx}]")
+                nodes.append(ref.instance())
+                continue
+            if isinstance(entry, dict):
+                stage = entry.get("stage")
+                name = entry.get("name")
+                if not isinstance(stage, str) or not stage.strip():
+                    raise ValueError(f"prompt.stages.sequence[{idx}].stage missing/invalid")
+                if not isinstance(name, str) or not name.strip():
+                    raise ValueError(f"prompt.stages.sequence[{idx}].name missing/invalid")
+                ref = resolve_stage(stage, path=f"prompt.stages.sequence[{idx}].stage")
+                nodes.append(ref.instance(name.strip()))
+                continue
+            raise TypeError(
+                f"prompt.stages.sequence[{idx}] must be a string or mapping (type={type(entry).__name__})"
+            )
+
+        return nodes
 
 
 @register_plan
@@ -203,43 +270,34 @@ class StandardPromptPlan(SequencePromptPlan):
     name = "standard"
     requires_scoring = False
     sequence = (
-        "preprompt.select_concepts",
-        "preprompt.filter_concepts",
-        "standard.initial_prompt",
-        "standard.section_2_choice",
-        "standard.section_2b_title_and_story",
-        "standard.section_3_message_focus",
-        "standard.section_4_concise_description",
-        "standard.image_prompt_creation",
+        PREPROMPT_SELECT_CONCEPTS,
+        PREPROMPT_FILTER_CONCEPTS,
+        STANDARD_INITIAL_PROMPT,
+        STANDARD_SECTION_2_CHOICE,
+        STANDARD_SECTION_2B_TITLE_AND_STORY,
+        STANDARD_SECTION_3_MESSAGE_FOCUS,
+        STANDARD_SECTION_4_CONCISE_DESCRIPTION,
+        STANDARD_IMAGE_PROMPT_CREATION,
+        REFINE_TOT_ENCLAVE,
     )
 
 
 @register_plan
-class BlackboxPromptPlan(LinearStagePlan):
+class BlackboxPromptPlan:
     name = "blackbox"
     requires_scoring = True
 
-    def stage_specs(self, inputs: PlanInputs) -> list[StageNodeSpec]:
-        scoring_cfg = inputs.cfg.prompt_scoring
-        sequence: list[StageNodeSpec] = [
-            StageCatalog.build("preprompt.select_concepts", inputs),
-            StageCatalog.build("preprompt.filter_concepts", inputs),
-            StageCatalog.build("blackbox.prepare", inputs),
+    def stage_nodes(self, inputs: PlanInputs) -> list[StageInstance]:
+        sequence: list[StageInstance] = [
+            PREPROMPT_SELECT_CONCEPTS.instance(),
+            PREPROMPT_FILTER_CONCEPTS.instance(),
+            BLACKBOX_PREPARE.instance(),
+            BLACKBOX_GENERATOR_PROFILE_HINTS.instance(),
+            BLACKBOX_GENERATE_IDEA_CARDS.instance(),
+            BLACKBOX_IDEA_CARDS_JUDGE_SCORE.instance(),
+            BLACKBOX_SELECT_IDEA_CARD.instance(),
+            BLACKBOX_IMAGE_PROMPT_CREATION.instance(),
         ]
-        if scoring_cfg.generator_profile_hints_path:
-            sequence.append(StageCatalog.build("blackbox.profile_hints_load", inputs))
-        elif scoring_cfg.generator_profile_abstraction:
-            sequence.append(StageCatalog.build("blackbox.profile_abstraction", inputs))
-
-        sequence.extend(build_blackbox_isolated_idea_card_specs(inputs))
-
-        sequence.extend(
-            [
-                StageCatalog.build("blackbox.idea_cards_judge_score", inputs),
-                StageCatalog.build("blackbox.select_idea_card", inputs),
-                StageCatalog.build("blackbox.image_prompt_creation", inputs),
-            ]
-        )
         return sequence
 
 
@@ -248,12 +306,12 @@ class RefineOnlyPromptPlan(SequencePromptPlan):
     name = "refine_only"
     requires_scoring = False
     required_inputs = ("draft_prompt",)
-    sequence = ("refine.image_prompt_refine",)
+    sequence = (REFINE_IMAGE_PROMPT_REFINE,)
 
-    def stage_specs(self, inputs: PlanInputs) -> list[StageNodeSpec]:
+    def stage_nodes(self, inputs: PlanInputs) -> list[StageInstance]:
         draft_text = (inputs.draft_prompt or "").strip()
         if not draft_text:
             raise ValueError(
                 "prompt.plan=refine_only requires prompt.refine_only.draft or draft_path"
             )
-        return super().stage_specs(inputs)
+        return super().stage_nodes(inputs)

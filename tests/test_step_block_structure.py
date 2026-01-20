@@ -3,8 +3,8 @@ import random
 
 import pytest
 
-from image_project.foundation.messages import MessageHandler
-from image_project.foundation.pipeline import Block, ChatRunner, ChatStep
+from pipelinekit.engine.messages import MessageHandler
+from pipelinekit.engine.pipeline import Block, ChatRunner, ChatStep
 from image_project.framework.config import RunConfig
 from image_project.framework.runtime import RunContext
 

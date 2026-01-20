@@ -1,0 +1,8 @@
+# ToDos as of 1-20-26
+
+Change _artifacts to cloud version (README node thing)
+    - will need to merge all of the local _artifacts into cloud
+
+Check all experiments work.
+
+Migrate to a clear "primary" thing for scheduled running vs experimental/ad-hoc runs.

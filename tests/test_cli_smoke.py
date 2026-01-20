@@ -39,11 +39,6 @@ def test_cli_generate_smoke_prompt_only(tmp_path, monkeypatch):
                 f"  categories_path: '{categories_path.as_posix()}'",
                 f"  profile_path: '{profile_path.as_posix()}'",
                 "  plan: baseline",
-                "  refinement:",
-                "    policy: none",
-                "  concepts:",
-                "    filters:",
-                "      enabled: false",
                 "rclone:",
                 "  enabled: false",
                 "upscale:",
@@ -76,4 +71,3 @@ def test_cli_generate_smoke_prompt_only(tmp_path, monkeypatch):
 
     loaded = json.loads(transcript_path.read_text(encoding="utf-8"))
     assert loaded["generation_id"] == generation_id
-

@@ -10,12 +10,13 @@ import pandas as pd
 import pytest
 
 from image_project.framework.context import ContextManager
-from image_project.foundation.messages import MessageHandler
+from pipelinekit.engine.messages import MessageHandler
 from image_project.framework.runtime import RunContext
 from image_project.impl.current import context_plugins as _context_plugins
-from image_project.impl.current.prompting import DEFAULT_SYSTEM_PROMPT, generate_first_prompt
+from image_project.prompts.preprompt import DEFAULT_SYSTEM_PROMPT
+from image_project.prompts.standard import generate_first_prompt
 from image_project.framework.config import RunConfig
-from image_project.framework.transcript import write_transcript
+from image_project.framework.artifacts import write_transcript
 
 _context_plugins.discover()
 
