@@ -79,8 +79,8 @@ def _load_image_ai_cls():
         ) from exc
 
 from image_project.foundation.config_io import load_config
-from image_project.foundation.messages import MessageHandler
-from image_project.foundation.pipeline import ChatRunner
+from pipelinekit.engine.messages import MessageHandler
+from pipelinekit.engine.pipeline import ChatRunner
 from image_project.framework.artifacts import (
     append_generation_row,
     append_manifest_row,
@@ -93,21 +93,28 @@ from image_project.framework.artifacts import (
     read_manifest,
     utc_now_iso8601,
 )
-from image_project.framework.artifacts_index import maybe_update_artifacts_index
+from image_project.framework.artifacts import maybe_update_artifacts_index
 from image_project.framework.config import RunConfig
 from image_project.framework.context import ContextManager
 from image_project.framework.inputs import extract_dislikes, resolve_prompt_inputs
 from image_project.framework.profile_io import load_user_profile
 from image_project.framework.media import UpscaleConfig, save_image, upscale_image_to_4k
-from image_project.framework.prompting import PlanInputs, resolve_stage_specs
+from image_project.framework.prompt_pipeline import (
+    PlanInputs,
+    compile_stage_nodes,
+    make_pipeline_root_block,
+    resolve_stage_blocks,
+)
+from image_project.framework.prompt_pipeline.pipeline_overrides import PromptPipelineConfig
 from image_project.framework.runtime import RunContext
-from image_project.framework.transcript import write_transcript
-from image_project.impl.current.prompting import (
+from image_project.framework.artifacts import write_transcript
+from image_project.prompts.preprompt import (
     DEFAULT_SYSTEM_PROMPT,
     build_preferences_guidance,
     load_prompt_data,
 )
 from image_project.impl.current.plans import PromptPlanManager
+from image_project.stages.registry import get_stage_registry
 
 def configure_stdio_utf8():
     """Force stdout/stderr to UTF-8 so Unicode responses never crash on Windows consoles."""
@@ -276,12 +283,23 @@ GENERATION_CSV_FIELDNAMES: list[str] = [
 ]
 
 
-def run_generation(cfg_dict, *, generation_id: str | None = None, config_meta: dict[str, Any] | None = None) -> RunContext:
+def run_generation(
+    cfg_dict,
+    *,
+    generation_id: str | None = None,
+    config_meta: dict[str, Any] | None = None,
+    update_artifacts_index: bool = True,
+) -> RunContext:
     from image_project.impl.current import context_plugins as _context_plugins
 
     _context_plugins.discover()
 
     cfg, cfg_warnings = RunConfig.from_dict(cfg_dict)
+    prompt_cfg, prompt_warnings = PromptPipelineConfig.from_root_dict(
+        cfg_dict,
+        run_mode=cfg.run_mode,
+        generation_dir=cfg.generation_dir,
+    )
 
     generation_id = generation_id or generate_unique_id()
     logger, operational_log_path = setup_operational_logger(cfg.log_dir, generation_id)
@@ -308,7 +326,7 @@ def run_generation(cfg_dict, *, generation_id: str | None = None, config_meta: d
             logger.info("Experiment: id=%s variant=%s", exp.id, exp.variant)
     logger.info("Run started for generation %s", generation_id)
 
-    for warning in cfg_warnings:
+    for warning in [*cfg_warnings, *prompt_warnings]:
         logger.warning("%s", warning)
 
     ctx: RunContext | None = None
@@ -320,7 +338,7 @@ def run_generation(cfg_dict, *, generation_id: str | None = None, config_meta: d
 
     try:
         phase = "seed"
-        seed = cfg.random_seed
+        seed = prompt_cfg.random_seed
         if seed is None:
             seed = int(time.time())
             logger.info("No prompt.random_seed configured; generated seed=%d", seed)
@@ -330,18 +348,18 @@ def run_generation(cfg_dict, *, generation_id: str | None = None, config_meta: d
         rng = random.Random(seed)
 
         phase = "data_load"
-        logger.info("Loading prompt data from %s", cfg.categories_path)
-        prompt_data = load_prompt_data(cfg.categories_path)
+        logger.info("Loading prompt data from %s", prompt_cfg.categories_path)
+        prompt_data = load_prompt_data(prompt_cfg.categories_path)
         logger.info("Loaded %d category rows", len(prompt_data))
 
-        logger.info("Loading user profile from %s", cfg.profile_path)
-        user_profile = load_user_profile(cfg.profile_path)
+        logger.info("Loading user profile from %s", prompt_cfg.profile_path)
+        user_profile = load_user_profile(prompt_cfg.profile_path)
         logger.info("Loaded %d user profile rows", len(user_profile))
         preferences_guidance = build_preferences_guidance(user_profile)
         user_dislikes = extract_dislikes(user_profile)
 
         phase = "plan_resolution"
-        resolved_plan = PromptPlanManager.resolve(cfg)
+        resolved_plan = PromptPlanManager.resolve(run_cfg=cfg, pipeline_cfg=prompt_cfg)
         requested_plan = resolved_plan.requested_plan
         plan = resolved_plan.plan
         context_injection_mode = resolved_plan.metadata.context_injection
@@ -377,6 +395,12 @@ def run_generation(cfg_dict, *, generation_id: str | None = None, config_meta: d
             created_at=utc_now_iso8601(),
             messages=MessageHandler(system_prompt),
         )
+        ctx.outputs["prompt_inputs"] = {
+            "categories_path": prompt_cfg.categories_path,
+            "profile_path": prompt_cfg.profile_path,
+            "generations_csv_path": prompt_cfg.generations_csv_path,
+            "titles_manifest_path": prompt_cfg.titles_manifest_path,
+        }
         ctx.outputs["preferences_guidance"] = preferences_guidance
         ctx.outputs["dislikes"] = user_dislikes
         if context_guidance_text:
@@ -386,23 +410,20 @@ def run_generation(cfg_dict, *, generation_id: str | None = None, config_meta: d
 
         transcript_path = generate_file_location(cfg.log_dir, generation_id + "_transcript", ".json")
 
-        scoring_cfg = cfg.prompt_scoring
-        ctx.blackbox_scoring = {
-            "enabled": scoring_cfg.enabled,
-            "config_snapshot": asdict(scoring_cfg),
-        }
-
         runner = ChatRunner(ai_text=ai_text)
 
         phase = "pipeline"
 
         draft_prompt: str | None = None
         if resolved_plan.metadata.required_inputs:
-            resolved_inputs = resolve_prompt_inputs(cfg, required=resolved_plan.metadata.required_inputs)
+            resolved_inputs = resolve_prompt_inputs(
+                prompt_cfg, required=resolved_plan.metadata.required_inputs
+            )
             draft_prompt = resolved_inputs.draft_prompt
 
         inputs = PlanInputs(
             cfg=cfg,
+            pipeline=prompt_cfg.stages,
             ai_text=ai_text,
             prompt_data=prompt_data,
             user_profile=user_profile,
@@ -416,43 +437,48 @@ def run_generation(cfg_dict, *, generation_id: str | None = None, config_meta: d
             draft_prompt=draft_prompt,
         )
 
-        stage_specs = plan.stage_specs(inputs)
-        resolved_stages = resolve_stage_specs(
-            stage_specs,
+        stage_nodes = plan.stage_nodes(inputs)
+        compiled = compile_stage_nodes(
+            stage_nodes,
             plan_name=plan.name,
-            include=cfg.prompt_stages_include,
-            exclude=cfg.prompt_stages_exclude,
-            overrides=cfg.prompt_stages_overrides,
-            capture_stage=cfg.prompt_output_capture_stage,
+            include=prompt_cfg.stages.include,
+            exclude=prompt_cfg.stages.exclude,
+            overrides=prompt_cfg.stages.overrides,
+            stage_configs_defaults=prompt_cfg.stage_configs_defaults,
+            stage_configs_instances=prompt_cfg.stage_configs_instances,
+            initial_outputs=tuple(ctx.outputs.keys()),
+            stage_registry=get_stage_registry(),
+            inputs=inputs,
+        )
+
+        resolved_stages = resolve_stage_blocks(
+            list(compiled.blocks),
+            plan_name=plan.name,
+            include=(),
+            exclude=(),
+            overrides=compiled.overrides,
+            capture_stage=prompt_cfg.stages.capture_stage,
         )
 
         prompt_pipeline = dict(resolved_stages.metadata)
+        prompt_pipeline.update(compiled.metadata)
         prompt_pipeline["requested_plan"] = requested_plan
-        prompt_pipeline["refinement_policy"] = cfg.prompt_refinement_policy
+        prompt_pipeline["refinement_mode"] = "explicit_stages"
         prompt_pipeline["context_injection"] = context_injection_mode
         prompt_pipeline["context_injection_location"] = cfg.context_injection_location
         prompt_pipeline["context_enabled"] = bool(effective_context_enabled)
-        if {
-            "blackbox.idea_cards_judge_score",
-            "blackbox.image_prompt_creation",
-        }.intersection(resolved_stages.stage_ids):
-            prompt_pipeline["blackbox_profile_sources"] = {
-                "judge_profile_source": cfg.prompt_scoring.judge_profile_source,
-                "final_profile_source": cfg.prompt_scoring.final_profile_source,
-            }
         ctx.outputs["prompt_pipeline"] = prompt_pipeline
 
         logger.info(
-            "Prompt plan requested=%s resolved=%s stages=%s refinement=%s capture=%s context=%s",
+            "Prompt plan requested=%s resolved=%s stages=%s capture=%s context=%s",
             requested_plan,
             plan.name,
             list(resolved_stages.stage_ids),
-            cfg.prompt_refinement_policy,
             resolved_stages.capture_stage,
             context_injection_mode,
         )
 
-        plan.execute(ctx, runner, resolved_stages, inputs)
+        runner.run(ctx, make_pipeline_root_block(resolved_stages))
 
         phase = "capture"
         image_prompt = ctx.outputs.get("image_prompt")
@@ -549,12 +575,16 @@ def run_generation(cfg_dict, *, generation_id: str | None = None, config_meta: d
         seq = -1
         title_result = None
 
-        with manifest_lock(cfg.titles_manifest_path):
-            manifest_rows = read_manifest(cfg.titles_manifest_path)
+        manifest_path = prompt_cfg.titles_manifest_path
+        if not manifest_path:
+            raise ValueError("Missing required config: prompt.titles_manifest_path")
+
+        with manifest_lock(manifest_path):
+            manifest_rows = read_manifest(manifest_path)
             existing_titles = [row.get("title", "") for row in manifest_rows if row.get("title")]
             existing_titles = list(reversed(existing_titles))
 
-            seq = get_next_seq(cfg.titles_manifest_path)
+            seq = get_next_seq(manifest_path)
             title_result = generate_title(
                 ai_text=ai_text,
                 image_prompt=image_prompt,
@@ -654,7 +684,7 @@ def run_generation(cfg_dict, *, generation_id: str | None = None, config_meta: d
                 ctx.image_path = upload_target_path
 
             append_manifest_row(
-                cfg.titles_manifest_path,
+                manifest_path,
                 {
                     "seq": int(seq),
                     "title": title_result.title,
@@ -670,11 +700,14 @@ def run_generation(cfg_dict, *, generation_id: str | None = None, config_meta: d
                     "title_raw": getattr(title_result, "title_raw", ""),
                 },
             )
-            logger.info("Appended manifest row to %s (seq=%d)", cfg.titles_manifest_path, seq)
+            logger.info("Appended manifest row to %s (seq=%d)", manifest_path, seq)
 
         phase = "records"
+        generations_csv_path = prompt_cfg.generations_csv_path
+        if not generations_csv_path:
+            raise ValueError("Missing required config: prompt.generations_path")
         append_generation_row(
-            cfg.generations_csv_path,
+            generations_csv_path,
             {
                 "generation_id": generation_id,
                 "selected_concepts": json.dumps(list(ctx.selected_concepts), ensure_ascii=False),
@@ -685,7 +718,7 @@ def run_generation(cfg_dict, *, generation_id: str | None = None, config_meta: d
             },
             GENERATION_CSV_FIELDNAMES,
         )
-        logger.info("Appended generation row to %s", cfg.generations_csv_path)
+        logger.info("Appended generation row to %s", generations_csv_path)
 
         phase = "rclone"
         if cfg.rclone_enabled:
@@ -758,7 +791,8 @@ def run_generation(cfg_dict, *, generation_id: str | None = None, config_meta: d
             logger.exception("Run index append failed: %s", exc)
             ctx.outputs["run_index_error"] = str(exc)
 
-        _maybe_update_indexes(cfg, config_meta=config_meta, logger=logger)
+        if update_artifacts_index:
+            _maybe_update_indexes(cfg, config_meta=config_meta, logger=logger)
 
         logger.info("Operational log stored at %s", operational_log_path)
         logger.info("Run completed successfully for generation %s", generation_id)
@@ -835,7 +869,8 @@ def run_generation(cfg_dict, *, generation_id: str | None = None, config_meta: d
                     logger.exception("Run index append failed: %s", run_index_exc)
                     ctx.outputs["run_index_error"] = str(run_index_exc)
 
-                _maybe_update_indexes(cfg, config_meta=config_meta, logger=logger)
+                if update_artifacts_index:
+                    _maybe_update_indexes(cfg, config_meta=config_meta, logger=logger)
             except Exception:
                 logger.exception("Failed to write transcript during error handling")
         raise

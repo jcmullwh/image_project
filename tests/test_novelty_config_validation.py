@@ -1,6 +1,13 @@
+import random
+
+import pandas as pd
 import pytest
 
 from image_project.framework.config import RunConfig
+from image_project.framework.prompt_pipeline import PlanInputs
+from image_project.framework.prompt_pipeline.pipeline_overrides import PipelineOverrides
+from image_project.stages.blackbox.prepare import STAGE as BLACKBOX_PREPARE
+from pipelinekit.config_namespace import ConfigNamespace
 
 
 def _base_cfg_dict(tmp_path) -> dict:
@@ -20,19 +27,38 @@ def _base_cfg_dict(tmp_path) -> dict:
     }
 
 
+def _make_inputs(cfg: RunConfig) -> PlanInputs:
+    return PlanInputs(
+        cfg=cfg,
+        pipeline=PipelineOverrides(include=(), exclude=(), sequence=(), overrides={}, capture_stage=None),
+        ai_text=None,
+        prompt_data=pd.DataFrame(),
+        user_profile=pd.DataFrame(),
+        preferences_guidance="",
+        context_guidance=None,
+        rng=random.Random(0),
+    )
+
+
 def test_unknown_novelty_method_raises(tmp_path):
     cfg_dict = _base_cfg_dict(tmp_path)
-    cfg_dict["prompt"]["scoring"] = {"enabled": True, "novelty": {"enabled": True, "method": "nope"}}
-    with pytest.raises(ValueError, match=r"prompt\.scoring\.novelty\.method"):
-        RunConfig.from_dict(cfg_dict)
+    cfg, _warnings = RunConfig.from_dict(cfg_dict)
+    inputs = _make_inputs(cfg)
+    cfg_ns = ConfigNamespace(
+        {"novelty": {"enabled": True, "method": "nope"}},
+        path="prompt.stage_configs.resolved.blackbox.prepare",
+    )
+    with pytest.raises(ValueError, match=r"blackbox\.prepare\.novelty\.method"):
+        BLACKBOX_PREPARE.build(inputs, instance_id="blackbox.prepare", cfg=cfg_ns)
 
 
 def test_invalid_novelty_df_min_raises(tmp_path):
     cfg_dict = _base_cfg_dict(tmp_path)
-    cfg_dict["prompt"]["scoring"] = {
-        "enabled": True,
-        "novelty": {"enabled": True, "method": "df_overlap_v1", "df_min": 0},
-    }
-    with pytest.raises(ValueError, match=r"prompt\.scoring\.novelty\.df_min"):
-        RunConfig.from_dict(cfg_dict)
-
+    cfg, _warnings = RunConfig.from_dict(cfg_dict)
+    inputs = _make_inputs(cfg)
+    cfg_ns = ConfigNamespace(
+        {"novelty": {"enabled": True, "method": "df_overlap_v1", "df_min": 0}},
+        path="prompt.stage_configs.resolved.blackbox.prepare",
+    )
+    with pytest.raises(ValueError, match=r"blackbox\.prepare\.novelty\.df_min"):
+        BLACKBOX_PREPARE.build(inputs, instance_id="blackbox.prepare", cfg=cfg_ns)

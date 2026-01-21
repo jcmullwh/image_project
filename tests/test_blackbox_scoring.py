@@ -10,9 +10,9 @@ import pytest
 from PIL import Image
 
 from image_project.app import generate as app_generate
-from image_project.framework.config import PromptNoveltyConfig
 from image_project.framework import scoring as blackbox_scoring
-from image_project.impl.current import prompting as prompts
+from image_project.framework.scoring import NoveltyConfig
+from image_project.prompts import blackbox as blackbox_prompts
 
 
 def test_parse_idea_cards_json_valid():
@@ -131,7 +131,7 @@ def test_extract_recent_motif_summary(tmp_path):
 
     summary = blackbox_scoring.extract_recent_motif_summary(
         generations_csv_path=str(csv_path),
-        novelty_cfg=PromptNoveltyConfig(enabled=True, window=25),
+        novelty_cfg=NoveltyConfig(enabled=True, window=25),
     )
     tokens = {item["token"] for item in summary["top_tokens"]}
     assert "sunset" in tokens
@@ -147,10 +147,10 @@ def test_extract_recent_motif_summary_df_uses_document_frequency(tmp_path):
 
     summary = blackbox_scoring.extract_recent_motif_summary(
         generations_csv_path=str(csv_path),
-        novelty_cfg=PromptNoveltyConfig(
+        novelty_cfg=NoveltyConfig(
             enabled=True,
             window=25,
-            method="df_overlap_v1",  # type: ignore[arg-type]
+            method="df_overlap_v1",
             df_min=1,
         ),
     )
@@ -163,7 +163,7 @@ def test_df_overlap_penalty_normalization_prevents_trivial_saturation():
     tokens = ["alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel", "india", "juliet"]
     motifs = [{"token": tok, "df": 10, "w": 10} for tok in tokens]
     summary = {"enabled": True, "method": "df_overlap_v1", "motifs": motifs, "total_weight": 100}
-    cfg = PromptNoveltyConfig(enabled=True, window=25, method="df_overlap_v1")  # type: ignore[arg-type]
+    cfg = NoveltyConfig(enabled=True, window=25, method="df_overlap_v1")
 
     candidates = [
         {"id": "A", "prompt": "alpha"},
@@ -187,10 +187,10 @@ def test_df_overlap_scaffolding_stopwords_filtered(tmp_path):
 
     summary = blackbox_scoring.extract_recent_motif_summary(
         generations_csv_path=str(csv_path),
-        novelty_cfg=PromptNoveltyConfig(
+        novelty_cfg=NoveltyConfig(
             enabled=True,
             window=25,
-            method="df_overlap_v1",  # type: ignore[arg-type]
+            method="df_overlap_v1",
             df_min=2,
         ),
     )
@@ -199,20 +199,6 @@ def test_df_overlap_scaffolding_stopwords_filtered(tmp_path):
     assert "prompt" not in motif_tokens
     assert "image" not in motif_tokens
     assert "lighting" not in motif_tokens
-
-
-def test_legacy_v0_penalties_unchanged():
-    candidates = [{"id": "A", "prompt": "sunset ocean"}, {"id": "B", "prompt": "ocean only"}]
-    summary = {
-        "enabled": True,
-        "top_tokens": [{"token": "sunset", "count": 3}, {"token": "ocean", "count": 10}],
-    }
-    cfg = PromptNoveltyConfig(enabled=True, window=25, method="legacy_v0")  # type: ignore[arg-type]
-    penalties, breakdown = blackbox_scoring.novelty_penalties(
-        candidates, cfg, summary, text_field="prompt"
-    )
-    assert penalties == {"A": 8, "B": 5}
-    assert breakdown["A"]["penalty"] == 8
 
 
 def test_integration_scoring_enabled_isolated_from_downstream(tmp_path, monkeypatch):
@@ -330,14 +316,14 @@ def test_integration_scoring_enabled_isolated_from_downstream(tmp_path, monkeypa
             "profile_path": str(profile_path),
             "generations_path": str(generations_csv),
             "random_seed": 123,
-            "scoring": {
-                "enabled": True,
-                "num_ideas": num_ideas,
-                "exploration_rate": 0.0,
-                "judge_temperature": 0.0,
-                "judge_model": "judge-model",
-                "generator_profile_abstraction": True,
-                "novelty": {"enabled": False, "window": 0},
+            "plan": "blackbox",
+            "stage_configs": {
+                "defaults": {
+                    "blackbox.generator_profile_hints": {"mode": "abstract"},
+                    "blackbox.generate_idea_cards": {"num_ideas": num_ideas},
+                    "blackbox.idea_cards_judge_score": {"judge_model": "judge-model"},
+                    "blackbox.select_idea_card": {"num_ideas": num_ideas, "exploration_rate": 0.0},
+                }
             },
         },
         "image": {
@@ -354,11 +340,13 @@ def test_integration_scoring_enabled_isolated_from_downstream(tmp_path, monkeypa
     fake_text = FakeTextAI()
     monkeypatch.setattr(app_generate, "TextAI", lambda *args, **kwargs: fake_text)
     monkeypatch.setattr(app_generate, "ImageAI", FakeImageAI)
-    monkeypatch.setattr(prompts, "profile_abstraction_prompt", fake_profile_abstraction_prompt)
-    monkeypatch.setattr(prompts, "idea_card_generate_prompt", fake_idea_card_generate_prompt)
-    monkeypatch.setattr(prompts, "idea_cards_judge_prompt", fake_idea_cards_judge_prompt)
     monkeypatch.setattr(
-        prompts,
+        blackbox_prompts, "profile_abstraction_prompt", fake_profile_abstraction_prompt
+    )
+    monkeypatch.setattr(blackbox_prompts, "idea_card_generate_prompt", fake_idea_card_generate_prompt)
+    monkeypatch.setattr(blackbox_prompts, "idea_cards_judge_prompt", fake_idea_cards_judge_prompt)
+    monkeypatch.setattr(
+        blackbox_prompts,
         "final_prompt_from_selected_idea_prompt",
         fake_final_prompt_from_selected_idea_prompt,
     )
@@ -376,29 +364,23 @@ def test_integration_scoring_enabled_isolated_from_downstream(tmp_path, monkeypa
     assert transcript_path.exists()
 
     transcript = json.loads(transcript_path.read_text(encoding="utf-8"))
-    assert transcript["outputs"]["prompt_pipeline"]["requested_plan"] == "auto"
+    assert transcript["outputs"]["prompt_pipeline"]["requested_plan"] == "blackbox"
     assert transcript["outputs"]["prompt_pipeline"]["plan"] == "blackbox"
-    assert transcript["outputs"]["prompt_pipeline"]["refinement_policy"] == "tot"
+    assert transcript["outputs"]["prompt_pipeline"]["refinement_mode"] == "explicit_stages"
     assert transcript["outputs"]["prompt_pipeline"]["capture_stage"] == "blackbox.image_prompt_creation"
-    assert transcript["outputs"]["prompt_pipeline"]["blackbox_profile_sources"] == {
-        "judge_profile_source": "raw",
-        "final_profile_source": "raw",
-    }
     assert transcript["outputs"]["prompt_pipeline"]["resolved_stages"] == [
         "preprompt.select_concepts",
         "preprompt.filter_concepts",
         "blackbox.prepare",
-        "blackbox.profile_abstraction",
-        "blackbox.idea_card_generate.A",
-        "blackbox.idea_card_generate.B",
-        "blackbox.idea_cards_assemble",
+        "blackbox.generator_profile_hints",
+        "blackbox.generate_idea_cards",
         "blackbox.idea_cards_judge_score",
         "blackbox.select_idea_card",
         "blackbox.image_prompt_creation",
     ]
     assert transcript["blackbox_scoring"]["selected_id"] == expected_ids[1]
-    assert any(step["path"] == "pipeline/blackbox.idea_card_generate.A/draft" for step in transcript["steps"])
-    assert any(step["path"] == "pipeline/blackbox.idea_card_generate.B/draft" for step in transcript["steps"])
+    assert any(step["path"] == "pipeline/blackbox.generate_idea_cards/idea_A" for step in transcript["steps"])
+    assert any(step["path"] == "pipeline/blackbox.generate_idea_cards/idea_B" for step in transcript["steps"])
     assert any(
         step["path"] == "pipeline/blackbox.idea_cards_judge_score/draft"
         for step in transcript["steps"]

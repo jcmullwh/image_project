@@ -5,7 +5,7 @@ import random
 from dataclasses import dataclass, field
 from typing import Any
 
-from image_project.foundation.messages import MessageHandler
+from pipelinekit.engine.messages import MessageHandler
 from image_project.framework.config import RunConfig
 
 
@@ -29,4 +29,3 @@ class RunContext:
 
     image_path: str | None = None
     error: dict[str, Any] | None = None
-

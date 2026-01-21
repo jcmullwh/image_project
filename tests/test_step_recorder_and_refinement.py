@@ -4,12 +4,12 @@ import random
 
 import pytest
 
-from image_project.foundation.messages import MessageHandler
-from image_project.foundation.pipeline import Block, ChatRunner, ChatStep, NullStepRecorder
+from pipelinekit.engine.messages import MessageHandler
+from pipelinekit.engine.pipeline import Block, ChatRunner, ChatStep, NullStepRecorder
 from image_project.framework.config import RunConfig
-from image_project.framework.refinement import NoRefinement, TotEnclaveRefinement
 from image_project.framework.runtime import RunContext
-from image_project.framework.transcript import write_transcript
+from image_project.framework.artifacts import write_transcript
+from image_project.stages.refine.tot_enclave_prompts import make_tot_enclave_block
 
 
 def _make_ctx(tmp_path, logger_name: str = "test.step_recorder") -> RunContext:
@@ -127,36 +127,35 @@ def test_custom_recorder_receives_paths_and_metrics(tmp_path):
 
 
 def test_api_surface_exports_expected_symbols():
-    from image_project.foundation import pipeline  # noqa: PLC0415
-    from image_project.framework import refinement  # noqa: PLC0415
+    from pipelinekit.engine import pipeline  # noqa: PLC0415
+    from image_project.stages.refine import tot_enclave_prompts  # noqa: PLC0415
 
     assert hasattr(pipeline, "ChatRunner")
     assert hasattr(pipeline, "NullStepRecorder")
-    assert hasattr(refinement, "NoRefinement")
-    assert hasattr(refinement, "TotEnclaveRefinement")
+    assert hasattr(tot_enclave_prompts, "make_tot_enclave_block")
 
 
-def test_refinement_policy_stage_shapes():
-    no_refinement = NoRefinement()
-    stage = no_refinement.stage("stage_one", prompt="text", temperature=0.1)
-    assert isinstance(stage, Block)
-    assert stage.merge == "last_response"
-    assert stage.capture_key is None
-    assert isinstance(stage.nodes[0], ChatStep)
-    assert stage.nodes[0].name == "draft"
+def test_tot_enclave_block_shape():
+    enclave = make_tot_enclave_block("refine.tot_enclave")
+    assert isinstance(enclave, Block)
+    assert enclave.name == "tot_enclave"
+    assert enclave.merge == "all_messages"
+    assert any(isinstance(node, Block) and node.name == "fanout" for node in enclave.nodes)
+    assert any(isinstance(node, Block) and node.name == "reduce" for node in enclave.nodes)
 
-    tot_refinement = TotEnclaveRefinement()
-    stage_tot = tot_refinement.stage("stage_two", prompt="text", temperature=0.1, capture_key="cap")
-    assert isinstance(stage_tot, Block)
-    assert stage_tot.capture_key == "cap"
-    assert stage_tot.merge == "last_response"
-    assert isinstance(stage_tot.nodes[0], ChatStep)
-    assert stage_tot.nodes[0].name == "draft"
-    assert len(stage_tot.nodes) >= 2
-    assert isinstance(stage_tot.nodes[1], Block)
+    def _walk(node):
+        if isinstance(node, Block):
+            for child in node.nodes:
+                yield from _walk(child)
+            return
+        yield node
+
+    steps = [node for node in _walk(enclave) if isinstance(node, ChatStep)]
+    assert any(step.name == "hemingway" for step in steps)
+    assert any(step.name == "final_consensus" for step in steps)
 
 
-def test_tot_refinement_pipeline_runs_and_writes_transcript(tmp_path):
+def test_tot_enclave_stage_runs_and_writes_transcript(tmp_path):
     class FakeTextAI:
         def __init__(self) -> None:
             self.call_index = 0
@@ -167,15 +166,14 @@ def test_tot_refinement_pipeline_runs_and_writes_transcript(tmp_path):
             return value
 
     ctx = _make_ctx(tmp_path, "test.tot_integration")
-    refinement = TotEnclaveRefinement()
     pipeline_root = Block(
         name="pipeline",
         merge="all_messages",
         nodes=[
-            refinement.stage(
-                "tot_stage",
-                prompt="draft prompt",
-                temperature=0.1,
+            Block(
+                name="refine.tot_enclave",
+                merge="last_response",
+                nodes=[make_tot_enclave_block("refine.tot_enclave")],
                 capture_key="final_output",
             )
         ],
@@ -188,26 +186,23 @@ def test_tot_refinement_pipeline_runs_and_writes_transcript(tmp_path):
     transcript_path = tmp_path / "transcript.json"
     write_transcript(str(transcript_path), ctx)
     transcript = json.loads(transcript_path.read_text(encoding="utf-8"))
-    assert any("draft" in step["path"] for step in transcript["steps"])
     assert any("tot_enclave" in step["path"] for step in transcript["steps"])
 
 
-def test_tot_refinement_enclave_steps_have_own_provenance(tmp_path):
+def test_tot_enclave_steps_have_own_provenance(tmp_path):
     class FakeTextAI:
         def text_chat(self, messages, **kwargs):
             return "resp"
 
     ctx = _make_ctx(tmp_path, "test.tot_provenance")
-    refinement = TotEnclaveRefinement()
     pipeline_root = Block(
         name="pipeline",
         merge="all_messages",
         nodes=[
-            refinement.stage(
-                "tot_stage",
-                prompt="draft prompt",
-                temperature=0.1,
-                meta={"source": "parent.source", "doc": "Parent doc"},
+            Block(
+                name="refine.tot_enclave",
+                merge="last_response",
+                nodes=[make_tot_enclave_block("refine.tot_enclave")],
                 capture_key="final_output",
             )
         ],
@@ -217,14 +212,16 @@ def test_tot_refinement_enclave_steps_have_own_provenance(tmp_path):
     runner.run(ctx, pipeline_root)
 
     hemingway = next(
-        step for step in ctx.steps if step.get("path") == "pipeline/tot_stage/tot_enclave/hemingway"
+        step
+        for step in ctx.steps
+        if step.get("path") == "pipeline/refine.tot_enclave/tot_enclave/fanout/hemingway"
     )
     meta = hemingway.get("meta") or {}
     assert meta.get("source") == "refinement_enclave.enclave_thread_prompt"
     assert meta.get("doc") == "ToT enclave thread (Hemingway): critique + edits."
 
 
-def test_tot_refinement_stage_params_propagate_to_enclave_steps(tmp_path):
+def test_tot_enclave_stage_params_propagate_to_enclave_steps(tmp_path):
     class RecordingTextAI:
         def __init__(self) -> None:
             self.calls: list[dict[str, object]] = []
@@ -235,16 +232,15 @@ def test_tot_refinement_stage_params_propagate_to_enclave_steps(tmp_path):
 
     fake_ai = RecordingTextAI()
     ctx = _make_ctx(tmp_path, "test.tot_params")
-    refinement = TotEnclaveRefinement()
+    enclave = make_tot_enclave_block("refine.tot_enclave", params={"model": "model-x"})
     pipeline_root = Block(
         name="pipeline",
         merge="all_messages",
         nodes=[
-            refinement.stage(
-                "tot_stage",
-                prompt="draft prompt",
-                temperature=0.1,
-                params={"model": "model-x"},
+            Block(
+                name="refine.tot_enclave",
+                merge="last_response",
+                nodes=[enclave],
                 capture_key="final_output",
             )
         ],

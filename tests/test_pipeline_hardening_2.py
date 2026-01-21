@@ -5,8 +5,8 @@ import random
 import pytest
 from PIL import Image
 
-from image_project.foundation.messages import MessageHandler
-from image_project.foundation.pipeline import Block, ChatRunner, ChatStep
+from pipelinekit.engine.messages import MessageHandler
+from pipelinekit.engine.pipeline import Block, ChatRunner, ChatStep
 from image_project.framework.config import RunConfig, parse_bool
 from image_project.framework.media import save_image
 from image_project.framework.runtime import RunContext
