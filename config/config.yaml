@@ -109,7 +109,7 @@ prompt:
           model: null
           temperature: null
           weight: 1.0
-          rubric: novelty_heavy
+          rubric: strict
       aggregation: mean  # mean|median|min|max|trimmed_mean
       trimmed_mean_drop: 0
 
@@ -131,10 +131,10 @@ experiment:
   tags: []          # list[string]
 
 rclone:
-  enabled: false
+  enabled: true
   # Setup guide: docs/rclone-google-photos.md
-  remote: null
-  album: null
+  remote: gphotos_w_project
+  album: "The Day's Art"
 
 upscale:
   enabled: false
