@@ -19,6 +19,8 @@ When `--logs-dir` (and `--images-dir`) are omitted, the tool loads the pipeline 
 
 The tool writes `<generation_id>_run_report.json` and `<generation_id>_run_report.html` (or `<runA>_vs_<runB>_run_compare.*` in compare mode) to the current directory by default. Use `--output-dir` to change the destination.
 
+Generated report and comparison HTML/JSON files are ignored by Git, including the former generated examples under `examples/run_review/`. Keep reports with your local run artifacts and regenerate them using the commands above when needed.
+
 `--compare-experiment` reads `<experiment_dir>/pairs.json` (written by A/B experiment runners) and produces one HTML/JSON compare per pair, plus an `index.html` and `summary.json` in `--output-dir`.
 
 ## Behavior
