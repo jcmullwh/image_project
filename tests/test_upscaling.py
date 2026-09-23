@@ -4,7 +4,7 @@ from unittest.mock import patch
 import pytest
 from PIL import Image
 
-from upscaling import UpscaleConfig, _compute_target_size, upscale_image_to_4k
+from image_project.framework.media import UpscaleConfig, _compute_target_size, upscale_image_to_4k
 
 
 def test_compute_target_size_landscape():
@@ -150,7 +150,9 @@ def test_model_path_forwarded_to_runner(tmp_path: Path):
         Path(kwargs["output_path"]).parent.mkdir(parents=True, exist_ok=True)
         Image.new("RGB", (100, 100)).save(kwargs["output_path"], format="PNG")
 
-    with patch("upscaling._run_realesrgan_ncnn_vulkan", side_effect=fake_run) as mock_run:
+    with patch(
+        "image_project.framework.media._run_realesrgan_ncnn_vulkan", side_effect=fake_run
+    ) as mock_run:
         upscale_image_to_4k(input_path=str(in_path), output_path=str(out_path), config=cfg)
 
     mock_run.assert_called_once()

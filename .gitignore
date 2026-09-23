@@ -151,8 +151,24 @@ cython_debug/
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
 
-prompt_files/
+# Local interpreter, editor preferences, and scratch files
+/.pdm-python
+/.vscode/settings.json
+/_tmp_*
+
+# Local config overlays and machine-specific config (do not commit)
+config/config.local.yaml
+/config/config_repo_specific.yaml
+
+# Repo-local artifacts (logs, generated images, etc.)
 _artifacts/
-config.yaml
-*.csv
-.pdm-python
+_artifacts.bak_*/
+
+# Generated review reports (the CLI can write these outside _artifacts/)
+*_run_report.json
+*_run_report.html
+*_run_compare.json
+*_run_compare.html
+
+# Private/local implementation data (do not commit)
+image_project/impl/**/data/local/

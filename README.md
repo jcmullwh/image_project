@@ -6,16 +6,53 @@ Personal project exploring prompting and "art" generation. Takes randomly-select
 
 Uses tree-of-thought prompting, experiments with iterative improvement and identities to help guide prompt development.
 
+## Quickstart
+
+- Default config is `config/config.yaml` (`run.mode: full`) and writes artifacts under `./_artifacts/`.
+- Ensure your data files exist at `prompt.categories_path` / `prompt.profile_path` (defaults: `_artifacts/data/category_list_v1.csv` and `_artifacts/data/user_profile_v4.csv`).
+- Run: `pdm run generate`
+- Customize: create `config/config.local.yaml` (deep-merged over the base). Reference: `config/config.full_example.yaml`.
+
+### Shared artifacts (Windows + Google Drive Desktop)
+
+If you want multiple machines to share the same `_artifacts/` location (without passing `--output-root` to experiment tools), you can point the repo's `_artifacts/` directory at your Google Drive Desktop folder via a Windows directory junction.
+
+From the repo root:
+
+```powershell
+$cloud = "M:\My Drive\image_project\_artifacts"   # adjust to your Drive letter/path
+New-Item -ItemType Directory -Force -Path $cloud | Out-Null
+
+# Optional: keep any existing repo-local artifacts.
+if (Test-Path .\_artifacts) {
+  Rename-Item .\_artifacts ("_artifacts.bak_" + (Get-Date -Format yyyyMMdd_HHmmss))
+}
+
+cmd /c mklink /J _artifacts "$cloud"
+```
+
+To remove the junction later (does not delete the cloud contents): `cmd /c rmdir _artifacts`.
+
 ## Step-Driven Prompt Pipeline
 
 The generation workflow is implemented as a small, declarative chat pipeline built from **Steps** (`ChatStep`) and nested **Blocks** (`Block`). Each step records `{name, path, prompt, response, params, created_at}` into a JSON transcript for later inspection.
 
 See `docs/pipeline.md` for the execution model, merge modes, and the ToT/enclave wrapping pattern.
 
-### Add a new prompt step
+### Prompt Plans + Stage Modifiers
 
-1. Add a new prompt function (or inline prompt factory) in `prompts.py`.
-2. Add a new `ChatStep(...)` and include it in the `pipeline_root` construction in `main.run_generation()` (optionally wrap it as a `merge="last_response"` stage block and/or use `capture_key` to store the final output in `ctx.outputs`).
+The prompt pipeline is selected by `prompt.plan` and then modified by stage selectors/overrides (include/exclude/temperature/refinement/capture stage). This enables quick experiments without editing orchestration code.
+
+- Repo layering + boundaries: `docs/where_things_live.md`.
+- Docs + examples: `docs/experiments.md`
+- Built-in plans live in `image_project/impl/current/plans.py`.
+- Stage wiring lives in `image_project/stages/*/*.py`; prompt text helpers live in `image_project/prompts/*`. See `docs/stages.md` (generated).
+- New plans can be added by dropping a module under `image_project/impl/current/plan_plugins/` (no changes to `image_project/app/generate.py` required).
+
+Discoverability helpers:
+
+- List stages: `python -m image_project list-stages` (or `pdm run list-stages`)
+- List plans: `python -m image_project list-plans` (or `pdm run list-plans`)
 
 ### Hardening behavior (fail-fast + reliable artifacts)
 
@@ -28,30 +65,78 @@ See `docs/pipeline.md` for the execution model, merge modes, and the ToT/enclave
 
 ### Legacy code
 
-- `main.py` contains the canonical implementation (`run_generation()`).
-- `main_legacy.py` and `legacy_main.py` contain older experimental orchestration/helpers kept for reference.
+- Canonical entrypoint: `python -m image_project generate`.
+- Canonical orchestration: `image_project/app/generate.py` (`run_generation()`).
+- Older experiments are under `legacy/`.
 
 ## Configuration
 
-Required keys (fail-fast if missing/empty):
+Config loading:
 
-- `prompt.categories_path`
-- `prompt.profile_path`
-- `prompt.generations_path`
-- `image.generation_path` (preferred) or `image.save_path` (deprecated alias)
-- `image.upscale_path`
-- `image.log_path`
+- Base config: `config/config.yaml`
+- Optional local overlay: `config/config.local.yaml` (deep-merged on top; ignored by git)
+- Optional env override: set `IMAGE_PROJECT_CONFIG=/abs/path/to/config.yaml` to load a single file (no local overlay)
 
-Optional keys:
+### Required keys (conditional)
+
+Note: if `run.mode` is omitted, it defaults to `full`.
+
+`run.mode: prompt_only`:
+
+- Required:
+  - `image.log_path`
+  - `prompt.categories_path`
+  - `prompt.profile_path`
+- Optional (validated if present):
+  - `image.generation_path`
+  - `image.upscale_path`
+  - `prompt.generations_path`
+  - `prompt.titles_manifest_path`
+
+`run.mode: full` (default):
+
+- Required:
+  - `image.generation_path`
+  - `image.log_path`
+  - `prompt.categories_path`
+  - `prompt.profile_path`
+  - `prompt.generations_path`
+- Required only when enabled:
+  - `upscale.enabled: true` → `image.upscale_path`
+  - `rclone.enabled: true` → `rclone.remote` + `rclone.album`
+
+### Optional keys
 
 - `prompt.random_seed` (int): makes concept selection deterministic; if omitted, a seed is generated and logged.
-- `prompt.titles_manifest_path`: defaults to `<image.generation_path>/titles_manifest.csv` (logged at WARNING when defaulted).
+- Prompt plan selection:
+  - `prompt.plan: standard|blackbox|blackbox_refine|blackbox_refine_only|refine_only|baseline|simple|simple_no_concepts|direct|profile_only|profile_only_simple|custom`
+  - `prompt.plan=auto` is no longer supported.
+  - Refinement is an explicit stage (e.g. `refine.tot_enclave`) included by specific plans; disable by excluding it via `prompt.stages.exclude`.
+  - `prompt.stages.include` / `prompt.stages.exclude` / `prompt.stages.overrides`
+  - `prompt.output.capture_stage`
+  - `prompt.refine_only.draft` / `prompt.refine_only.draft_path`
+- Concept selection + filtering (preprompt stages), via stage-owned config:
+  - `prompt.stage_configs.defaults.preprompt.select_concepts.strategy: random|fixed|file`
+  - `prompt.stage_configs.defaults.preprompt.select_concepts.fixed` / `prompt.stage_configs.defaults.preprompt.select_concepts.file_path`
+  - `prompt.stage_configs.defaults.preprompt.filter_concepts.enabled` / `prompt.stage_configs.defaults.preprompt.filter_concepts.order`
+  - `prompt.stage_configs.defaults.preprompt.filter_concepts.dislike_rewrite.temperature`
+- `prompt.titles_manifest_path` (full mode): defaults to `<image.generation_path>/titles_manifest.csv` (logged at WARNING when defaulted).
+- Blackbox scoring + selection:
+  - Configured via `prompt.stage_configs.*` for `blackbox.*` stages (e.g. `blackbox.generate_idea_cards.num_ideas`, `blackbox.select_idea_card.exploration_rate`, `blackbox.*.judge_profile_source`).
+  - The refinement loop is configured under `prompt.stage_configs.defaults.blackbox_refine.loop` (iterations, algorithm, judges, mutation directives, etc.).
+  - Scoring details are recorded in the transcript under `blackbox_scoring` but are not merged into downstream prompt context.
+  - Details: `docs/scoring.md`
+- Run labeling (optional):
+  - `experiment.id` / `experiment.variant` / `experiment.notes` / `experiment.tags`
+  - Recorded in the transcript, `run_review` HTML/JSON, and the run index JSONL.
 - `image.caption_font_path`: optional `.ttf` for the caption overlay.
   - If explicitly set and the font cannot be loaded, the run fails loudly (no silent fallback).
 - Boolean flags (e.g. `rclone.enabled`, `upscale.enabled`) accept booleans, `0`/`1`, and strings `"true"`/`"false"`/`"1"`/`"0"`/`"yes"`/`"no"` (case-insensitive); other values raise.
+- Unknown keys under `prompt.*`, `context.*`, `image.*`, `rclone.*`, `upscale.*`, `experiment.*` produce warnings by default. Set top-level `strict: true` to turn these into errors.
 - Context injectors (default off):
   - `context.enabled` (bool): enable/disable context injection (default `false`).
   - `context.injectors` (list[str]): ordered injector names; if omitted while enabled, defaults to `["season", "holiday"]` with a WARNING.
+  - `context.injection_location` (string): `system|prompt|both` (default `system`).
   - `context.holiday.lookahead_days` (int), `context.holiday.base_probability` (float), `context.holiday.max_probability` (float).
   - `context.calendar.enabled` (bool): not implemented yet; if set `true`, the run fails fast with a clear `ValueError`.
 
@@ -82,15 +167,38 @@ Optional: set `image.caption_font_path` to a `.ttf` file to control the caption 
 
 ## Run Artifacts
 
-- Image: `<image.generation_path>/<generation_id>_image.jpg` (and optionally `<generation_id>_image_4k.jpg` when upscaling is enabled).
-- Generation CSV: `prompt.generations_path` with schema `generation_id`, `selected_concepts` (JSON string), `final_image_prompt`, `image_path`, `created_at`, `seed`.
+- Operational log entries include `[categories=<filename> profile=<filename>]` so input files remain identifiable throughout a run. Transcripts also record `categories_file`, `profile_file`, and the resolved `prompt_inputs` paths.
+- Prompt-only: `<image.log_path>/<generation_id>_final_prompt.txt`
+- Image (full mode): `<image.generation_path>/<generation_id>_image.jpg` (and optionally `<generation_id>_image_4k.jpg` when upscaling is enabled).
+- Generation CSV (full mode): `prompt.generations_path` with schema `generation_id`, `selected_concepts` (JSON string), `final_image_prompt`, `image_path`, `created_at`, `seed`.
 - Transcript JSON: `<image.log_path>/<generation_id>_transcript.json` with keys:
   - `generation_id`, `seed`, `selected_concepts`, `steps`, `image_path`, `created_at`
   - When context injection is enabled, the transcript also includes a `context` object (structured metadata keyed by injector name).
+  - The transcript includes a `blackbox_scoring` object (when enabled, includes score/selection metadata).
+  - When configured, the transcript includes `experiment: {id, variant, notes, tags}`.
+  - The transcript includes `outputs.prompt_pipeline` (requested/resolved plan and resolved stage ids).
+- Run index (JSONL): `<image.log_path>/runs_index.jsonl` (one line per run; includes experiment + prompt_pipeline + artifact paths).
+- Artifacts index (experiment/run/image registry): `_artifacts/index/experiments_index.json`, `_artifacts/index/experiment_registry.csv`, `_artifacts/index/run_registry.csv`, `_artifacts/index/image_registry.csv` (regenerated by `pdm run index-artifacts` and updated after runs).
+
+### Version control hygiene
+
+Keep reusable source, tests, documentation, planning records, sample data, shared config examples, and the README's example images in Git. Keep machine settings and generated output local:
+
+- PDM's `.pdm-python` and personal `.vscode/settings.json` are ignored. The shared `.vscode/launch.json` remains tracked.
+- Put machine-specific paths and settings in `config/config.local.yaml` or an external config selected with `IMAGE_PROJECT_CONFIG`. The older `config/config_repo_specific.yaml` is also ignored.
+- Root-level `_tmp_*` scratch files are ignored.
+- Generated `*_run_report.json`, `*_run_report.html`, `*_run_compare.json`, and `*_run_compare.html` reports are ignored, including when written outside `_artifacts/`. See [run_review](docs/run_review.md) to regenerate reports from run artifacts.
+
+Logs, caches, virtual environments, `_artifacts/`, and private implementation data remain ignored. Removing local settings or reports from Git tracking does not require deleting their local copies.
 
 ## How to run
 
-- Generate: `pdm run generate`
+- Generate (uses `config/config.yaml` + optional `config/config.local.yaml`): `pdm run generate`
+- List experiments: `python -m image_project experiments list`
+- 3x3 experiment (A/B/C × 3 runs each): `pdm run experiment-3x3` (add `--dry-run` to validate only)
+- Profile v5 3x3 experiment (A/B/C × 3 runs each): `pdm run experiment-profile-v5-3x3` (add `--dry-run` to validate only; requires profile CSV paths via flags or config)
+- A/B refinement-block experiment (prompt-only by default): `pdm run experiment-ab-refinement-block` (add `--dry-run` to validate only)
+- A/B SceneSpec JSON intermediary experiment (prompt-only by default): `pdm run experiment-ab-scenespec-json-intermediary` (add `--dry-run` to validate only)
 - Tests: `pdm run test` (or `pytest`)
 
 ## Examples:
@@ -118,7 +226,7 @@ horror elements
 **Title:** "The Festival of Life"
 
 **Prompt:**
-Create a vibrant, fantastical festival set in an enchanted forest from a bird's-eye view. The forest should be alive with swirling, psychedelic colorsâ€”vivid greens, deep purples, electric blues, and bright pinks. Depict trees with twisted branches that glow, interwoven with bioluminescent and holographic elements, symbolizing a fusion of nature and technology. 
+Create a vibrant, fantastical festival set in an enchanted forest from a bird's-eye view. The forest should be alive with swirling, psychedelic colors: vivid greens, deep purples, electric blues, and bright pinks. Depict trees with twisted branches that glow, interwoven with bioluminescent and holographic elements, symbolizing a fusion of nature and technology. 
 
 At the heart of the festival, include a diverse array of mythical creatures like fairies with iridescent wings and centaurs, alongside humans in colorful, flowing garments and futuristic beings such as robots and cyborgs. Show dynamic activities filled with communal joy: a centaur and a cyborg collaborating on an art project, fairies teaching a robot to levitate, and humans engaging in virtual reality experiences with mythical beings. 
 
@@ -133,7 +241,7 @@ Unity, diversity, harmony, communal joy, nature and technology fusion, magical m
 
 ### Result
 
-![Example Image](example_images/20240527_205225_890de5a3-9201-4f38-8d12-bf90a9c717b0_image.jpg)
+![Example Image](examples/images/20240527_205225_890de5a3-9201-4f38-8d12-bf90a9c717b0_image.jpg)
 
 ### Random Concepts:
 
@@ -165,42 +273,27 @@ Fast-paced action movies
 - **Symbolic Details:** The desk includes a broken clock, scattered keys, and torn pages with cryptic messages, symbolizing hidden truths and fragmented thoughts. Faint, ghostly figures from the dreamscape subtly interact with the real-world elements, further blurring the lines between reality and dreams.
 - **Lighting and Shadows:** Dramatic lighting casts stark contrasts and eerie shadows, enhancing the dreamlike and unsettling mood of the scene. Monochromatic tones in shades of brown and sepia dominate the real-world elements, contrasting sharply with the vivid violet and vibrant yellow hues of the dreamscape.
 - **Action and Emotion Words:** Asleep, floating, lurking, breaking, hinting, interacting. Peaceful, uneasy, ethereal, vivid, disorienting, surreal, dramatic, eerie, transparent.
-- **Art Style:** A blend of realistic and surrealist artistry, with the detective’s environment rendered in a detailed, realistic manner and the dreamscape featuring fluid, abstract forms.
+- **Art Style:** A blend of realistic and surrealist artistry, with the detective's environment rendered in a detailed, realistic manner and the dreamscape featuring fluid, abstract forms.
 
 **Narrative and Thematic Symbolism:**
-- **Subconscious Exploration:** The detective’s journey into his subconscious, where intuition and imagination guide him through a disorienting blend of reality and dreams. The dreamscape reveals not just fantastical elements but also hidden truths and emotional connections.
+- **Subconscious Exploration:** The detective's journey into his subconscious, where intuition and imagination guide him through a disorienting blend of reality and dreams. The dreamscape reveals not just fantastical elements but also hidden truths and emotional connections.
 - **Emotional and Psychological Tension:** Tension between the conscious mind and subconscious revelations is depicted through the merging of dream elements with reality, creating a sense of disorientation and introspection.
 
 ### Result
 
-![Example Image](example_images/20240530_154914_1ec45606-4a4c-4e27-955c-ee9d1caa107c_image.jpg)
+![Example Image](examples/images/20240530_154914_1ec45606-4a4c-4e27-955c-ee9d1caa107c_image.jpg)
 
 ### Notes:
 
   Current prompting methods seem to repeatedly hone in on sunset/sunrise and environmental themes. Trees are frequently incorporated. Would be interesting to explore further.
 
-## Future Directions:
-- integrate like/dislike mechanism
-    - MVP like/dislike input mechanism
-    - MVP like/dislike tracking
-    - language tracking ("I don't like how it's too dark")
-    - language tracking -> like/dislike variables
+## Future Directions
 
-- Frequency adjustments based on likes/dislikes and recent-ness
-
-- Implement injection of local/current things (date, season, location, etc.)
-
-- Programmatically modify prompt structure and implement variations.
-- Implement prompting A/B testing
-
-- integrate grading mechanism based on how well it aligns with the selected concepts and additional requirements
-
-- automatically generate categories concepts at first install
-
-- Display Frontend
-
-- Integrate with midjourney API when available
-    - Automate assessment and selection of upscaling/variation images
+- Expand context injection (e.g., weather/location/calendar) and document injector authoring.
+- Add more experiment plugins and standardized post-run analysis hooks.
+- Improve experiment determinism/resume (e.g., deterministic `generation_id` option; richer resume reports).
+- Add a small UI for browsing experiment artifacts and run_review reports.
+- Integrate Midjourney API when available.
 
 ## 4K Upscaling (Optional)
 
@@ -263,7 +356,7 @@ When enabled, the script saves an additional file named:
 To manually test upscaling on any image, use the helper script:
 
 ```
-python scripts/manual_upscale.py path/to/image.jpg
+pdm run manual-upscale path/to/image.jpg
 ```
 
 - Writes the result next to the input as `image_4k.jpg` (same extension preserved).
