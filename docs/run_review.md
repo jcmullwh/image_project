@@ -29,6 +29,7 @@ Generated report and comparison HTML/JSON files are ignored by Git, including th
 - **Most recent:** `--most-recent` picks the most recently modified run in `--logs-dir`. If no run selector is provided, the CLI defaults to `--most-recent` and prints a message describing the behavior.
 - **Best effort:** By default the tool requires both oplog + transcript; when `--best-effort` is set, missing artifacts produce warnings instead of hard failures.
 - **Oplog formats:** Both `YYYY-mm-dd HH:MM:SS,mmm LEVEL message` and `YYYY-mm-dd HH:MM:SS,mmm | LEVEL | message` headers are supported.
+- **Input-file attribution:** The optional `[categories=... profile=...]` suffix is retained in raw log lines and excluded from parsing step metrics and artifact paths.
 - **Parsing:** The oplog parser extracts run boundaries, config defaults, seed selection, context injection, step start/end markers, image generation, upscaling, manifest appends, uploads, and file writes. Unrecognized lines are retained under `unknown_events`.
 - **Transcript:** The transcript parser tolerates older schemas and surfaces optional fields like `context`, `title_generation`, and `concept_filter_log` when present.
 - **Experiment + plan metadata:** When present in the transcript, `experiment` and `outputs.prompt_pipeline` are included in both the JSON and HTML reports.

@@ -167,6 +167,7 @@ Optional: set `image.caption_font_path` to a `.ttf` file to control the caption 
 
 ## Run Artifacts
 
+- Operational log entries include `[categories=<filename> profile=<filename>]` so input files remain identifiable throughout a run. Transcripts also record `categories_file`, `profile_file`, and the resolved `prompt_inputs` paths.
 - Prompt-only: `<image.log_path>/<generation_id>_final_prompt.txt`
 - Image (full mode): `<image.generation_path>/<generation_id>_image.jpg` (and optionally `<generation_id>_image_4k.jpg` when upscaling is enabled).
 - Generation CSV (full mode): `prompt.generations_path` with schema `generation_id`, `selected_concepts` (JSON string), `final_image_prompt`, `image_path`, `created_at`, `seed`.

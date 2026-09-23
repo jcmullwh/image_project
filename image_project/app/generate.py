@@ -125,7 +125,37 @@ def configure_stdio_utf8():
         # If reconfigure is unavailable, continue with defaults.
         pass
 
-def setup_operational_logger(log_dir: str, generation_id: str):
+class _RunFilesFilter(logging.Filter):
+    """Attach run and input-file identifiers to each operational log record."""
+
+    def __init__(
+        self,
+        generation_id: str,
+        *,
+        categories_path: str | None,
+        profile_path: str | None,
+    ) -> None:
+        """Record the selected inputs; '-' identifies unavailable config paths."""
+        super().__init__()
+        self.generation_id = generation_id
+        self.categories_file = os.path.basename(categories_path) if categories_path else "-"
+        self.profile_file = os.path.basename(profile_path) if profile_path else "-"
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        """Populate formatter fields without changing the log message."""
+        record.generation_id = self.generation_id
+        record.categories_file = self.categories_file
+        record.profile_file = self.profile_file
+        return True
+
+
+def setup_operational_logger(
+    log_dir: str,
+    generation_id: str,
+    *,
+    categories_path: str | None = None,
+    profile_path: str | None = None,
+):
     """
     Configure a logger that writes an operational log for traceability.
     Logs go to both stdout and a UTF-8 file under the provided directory.
@@ -137,8 +167,19 @@ def setup_operational_logger(log_dir: str, generation_id: str):
     logger = logging.getLogger(logger_name)
     logger.setLevel(logging.DEBUG)
     logger.handlers.clear()
+    logger.filters.clear()
+    logger.addFilter(
+        _RunFilesFilter(
+            generation_id,
+            categories_path=categories_path,
+            profile_path=profile_path,
+        )
+    )
 
-    formatter = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
+    formatter = logging.Formatter(
+        "%(asctime)s | %(levelname)s | %(message)s "
+        "[categories=%(categories_file)s profile=%(profile_file)s]"
+    )
 
     file_handler = logging.FileHandler(log_file, encoding="utf-8")
     file_handler.setLevel(logging.DEBUG)
@@ -302,7 +343,12 @@ def run_generation(
     )
 
     generation_id = generation_id or generate_unique_id()
-    logger, operational_log_path = setup_operational_logger(cfg.log_dir, generation_id)
+    logger, operational_log_path = setup_operational_logger(
+        cfg.log_dir,
+        generation_id,
+        categories_path=prompt_cfg.categories_path,
+        profile_path=prompt_cfg.profile_path,
+    )
     run_index_path = os.path.join(cfg.log_dir, "runs_index.jsonl")
 
     if config_meta:

@@ -14,6 +14,7 @@ TIMESTAMP_SPACE_RE = re.compile(
 TIMESTAMP_PIPE_RE = re.compile(
     r"^(?P<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3})\s*\|\s*(?P<level>\w+)\s*\|\s*(?P<msg>.*)$"
 )
+PROMPT_FILES_SUFFIX_RE = re.compile(r"\s+\[categories=.*? profile=.*?\]$")
 
 RUN_START_FOR_GENERATION_RE = re.compile(r"^Run started for generation\s+(?P<id>\S+)", re.IGNORECASE)
 RUN_START_KV_RE = re.compile(r"^Run started.*generation_id=(?P<id>\S+)", re.IGNORECASE)
@@ -104,7 +105,8 @@ def _parse_timestamp(line: str) -> tuple[datetime | None, str | None, str]:
         return None, None, raw.strip()
     ts_raw = match.group("ts")
     level = match.group("level")
-    message = match.group("msg").strip()
+    # Keep file metadata in each event's raw line, outside semantic message parsing.
+    message = PROMPT_FILES_SUFFIX_RE.sub("", match.group("msg").strip())
     try:
         ts = datetime.strptime(ts_raw, "%Y-%m-%d %H:%M:%S,%f")
     except ValueError:

@@ -647,6 +647,13 @@ def test_integration_offline_run_generation_writes_artifacts(tmp_path, monkeypat
 
     transcript = json.loads(transcript_path.read_text(encoding="utf-8"))
     assert transcript["generation_id"] == generation_id
+    assert transcript["categories_file"] == categories_path.name
+    assert transcript["profile_file"] == profile_path.name
+    oplog_path = log_dir / f"{generation_id}_oplog.log"
+    assert (
+        f"[categories={categories_path.name} profile={profile_path.name}]"
+        in oplog_path.read_text(encoding="utf-8")
+    )
     assert transcript["outputs"]["prompt_pipeline"]["requested_plan"] == "standard"
     assert transcript["outputs"]["prompt_pipeline"]["plan"] == "standard"
     assert transcript["outputs"]["prompt_pipeline"]["refinement_mode"] == "explicit_stages"

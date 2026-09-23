@@ -1,6 +1,7 @@
 import json
 import os
 import re
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -46,6 +47,34 @@ def _sample_oplog(tmpdir: Path) -> Path:
         + "\n",
     )
     return log
+
+
+@pytest.mark.parametrize("pipe_format", [True, False])
+def test_prompt_file_metadata_preserves_parsed_events(tmp_path: Path, pipe_format: bool):
+    """Input-file attribution must not change step metrics or artifact paths."""
+    oplog = _sample_oplog(tmp_path)
+    contents = oplog.read_text(encoding="utf-8")
+    if not pipe_format:
+        contents = contents.replace(" | ", " ")
+        oplog.write_text(contents, encoding="utf-8")
+    expected_events, expected_unknown, expected_effects = parse_oplog(str(oplog))
+
+    suffix = " [categories=category list.csv profile=user profile.csv]"
+    attributed_log = tmp_path / "attributed_oplog.log"
+    attributed_log.write_text(
+        "\n".join(line + suffix for line in contents.splitlines()) + "\n",
+        encoding="utf-8",
+    )
+    events, unknown, effects = parse_oplog(str(attributed_log))
+
+    assert [replace(event, raw="") for event in events] == [
+        replace(event, raw="") for event in expected_events
+    ]
+    assert [replace(effect, raw="") for effect in effects] == [
+        replace(effect, raw="") for effect in expected_effects
+    ]
+    assert unknown == expected_unknown == []
+    assert all(event.raw.endswith(suffix) for event in events)
 
 
 def _sample_transcript(tmpdir: Path) -> Path:
